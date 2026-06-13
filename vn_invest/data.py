@@ -593,3 +593,141 @@ def get_company_dividends(symbol: str, source: str = "VCI") -> list[dict]:
         return df.head(10).to_dict("records")
     except Exception:
         return []
+
+
+def get_side_stats(symbol: str, source: str = "VCI") -> dict:
+    """Lấy thống kê áp lực mua/bán (buy/sell side stats).
+
+    Returns:
+        {
+          "buy_vol": float,   # Khối lượng mua chủ động
+          "sell_vol": float,  # Khối lượng bán chủ động
+          "buy_pct": float,   # % mua
+          "sell_pct": float,  # % bán
+          "net_vol": float,   # Net = buy - sell
+          "raw": dict,        # Raw data từ vnstock
+        }
+    """
+    result = {"buy_vol": None, "sell_vol": None, "buy_pct": None,
+              "sell_pct": None, "net_vol": None, "raw": {}}
+    try:
+        stock = _get_stock(symbol, source)
+        df = stock.trading.side_stats()
+        if df is None or df.empty:
+            return result
+        row = df.iloc[0]
+        raw = row.to_dict()
+        result["raw"] = {k: v for k, v in raw.items()
+                         if v is not None and str(v) not in ("nan", "None")}
+
+        # Tìm cột buy/sell linh hoạt theo tên
+        def _find(keys):
+            for k in keys:
+                v = _clean_float(raw.get(k))
+                if v is not None:
+                    return v
+            return None
+
+        buy = _find(["bu", "buy_volume", "buy_vol", "active_buy", "buyVol"])
+        sel = _find(["sd", "sell_volume", "sell_vol", "active_sell", "sellVol"])
+
+        if buy is not None and sel is not None:
+            total = buy + sel
+            result["buy_vol"]  = buy
+            result["sell_vol"] = sel
+            result["net_vol"]  = buy - sel
+            result["buy_pct"]  = round(buy / total * 100, 1) if total else None
+            result["sell_pct"] = round(sel / total * 100, 1) if total else None
+    except Exception:
+        pass
+    return result
+
+
+def get_market_indices() -> list[dict]:
+    """Lấy chỉ số thị trường: VN-Index, HNX-Index, UPCOM, VN30.
+
+    Returns list of {index_id, index_value, change, pct_change, trading_date}
+    """
+    try:
+        import io, sys
+        from vnstock import Listing
+        _old, sys.stdout = sys.stdout, io.StringIO()
+        try:
+            listing = Listing()
+        finally:
+            sys.stdout = _old
+
+        df = listing.indices()
+        if df is None or df.empty:
+            return []
+
+        results = []
+        cols = list(df.columns)
+
+        def _col(*names):
+            for n in names:
+                if n in cols:
+                    return n
+            return None
+
+        id_col    = _col("index_id", "indexId", "code", "symbol")
+        val_col   = _col("index_value", "indexValue", "close", "value", "close_price")
+        chg_col   = _col("change", "point_change", "change_point")
+        pct_col   = _col("pct_change", "percent_change", "change_percent", "change_pct")
+        date_col  = _col("trading_date", "date", "time")
+
+        _TARGET = {"VNINDEX", "HNXINDEX", "UPCOMINDEX", "VN30", "HNX30"}
+        for _, row in df.iterrows():
+            idx_id = str(row.get(id_col, "")).upper() if id_col else ""
+            if _TARGET and idx_id not in _TARGET:
+                continue
+            results.append({
+                "index_id":     idx_id,
+                "index_value":  _clean_float(row.get(val_col))  if val_col  else None,
+                "change":       _clean_float(row.get(chg_col))  if chg_col  else None,
+                "pct_change":   _clean_float(row.get(pct_col))  if pct_col  else None,
+                "trading_date": str(row.get(date_col, ""))[:10] if date_col  else "",
+            })
+        return results
+    except Exception:
+        return []
+
+
+def get_capital_history(symbol: str, source: str = "VCI") -> list[dict]:
+    """Lấy lịch sử tăng vốn điều lệ / phát hành thêm cổ phiếu.
+
+    Returns list of {date, event_type, charter_capital, issue_share, ratio, notes}
+    """
+    try:
+        stock = _get_stock(symbol, source)
+        df = stock.company.capital_history()
+        if df is None or df.empty:
+            return []
+        cols = list(df.columns)
+
+        def _col(*names):
+            for n in names:
+                if n in cols:
+                    return n
+            return None
+
+        date_col  = _col("issue_date", "date", "exercise_date", "public_date")
+        type_col  = _col("issue_method", "event_type", "type", "method")
+        cap_col   = _col("charter_capital", "new_capital", "capital_after")
+        share_col = _col("issue_share", "shares_issued", "quantity", "volume")
+        ratio_col = _col("ratio", "issue_ratio", "rate")
+        note_col  = _col("notes", "description", "title", "details")
+
+        results = []
+        for _, row in df.iterrows():
+            results.append({
+                "date":            str(row.get(date_col, ""))[:10] if date_col else "",
+                "event_type":      str(row.get(type_col, ""))      if type_col else "",
+                "charter_capital": _clean_float(row.get(cap_col))  if cap_col  else None,
+                "issue_share":     _clean_float(row.get(share_col))if share_col else None,
+                "ratio":           _clean_float(row.get(ratio_col))if ratio_col else None,
+                "notes":           str(row.get(note_col, ""))       if note_col  else "",
+            })
+        return results[:20]
+    except Exception:
+        return []

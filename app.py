@@ -21,7 +21,8 @@ import streamlit as st
 
 from vn_invest.data import (get_price_history, get_financial_ratios_history, get_company_overview,
                             get_company_news, get_company_events, get_company_dividends,
-                            get_company_shareholders, get_financial_statements, get_stock_status)
+                            get_company_shareholders, get_financial_statements, get_stock_status,
+                            get_side_stats, get_market_indices, get_capital_history)
 from vn_invest.indicators import add_all_indicators, get_latest_signals
 from vn_invest.lstm import predict as lstm_predict, model_ready, get_model_info
 from vn_invest.screener import (load_cache, scan_ami_watchlist, scan_ami_symbol,
@@ -75,6 +76,18 @@ def _fetch_price(sym, d, src):
     df = get_price_history(sym, days=d, source=src)
     return add_all_indicators(df) if df is not None and not df.empty else None
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_side_stats(sym, src):
+    return get_side_stats(sym, source=src)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_market_indices():
+    return get_market_indices()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_capital_history(sym):
+    return get_capital_history(sym, source="VCI")
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _APP_DIR     = Path(__file__).parent
 _METRICS_FILE = _APP_DIR / "data" / "model_metrics.json"
@@ -109,6 +122,28 @@ with st.sidebar:
     st.title("📈 VN Invest")
     st.caption("Phân tích chứng khoán Việt Nam")
     st.divider()
+
+    # ── Chỉ số thị trường ──────────────────────────────────────────────────
+    _indices = _fetch_market_indices()
+    _IDX_LABEL = {
+        "VNINDEX": "VN-Index", "HNXINDEX": "HNX",
+        "UPCOMINDEX": "UPCOM",  "VN30": "VN30", "HNX30": "HNX30",
+    }
+    _IDX_ORDER = ["VNINDEX", "HNXINDEX", "UPCOMINDEX", "VN30"]
+    _idx_map = {r["index_id"]: r for r in _indices}
+    _show = [_idx_map[k] for k in _IDX_ORDER if k in _idx_map]
+    if _show:
+        _cols = st.columns(len(_show))
+        for _ci, _idx in enumerate(_show):
+            _val = _idx.get("index_value")
+            _pct = _idx.get("pct_change")
+            _chg = _idx.get("change")
+            _lbl = _IDX_LABEL.get(_idx["index_id"], _idx["index_id"])
+            _val_str = f"{_val:,.2f}" if _val else "—"
+            _delta_str = f"{_pct:+.2f}%" if _pct is not None else (f"{_chg:+.2f}" if _chg else None)
+            _cols[_ci].metric(_lbl, _val_str, _delta_str, delta_color="normal")
+        st.divider()
+
     symbol_input = st.text_input("Mã cổ phiếu", value="HPG", max_chars=10).upper().strip()
     source = st.selectbox("Nguồn dữ liệu", ["KBS", "VCI"], index=0)
     days = st.slider("Lịch sử (ngày)", 60, 365, 120)
@@ -1038,11 +1073,12 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
     st.subheader("📰 Thông tin doanh nghiệp")
 
     with st.spinner("Đang tải tin tức & sự kiện..."):
-        news_list     = _fetch_news(symbol_input)
-        events_list   = _fetch_events(symbol_input)
+        news_list      = _fetch_news(symbol_input)
+        events_list    = _fetch_events(symbol_input)
         dividends_list = _fetch_dividends(symbol_input)
+        capital_hist   = _fetch_capital_history(symbol_input)
 
-    news_tab, events_tab, div_tab = st.tabs(["📰 Tin tức", "📅 Sự kiện", "💰 Cổ tức"])
+    news_tab, events_tab, div_tab, cap_tab = st.tabs(["📰 Tin tức", "📅 Sự kiện", "💰 Cổ tức", "🏦 Lịch sử tăng vốn"])
 
     with news_tab:
         if not news_list:
@@ -1106,6 +1142,35 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
             except Exception:
                 st.json(dividends_list)
 
+    with cap_tab:
+        if not capital_hist:
+            st.info("Không có dữ liệu lịch sử tăng vốn.")
+        else:
+            try:
+                df_cap = pd.DataFrame(capital_hist)
+                # Đổi tên cột thân thiện
+                rename_map = {
+                    "date":            "Ngày",
+                    "event_type":      "Loại sự kiện",
+                    "charter_capital": "Vốn điều lệ (tỷ)",
+                    "issue_share":     "Cổ phiếu phát hành",
+                    "ratio":           "Tỷ lệ",
+                    "notes":           "Ghi chú",
+                }
+                df_cap = df_cap.rename(columns={k: v for k, v in rename_map.items() if k in df_cap.columns})
+                # Chuyển vốn điều lệ sang tỷ đồng nếu đơn vị là đồng
+                if "Vốn điều lệ (tỷ)" in df_cap.columns:
+                    _cap_col = df_cap["Vốn điều lệ (tỷ)"]
+                    if _cap_col.dropna().max() > 1e10:   # đơn vị đồng → chia 1e9
+                        df_cap["Vốn điều lệ (tỷ)"] = _cap_col / 1e9
+                st.dataframe(df_cap, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Vốn điều lệ (tỷ)": st.column_config.NumberColumn(format="%,.1f"),
+                        "Tỷ lệ":             st.column_config.NumberColumn(format="%.2f"),
+                    })
+            except Exception:
+                st.json(capital_hist)
+
     # ── Chatbot Cơ Bản ───────────────────────────────────────────────────────
     st.divider()
     _sh_data_for_chat = _fetch_shareholders(symbol_input)
@@ -1140,6 +1205,32 @@ with tab_tech:
         c3.metric("Tín hiệu", sig["signal"])
         c4.metric("Rủi ro", sig["risk"])
         c5.metric("Giai đoạn", sig["phase"])
+
+        # ── Áp lực mua/bán (side_stats) ──────────────────────────────────
+        _ss = _fetch_side_stats(symbol_input, "VCI")
+        if _ss.get("buy_vol") is not None:
+            st.divider()
+            st.subheader("⚖️ Áp lực mua/bán")
+            _buy_pct  = _ss["buy_pct"]  or 0
+            _sell_pct = _ss["sell_pct"] or 0
+            _net      = _ss["net_vol"]  or 0
+            _net_dir  = "🟢 Thiên mua" if _net > 0 else ("🔴 Thiên bán" if _net < 0 else "⚖️ Cân bằng")
+
+            ss1, ss2, ss3, ss4 = st.columns(4)
+            ss1.metric("Mua chủ động",  f"{_ss['buy_vol']/1e6:.2f}M CP",  f"{_buy_pct:.1f}%")
+            ss2.metric("Bán chủ động",  f"{_ss['sell_vol']/1e6:.2f}M CP", f"{_sell_pct:.1f}%")
+            ss3.metric("Net khối lượng",f"{_net/1e6:+.2f}M CP")
+            ss4.metric("Nhận định",     _net_dir)
+
+            # Progress bar tỷ lệ mua/bán
+            st.markdown(
+                f"<div style='display:flex;height:12px;border-radius:6px;overflow:hidden;margin:4px 0 8px'>"
+                f"<div style='width:{_buy_pct}%;background:#00e676'></div>"
+                f"<div style='width:{_sell_pct}%;background:#ff1744'></div>"
+                f"</div>"
+                f"<small style='color:#aaa'>🟢 Mua {_buy_pct:.1f}% &nbsp;|&nbsp; 🔴 Bán {_sell_pct:.1f}%</small>",
+                unsafe_allow_html=True,
+            )
 
         st.divider()
 
