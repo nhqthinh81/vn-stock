@@ -159,6 +159,17 @@ def _build_prompt(
     period_header = " | ".join(periods[:6])
     profile_short = str(profile).strip()[:800] if profile else "Khong co"
 
+    # 0. Giá hàng hóa thực tế (FRED) theo ngành
+    commodity_block = ""
+    try:
+        from vn_invest.news_fetcher import get_commodity_prices
+        prices = get_commodity_prices(sector)
+        if prices:
+            lines = [f"  {p['label']}: {p['value']:,.2f} (ngay {p['date']})" for p in prices]
+            commodity_block = "Gia hang hoa thi truong (FRED - Federal Reserve):\n" + "\n".join(lines)
+    except Exception:
+        pass
+
     # 1. Tin tức thời sự từ RSS báo uy tín + cross-check quốc tế
     news_block = ""
     rss_error = ""
@@ -267,6 +278,8 @@ Hay phan tich BCTC cua **{symbol} - {company_name}** (nganh: {sector}).
 
 {sh_block}
 {macro_block}
+
+{commodity_block}
 
 {price_block}
 

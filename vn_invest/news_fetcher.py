@@ -1,7 +1,7 @@
 """Lay tin tuc thi truong thoi su tu RSS bao uy tin Viet Nam va quoc te.
 
-Nguon Viet Nam  : VnEconomy, VnExpress
-Nguon quoc te   : SCMP, Bloomberg, Financial Times
+Nguon Viet Nam  : VnEconomy, VnExpress, CafeF
+Nguon quoc te   : Reuters, SCMP, Mining.com, SteelOrbis
 Cross-check     : Phat hien mau thuan giua tin VN va quoc te
 """
 import re
@@ -12,20 +12,24 @@ import httpx
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 }
 
 # [tag, url, ngon_ngu]
 _RSS_SOURCES = [
     # Viet Nam
-    ("VnEconomy [VN]",  "https://vneconomy.vn/chung-khoan.rss",        "vi"),
-    ("VnEconomy [VN]",  "https://vneconomy.vn/kinh-te.rss",             "vi"),
-    ("VnExpress [VN]",  "https://vnexpress.net/rss/kinh-doanh.rss",     "vi"),
-    # Quoc te
-    ("SCMP [INT]",      "https://www.scmp.com/rss/91/feed",             "en"),
-    ("Bloomberg [INT]", "https://feeds.bloomberg.com/markets/news.rss", "en"),
-    ("FT [INT]",        "https://www.ft.com/rss/home/uk",               "en"),
+    ("VnEconomy [VN]",  "https://vneconomy.vn/chung-khoan.rss",             "vi"),
+    ("VnEconomy [VN]",  "https://vneconomy.vn/kinh-te.rss",                 "vi"),
+    ("VnExpress [VN]",  "https://vnexpress.net/rss/kinh-doanh.rss",         "vi"),
+    ("CafeF [VN]",      "https://cafef.vn/thi-truong-chung-khoan.rss",      "vi"),
+    # Quoc te chung
+    ("Reuters [INT]",   "https://feeds.reuters.com/reuters/businessNews",    "en"),
+    ("SCMP [INT]",      "https://www.scmp.com/rss/91/feed",                  "en"),
+    # Chuyen nganh hang hoa / kim loai / thep
+    ("Mining.com [INT]","https://www.mining.com/feed/",                      "en"),
+    ("SteelOrbis [INT]","https://www.steelorbis.com/steel-news/rss.xml",     "en"),
+    ("Reuters Metals",  "https://feeds.reuters.com/reuters/companyNews",     "en"),
 ]
 
 _cache: dict = {}
@@ -242,6 +246,88 @@ def detect_conflicts(articles: list[dict]) -> list[str]:
             conflicts.append(note)
 
     return conflicts
+
+
+# ── Commodity prices (FRED API — free, no key) ───────────────────────────────
+
+_COMMODITY_MAP = {
+    # sector key → list of (label, FRED series_id)
+    "steel": [
+        ("Quang sat (Iron Ore, USD/MT)",    "PIORECRUSDM"),
+        ("Dong (Copper, USD/MT)",           "PCOPPUSDM"),
+    ],
+    "oil gas": [
+        ("Dau thu Brent (USD/barrel)",      "DCOILBRENTEU"),
+        ("Khi tu nhien Henry Hub (USD/MMBtu)", "DHHNGSP"),
+    ],
+    "seafood": [
+        ("Chi so gia luong thuc FAO",       "PFOODINDEXM"),
+    ],
+    "real estate": [
+        ("Lai suat 30Y My (%)",             "MORTGAGE30US"),
+    ],
+}
+
+_commodity_cache: dict = {}
+_COMMODITY_TTL = 3600  # 1 gio
+
+
+def get_commodity_prices(sector: str) -> list[dict]:
+    """Lay gia hang hoa tu FRED API theo nganh.
+
+    Returns list of {label, value, unit, date, source}.
+    Miễn phí, không cần API key.
+    """
+    sector_key = None
+    s = sector.lower()
+    for k in _COMMODITY_MAP:
+        if k in s:
+            sector_key = k
+            break
+    if not sector_key:
+        return []
+
+    cache_key = sector_key
+    now = time.time()
+    if _commodity_cache.get(cache_key) and now - _commodity_cache.get(cache_key + "_t", 0) < _COMMODITY_TTL:
+        return _commodity_cache[cache_key]
+
+    FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+    results = []
+    try:
+        client = httpx.Client(timeout=10, follow_redirects=True)
+        for label, series_id in _COMMODITY_MAP[sector_key]:
+            try:
+                r = client.get(f"{FRED_BASE}?id={series_id}")
+                if r.status_code != 200:
+                    continue
+                lines = [l for l in r.text.strip().splitlines() if l and not l.startswith("DATE")]
+                if not lines:
+                    continue
+                # Lay dong cuoi cung co gia tri hop le (khong phai '.')
+                for line in reversed(lines):
+                    parts = line.split(",")
+                    if len(parts) == 2 and parts[1].strip() != ".":
+                        try:
+                            val = float(parts[1].strip())
+                            results.append({
+                                "label":  label,
+                                "value":  round(val, 2),
+                                "date":   parts[0].strip(),
+                                "source": "FRED (St. Louis Fed)",
+                            })
+                            break
+                        except ValueError:
+                            continue
+            except Exception:
+                continue
+        client.close()
+    except Exception:
+        pass
+
+    _commodity_cache[cache_key] = results
+    _commodity_cache[cache_key + "_t"] = now
+    return results
 
 
 # ── Format cho prompt ────────────────────────────────────────────────────────
