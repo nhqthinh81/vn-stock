@@ -596,74 +596,76 @@ def get_company_dividends(symbol: str, source: str = "VCI") -> list[dict]:
 
 
 def get_macro_data() -> dict:
-    """Lấy dữ liệu vĩ mô Việt Nam từ World Bank API (miễn phí, không cần key).
+    """Lấy dữ liệu vĩ mô Việt Nam từ IMF WEO datamapper (có forecast năm hiện tại).
 
-    Indicators:
-      - GDP growth (annual %)
-      - CPI / Inflation (annual %)
-      - FDI inflows (% of GDP)
-      - Trade balance proxy: exports % GDP
-      - USD/VND exchange rate (World Bank annual + spot từ exchangerate API)
+    Nguồn:
+      - IMF WEO datamapper: GDP growth, CPI, current account (có estimate/forecast)
+      - open.er-api.com: tỷ giá USD/VND spot hôm nay
 
     Returns:
         {
-          "gdp_growth":    [{"year": 2023, "value": 5.05}, ...],  # 5 năm gần nhất
-          "cpi":           [...],
-          "fdi":           [...],
-          "exports_pct":   [...],
-          "usdvnd_annual": [...],
-          "usdvnd_spot":   float | None,   # tỷ giá spot hôm nay
-          "updated":       str,            # ngày fetch
-          "error":         str | None,
+          "gdp_growth":  [{"year": 2024, "value": 6.4, "is_forecast": False}, ...],
+          "cpi":         [...],
+          "current_acct":[...],
+          "usdvnd_spot": float | None,
+          "updated":     str,
+          "source":      "IMF WEO",
+          "error":       str | None,
         }
     """
     import httpx
     from datetime import date
 
     result: dict = {
-        "gdp_growth": [], "cpi": [], "fdi": [], "exports_pct": [],
-        "usdvnd_annual": [], "usdvnd_spot": None,
-        "updated": str(date.today()), "error": None,
+        "gdp_growth": [], "cpi": [], "current_acct": [],
+        "usdvnd_spot": None,
+        "updated": str(date.today()), "source": "IMF WEO", "error": None,
     }
 
-    WB_BASE = "https://api.worldbank.org/v2/country/VN/indicator"
+    # IMF WEO Datamapper — không cần key, trả về estimate/forecast năm hiện tại
+    IMF_BASE = "https://www.imf.org/external/datamapper/api/v1"
     INDICATORS = {
-        "gdp_growth":  "NY.GDP.MKTP.KD.ZG",   # GDP growth annual %
-        "cpi":         "FP.CPI.TOTL.ZG",       # Inflation CPI annual %
-        "fdi":         "BX.KLT.DINV.WD.GD.ZS", # FDI net inflows % GDP
-        "exports_pct": "NE.EXP.GNFS.ZS",       # Exports % of GDP
-        "usdvnd_annual": "PA.NUS.FCRF",         # Official exchange rate LCU/USD
+        "gdp_growth":   "NGDP_RPCH",   # Real GDP growth %
+        "cpi":          "PCPIPCH",     # Inflation CPI % change
+        "current_acct": "BCA_NGDPD",  # Current account % GDP
     }
 
     try:
-        client = httpx.Client(timeout=15)
+        client = httpx.Client(timeout=15, follow_redirects=True)
+        current_year = date.today().year
+
         for key, ind_code in INDICATORS.items():
-            url = f"{WB_BASE}/{ind_code}?format=json&mrv=5&per_page=5"
+            url = f"{IMF_BASE}/{ind_code}/VNM"
             try:
                 resp = client.get(url)
                 if resp.status_code != 200:
                     continue
                 payload = resp.json()
-                if not payload or len(payload) < 2 or not payload[1]:
-                    continue
+                values_map = (
+                    payload.get("values", {})
+                           .get(ind_code, {})
+                           .get("VNM", {})
+                )
                 series = []
-                for entry in payload[1]:
-                    yr  = entry.get("date")
-                    val = _clean_float(entry.get("value"))
-                    if yr and val is not None:
-                        series.append({"year": int(yr), "value": round(val, 2)})
-                # Sắp xếp mới nhất trước
+                for yr_str, val in values_map.items():
+                    yr  = int(yr_str)
+                    v   = _clean_float(val)
+                    if v is not None and yr >= current_year - 4:
+                        series.append({
+                            "year":        yr,
+                            "value":       round(v, 2),
+                            "is_forecast": yr >= current_year,
+                        })
                 series.sort(key=lambda x: x["year"], reverse=True)
                 result[key] = series
             except Exception:
                 continue
 
-        # Tỷ giá spot USD/VND từ exchangerate-api (free, không cần key)
+        # Tỷ giá spot USD/VND
         try:
             r = client.get("https://open.er-api.com/v6/latest/USD", timeout=8)
             if r.status_code == 200:
-                rates = r.json().get("rates", {})
-                vnd = _clean_float(rates.get("VND"))
+                vnd = _clean_float(r.json().get("rates", {}).get("VND"))
                 if vnd:
                     result["usdvnd_spot"] = round(vnd, 0)
         except Exception:

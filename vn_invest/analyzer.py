@@ -219,25 +219,28 @@ def _build_prompt(
         if off_lines:
             sh_block += "Ban lanh dao:\n" + "\n".join(off_lines) + "\n"
 
-    # 4. Bối cảnh vĩ mô (World Bank + spot rate)
+    # 4. Bối cảnh vĩ mô (IMF WEO — có estimate/forecast năm hiện tại)
     macro_block = ""
     if macro and not macro.get("error"):
-        def _mv(key, label, unit=""):
-            v = macro.get(key)
+        def _mv(key, label, unit="%"):
+            series = macro.get(key) or []
+            if not series:
+                return ""
+            latest = series[0]  # đã sort mới nhất trước
+            yr  = latest.get("year", "")
+            v   = latest.get("value")
+            tag = " (du bao)" if latest.get("is_forecast") else ""
             if v is None:
                 return ""
-            return f"  {label}: {v:.1f}{unit}"
+            return f"  {label} {yr}{tag}: {v:.1f}{unit}"
         m_lines = list(filter(None, [
-            _mv("gdp_growth",    "GDP tang truong", "%"),
-            _mv("cpi",           "Lam phat (CPI)",  "%"),
-            _mv("fdi",           "FDI/GDP",         "%"),
-            _mv("exports_pct",   "Xuat khau/GDP",   "%"),
-            _mv("usdvnd_annual", "USD/VND (WB)",    ""),
+            _mv("gdp_growth",   "Tang truong GDP"),
+            _mv("cpi",          "Lam phat CPI"),
+            _mv("current_acct", "Can tai khoan vang lai", unit="% GDP"),
             f"  USD/VND spot: {macro['usdvnd_spot']:,.0f}" if macro.get("usdvnd_spot") else "",
         ]))
         if m_lines:
-            yr = macro.get("updated", "")
-            macro_block = f"Du lieu vi mo Viet Nam (nam {yr}):\n" + "\n".join(m_lines)
+            macro_block = "Boi canh vi mo Viet Nam (IMF WEO, cap nhat " + macro.get("updated", "") + "):\n" + "\n".join(m_lines)
 
     # 5. Lịch sử giá + khối lượng 20 phiên
     price_block = ""

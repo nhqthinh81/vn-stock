@@ -88,7 +88,7 @@ def _fetch_market_indices():
 def _fetch_capital_history(sym):
     return get_capital_history(sym, source="VCI")
 
-@st.cache_data(ttl=21600, show_spinner=False)  # 6 tiếng — World Bank không đổi thường xuyên
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 tiếng — IMF WEO cập nhật theo quý
 def _fetch_macro():
     return get_macro_data()
 
@@ -990,46 +990,46 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
 
     st.divider()
 
-    # ── Vĩ mô Việt Nam (World Bank + tỷ giá spot) ────────────────────────────
+    # ── Vĩ mô Việt Nam (IMF WEO + tỷ giá spot) ──────────────────────────────
     with st.expander("🌐 Bối cảnh vĩ mô Việt Nam", expanded=False):
         _macro = _fetch_macro()
         if _macro.get("error"):
             st.warning(f"Không tải được dữ liệu vĩ mô: {_macro['error']}")
         else:
-            def _latest(series):
+            def _latest_m(series):
                 return series[0] if series else None
 
-            _gdp  = _latest(_macro["gdp_growth"])
-            _cpi  = _latest(_macro["cpi"])
-            _fdi  = _latest(_macro["fdi"])
-            _exp  = _latest(_macro["exports_pct"])
-            _vnd  = _macro.get("usdvnd_spot")
-            _vnd_wb = _latest(_macro["usdvnd_annual"])
+            def _label_yr(item):
+                if not item:
+                    return "—"
+                tag = " (dự báo)" if item.get("is_forecast") else ""
+                return f"{item['year']}{tag}"
 
-            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            _gdp  = _latest_m(_macro.get("gdp_growth", []))
+            _cpi  = _latest_m(_macro.get("cpi", []))
+            _ca   = _latest_m(_macro.get("current_acct", []))
+            _vnd  = _macro.get("usdvnd_spot")
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric(
-                f"GDP tăng trưởng ({_gdp['year'] if _gdp else '—'})",
+                f"GDP tăng trưởng ({_label_yr(_gdp)})",
                 f"{_gdp['value']:+.2f}%" if _gdp else "—",
             )
             mc2.metric(
-                f"Lạm phát CPI ({_cpi['year'] if _cpi else '—'})",
+                f"Lạm phát CPI ({_label_yr(_cpi)})",
                 f"{_cpi['value']:+.2f}%" if _cpi else "—",
             )
             mc3.metric(
-                f"FDI / GDP ({_fdi['year'] if _fdi else '—'})",
-                f"{_fdi['value']:.2f}%" if _fdi else "—",
+                f"Cán cân vãng lai ({_label_yr(_ca)})",
+                f"{_ca['value']:+.2f}% GDP" if _ca else "—",
             )
             mc4.metric(
-                f"Xuất khẩu / GDP ({_exp['year'] if _exp else '—'})",
-                f"{_exp['value']:.1f}%" if _exp else "—",
-            )
-            mc5.metric(
-                "USD/VND (spot)" if _vnd else f"USD/VND ({_vnd_wb['year'] if _vnd_wb else '—'})",
-                f"{_vnd:,.0f}" if _vnd else (f"{_vnd_wb['value']:,.0f}" if _vnd_wb else "—"),
+                "USD/VND (spot hôm nay)",
+                f"{_vnd:,.0f}" if _vnd else "—",
             )
 
-            # Trend GDP 5 năm
-            if len(_macro["gdp_growth"]) >= 2:
+            # Trend GDP + CPI 5 năm (có đường phân cách dự báo)
+            if len(_macro.get("gdp_growth", [])) >= 2:
                 import plotly.graph_objects as _go
                 _gdp_data = sorted(_macro["gdp_growth"], key=lambda x: x["year"])
                 _fig_m = _go.Figure()
@@ -1037,13 +1037,13 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                     x=[d["year"] for d in _gdp_data],
                     y=[d["value"] for d in _gdp_data],
                     mode="lines+markers+text",
-                    text=[f"{d['value']:+.1f}%" for d in _gdp_data],
+                    text=[("📌" if d.get("is_forecast") else "") + f"{d['value']:+.1f}%" for d in _gdp_data],
                     textposition="top center",
                     name="GDP Growth %",
                     line=dict(color="#00e676", width=2),
                     marker=dict(size=7),
                 ))
-                if _macro["cpi"]:
+                if _macro.get("cpi"):
                     _cpi_data = sorted(_macro["cpi"], key=lambda x: x["year"])
                     _fig_m.add_trace(_go.Scatter(
                         x=[d["year"] for d in _cpi_data],
@@ -1060,7 +1060,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                 )
                 st.plotly_chart(_fig_m, use_container_width=True)
 
-            st.caption(f"Nguồn: World Bank API (cập nhật: {_macro['updated']}) | Tỷ giá spot: open.er-api.com")
+            st.caption(f"Nguồn: IMF WEO (📌 = dự báo/ước tính năm hiện tại, cập nhật: {_macro['updated']}) | Tỷ giá spot: open.er-api.com")
 
     st.divider()
 
