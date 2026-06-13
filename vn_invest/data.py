@@ -595,6 +595,88 @@ def get_company_dividends(symbol: str, source: str = "VCI") -> list[dict]:
         return []
 
 
+def get_macro_data() -> dict:
+    """Lấy dữ liệu vĩ mô Việt Nam từ World Bank API (miễn phí, không cần key).
+
+    Indicators:
+      - GDP growth (annual %)
+      - CPI / Inflation (annual %)
+      - FDI inflows (% of GDP)
+      - Trade balance proxy: exports % GDP
+      - USD/VND exchange rate (World Bank annual + spot từ exchangerate API)
+
+    Returns:
+        {
+          "gdp_growth":    [{"year": 2023, "value": 5.05}, ...],  # 5 năm gần nhất
+          "cpi":           [...],
+          "fdi":           [...],
+          "exports_pct":   [...],
+          "usdvnd_annual": [...],
+          "usdvnd_spot":   float | None,   # tỷ giá spot hôm nay
+          "updated":       str,            # ngày fetch
+          "error":         str | None,
+        }
+    """
+    import httpx
+    from datetime import date
+
+    result: dict = {
+        "gdp_growth": [], "cpi": [], "fdi": [], "exports_pct": [],
+        "usdvnd_annual": [], "usdvnd_spot": None,
+        "updated": str(date.today()), "error": None,
+    }
+
+    WB_BASE = "https://api.worldbank.org/v2/country/VN/indicator"
+    INDICATORS = {
+        "gdp_growth":  "NY.GDP.MKTP.KD.ZG",   # GDP growth annual %
+        "cpi":         "FP.CPI.TOTL.ZG",       # Inflation CPI annual %
+        "fdi":         "BX.KLT.DINV.WD.GD.ZS", # FDI net inflows % GDP
+        "exports_pct": "NE.EXP.GNFS.ZS",       # Exports % of GDP
+        "usdvnd_annual": "PA.NUS.FCRF",         # Official exchange rate LCU/USD
+    }
+
+    try:
+        client = httpx.Client(timeout=15)
+        for key, ind_code in INDICATORS.items():
+            url = f"{WB_BASE}/{ind_code}?format=json&mrv=5&per_page=5"
+            try:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    continue
+                payload = resp.json()
+                if not payload or len(payload) < 2 or not payload[1]:
+                    continue
+                series = []
+                for entry in payload[1]:
+                    yr  = entry.get("date")
+                    val = _clean_float(entry.get("value"))
+                    if yr and val is not None:
+                        series.append({"year": int(yr), "value": round(val, 2)})
+                # Sắp xếp mới nhất trước
+                series.sort(key=lambda x: x["year"], reverse=True)
+                result[key] = series
+            except Exception:
+                continue
+
+        # Tỷ giá spot USD/VND từ exchangerate-api (free, không cần key)
+        try:
+            r = client.get("https://open.er-api.com/v6/latest/USD", timeout=8)
+            if r.status_code == 200:
+                rates = r.json().get("rates", {})
+                vnd = _clean_float(rates.get("VND"))
+                if vnd:
+                    result["usdvnd_spot"] = round(vnd, 0)
+        except Exception:
+            pass
+
+        client.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 def get_side_stats(symbol: str, source: str = "VCI") -> dict:
     """Lấy thống kê áp lực mua/bán (buy/sell side stats).
 

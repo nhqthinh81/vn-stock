@@ -75,6 +75,7 @@ def _build_prompt(
     recent_events: list = None,
     shareholders: dict = None,
     price_hist: list = None,
+    macro: dict = None,
 ) -> str:
     def _row(store, iid, label=None):
         item = store.get(iid, {})
@@ -218,7 +219,27 @@ def _build_prompt(
         if off_lines:
             sh_block += "Ban lanh dao:\n" + "\n".join(off_lines) + "\n"
 
-    # 4. Lịch sử giá + khối lượng 20 phiên
+    # 4. Bối cảnh vĩ mô (World Bank + spot rate)
+    macro_block = ""
+    if macro and not macro.get("error"):
+        def _mv(key, label, unit=""):
+            v = macro.get(key)
+            if v is None:
+                return ""
+            return f"  {label}: {v:.1f}{unit}"
+        m_lines = list(filter(None, [
+            _mv("gdp_growth",    "GDP tang truong", "%"),
+            _mv("cpi",           "Lam phat (CPI)",  "%"),
+            _mv("fdi",           "FDI/GDP",         "%"),
+            _mv("exports_pct",   "Xuat khau/GDP",   "%"),
+            _mv("usdvnd_annual", "USD/VND (WB)",    ""),
+            f"  USD/VND spot: {macro['usdvnd_spot']:,.0f}" if macro.get("usdvnd_spot") else "",
+        ]))
+        if m_lines:
+            yr = macro.get("updated", "")
+            macro_block = f"Du lieu vi mo Viet Nam (nam {yr}):\n" + "\n".join(m_lines)
+
+    # 5. Lịch sử giá + khối lượng 20 phiên
     price_block = ""
     if price_hist:
         price_lines = []
@@ -242,6 +263,8 @@ Hay phan tich BCTC cua **{symbol} - {company_name}** (nganh: {sector}).
 {profile_short}
 
 {sh_block}
+{macro_block}
+
 {price_block}
 
 ## TIN TUC THI TRUONG THOI SU (du lieu thuc te, uu tien nay khi phan tich)
@@ -302,6 +325,7 @@ def analyze_bctc(
     recent_events: list = None,
     shareholders: dict = None,
     price_hist: list = None,
+    macro: dict = None,
     model: str = "claude-haiku-4-5-20251001",
 ) -> str:
     """Goi Claude de phan tich BCTC. Tra ve markdown string."""
@@ -313,6 +337,7 @@ def analyze_bctc(
             recent_events=recent_events,
             shareholders=shareholders,
             price_hist=price_hist,
+            macro=macro,
         )
         return _call_claude(prompt, model=model, max_tokens=8192)
 

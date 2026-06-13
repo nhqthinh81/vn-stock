@@ -22,7 +22,7 @@ import streamlit as st
 from vn_invest.data import (get_price_history, get_financial_ratios_history, get_company_overview,
                             get_company_news, get_company_events, get_company_dividends,
                             get_company_shareholders, get_financial_statements, get_stock_status,
-                            get_side_stats, get_market_indices, get_capital_history)
+                            get_side_stats, get_market_indices, get_capital_history, get_macro_data)
 from vn_invest.indicators import add_all_indicators, get_latest_signals
 from vn_invest.lstm import predict as lstm_predict, model_ready, get_model_info
 from vn_invest.screener import (load_cache, scan_ami_watchlist, scan_ami_symbol,
@@ -87,6 +87,10 @@ def _fetch_market_indices():
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_capital_history(sym):
     return get_capital_history(sym, source="VCI")
+
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 tiếng — World Bank không đổi thường xuyên
+def _fetch_macro():
+    return get_macro_data()
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _APP_DIR     = Path(__file__).parent
@@ -848,6 +852,7 @@ with tab_basic:
                                 recent_events=_events,
                                 shareholders=_shareholders,
                                 price_hist=_price_hist,
+                                macro=_fetch_macro(),
                             )
                             st.session_state[ai_cache_key] = result_text
 
@@ -982,6 +987,80 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                                     st.caption(f"[{_a.get('lang','?')}] {_a.get('date','')[:10]} | {_a.get('source','')} | {_a.get('title','')[:80]}")
                         else:
                             st.warning(f"RSS debug: {_dbg}")
+
+    st.divider()
+
+    # ── Vĩ mô Việt Nam (World Bank + tỷ giá spot) ────────────────────────────
+    with st.expander("🌐 Bối cảnh vĩ mô Việt Nam", expanded=False):
+        _macro = _fetch_macro()
+        if _macro.get("error"):
+            st.warning(f"Không tải được dữ liệu vĩ mô: {_macro['error']}")
+        else:
+            def _latest(series):
+                return series[0] if series else None
+
+            _gdp  = _latest(_macro["gdp_growth"])
+            _cpi  = _latest(_macro["cpi"])
+            _fdi  = _latest(_macro["fdi"])
+            _exp  = _latest(_macro["exports_pct"])
+            _vnd  = _macro.get("usdvnd_spot")
+            _vnd_wb = _latest(_macro["usdvnd_annual"])
+
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric(
+                f"GDP tăng trưởng ({_gdp['year'] if _gdp else '—'})",
+                f"{_gdp['value']:+.2f}%" if _gdp else "—",
+            )
+            mc2.metric(
+                f"Lạm phát CPI ({_cpi['year'] if _cpi else '—'})",
+                f"{_cpi['value']:+.2f}%" if _cpi else "—",
+            )
+            mc3.metric(
+                f"FDI / GDP ({_fdi['year'] if _fdi else '—'})",
+                f"{_fdi['value']:.2f}%" if _fdi else "—",
+            )
+            mc4.metric(
+                f"Xuất khẩu / GDP ({_exp['year'] if _exp else '—'})",
+                f"{_exp['value']:.1f}%" if _exp else "—",
+            )
+            mc5.metric(
+                "USD/VND (spot)" if _vnd else f"USD/VND ({_vnd_wb['year'] if _vnd_wb else '—'})",
+                f"{_vnd:,.0f}" if _vnd else (f"{_vnd_wb['value']:,.0f}" if _vnd_wb else "—"),
+            )
+
+            # Trend GDP 5 năm
+            if len(_macro["gdp_growth"]) >= 2:
+                import plotly.graph_objects as _go
+                _gdp_data = sorted(_macro["gdp_growth"], key=lambda x: x["year"])
+                _fig_m = _go.Figure()
+                _fig_m.add_trace(_go.Scatter(
+                    x=[d["year"] for d in _gdp_data],
+                    y=[d["value"] for d in _gdp_data],
+                    mode="lines+markers+text",
+                    text=[f"{d['value']:+.1f}%" for d in _gdp_data],
+                    textposition="top center",
+                    name="GDP Growth %",
+                    line=dict(color="#00e676", width=2),
+                    marker=dict(size=7),
+                ))
+                if _macro["cpi"]:
+                    _cpi_data = sorted(_macro["cpi"], key=lambda x: x["year"])
+                    _fig_m.add_trace(_go.Scatter(
+                        x=[d["year"] for d in _cpi_data],
+                        y=[d["value"] for d in _cpi_data],
+                        mode="lines+markers",
+                        name="CPI %",
+                        line=dict(color="#ff6d00", width=2, dash="dot"),
+                        marker=dict(size=6),
+                    ))
+                _fig_m.update_layout(
+                    height=220, template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0),
+                    legend=dict(orientation="h", y=1.15),
+                    yaxis=dict(ticksuffix="%"),
+                )
+                st.plotly_chart(_fig_m, use_container_width=True)
+
+            st.caption(f"Nguồn: World Bank API (cập nhật: {_macro['updated']}) | Tỷ giá spot: open.er-api.com")
 
     st.divider()
 
