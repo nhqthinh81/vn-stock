@@ -1465,6 +1465,27 @@ with tab_scan:
                 "AI Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
             })
 
+        # ── PyGWalker — Phân tích nâng cao ──────────────────────────────────
+        with st.expander("🔬 Phân tích nâng cao (kéo-thả như Tableau)", expanded=False):
+            try:
+                from pygwalker.api.streamlit import StreamlitRenderer
+
+                @st.cache_resource
+                def _get_pyg_walker(data_hash: int, cols: tuple):
+                    return StreamlitRenderer(
+                        df_scan[list(cols)],
+                        kernel_computation=True,
+                        appearance="dark",
+                    )
+
+                _pyg_cols = tuple(df_scan.columns.tolist())
+                _pyg_hash = hash(_pyg_cols + (len(df_scan),))
+                _get_pyg_walker(_pyg_hash, _pyg_cols).explorer(default_tab="data")
+            except ImportError:
+                st.warning("Cài `pygwalker` để dùng tính năng này: `pip install pygwalker`")
+            except Exception as e:
+                st.error(f"PyGWalker lỗi: {e}")
+
         st.divider()
         st.subheader("Phân bổ tín hiệu")
         if "signal" in df_scan.columns:
