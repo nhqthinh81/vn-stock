@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/
+
+# Data / Cache
+data/scores_cache.json
+data/dataset_cache.npz
+data/alert_history.json
+data/train_running.log
+
+# Model files (lớn)
+*.keras
+*.pkl
+*.h5
+
+# Claude session
+.claude/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.env.local

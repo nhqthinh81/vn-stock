@@ -1,0 +1,36 @@
+{
+  "seq_len": 30,
+  "features": [
+    "RSI",
+    "MACD_hist",
+    "Dist_EMA",
+    "Log_Ret",
+    "Vol_Change",
+    "ATR_norm",
+    "RSI_slope5",
+    "Vol_ratio20",
+    "EMA_trend",
+    "BB_pos"
+  ],
+  "targets": {
+    "t5": 2.0,
+    "t10": 2.0,
+    "t25": 3.0
+  },
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "lstm_units": [
+    64,
+    32
+  ],
+  "dropout": 0.3,
+  "batch_size": 256,
+  "max_epochs": 80,
+  "patience": 12,
+  "lr_initial": 0.001,
+  "lr_factor": 0.5,
+  "lr_patience": 5,
+  "min_rows": 80,
+  "finetune_epochs": 20,
+  "finetune_lr": 0.0002
+}
