@@ -937,7 +937,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                                     with st.chat_message("assistant"):
                                         st.markdown(_turn["a"])
 
-                                _user_q = st.chat_input("Nhập câu hỏi tiếp theo...", key=f"chat_{symbol_input}_{fs_api}")
+                                _user_q = st.chat_input("Ví dụ: làm rõ phản biện", key=f"chat_{symbol_input}_{fs_api}")
                                 if _user_q:
                                     # Build context: phân tích + phản biện + số liệu thô + lịch sử
                                     def _fmt_raw(store, keys, label):
@@ -1277,7 +1277,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
             fs_periods, fs_income, fs_balance, fs_cashflow,
             _sh_data_for_chat,
         ),
-        placeholder="Hỏi về tài chính, cổ đông, định giá, rủi ro...",
+        placeholder="Ví dụ: làm rõ phản biện",
     )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1454,7 +1454,7 @@ with tab_tech:
             tab_key="tech",
             symbol=symbol_input,
             system_context=_ctx_tech,
-            placeholder="Hỏi về tín hiệu kỹ thuật, RSI, MACD, xu hướng...",
+            placeholder="Ví dụ: phân tích xu hướng kỹ thuật gần đây",
         )
 
 
