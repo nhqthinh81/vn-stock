@@ -440,26 +440,45 @@ def get_financial_statements(symbol: str, period: str = "quarterly", source: str
                     # Đây là kỳ sau cùng năm → gắn Q1/Q2...
                     periods_clean.append(f"{s}-#{seen[s]}")
 
-            # Whitelist: chỉ giữ kỳ hợp lệ thực sự
-            # Hợp lệ: YYYY-Q1..Q4 (quý thực), YYYY (năm), YYYY-#N (dedup năm)
-            # Loại bỏ: Q5/Q6/Q9 (bán niên/9 tháng), năm tương lai
+            # Chuẩn hóa nhãn kỳ: đổi tên Q5/Q6/Q9 → nhãn có nghĩa thay vì xóa
+            # vnstock VCI dùng convention: Q6 = bán niên H1, Q9 = 9 tháng
+            # Công ty báo cáo bán niên (PTB, nhiều mid-cap) chỉ có Q6 — KHÔNG xóa
             from datetime import date
             today = date.today()
-            def _valid_period(lbl):
-                # Quý thực: 2024-Q1 đến 2025-Q4
-                if re.match(r'^\d{4}-Q[1-4]$', lbl):
-                    return True
-                # Năm (annual): 2022, 2023, 2024 — chỉ quá khứ
-                m = re.match(r'^(\d{4})$', lbl)
-                if m:
-                    return int(m.group(1)) < today.year
-                # Dedup năm: 2024-#2 (cùng năm, kỳ khác) — giữ nhưng đổi tên sau
-                if re.match(r'^\d{4}-#\d+$', lbl):
-                    yr = int(lbl[:4])
-                    return yr < today.year
-                return False
-            valid_idx = [i for i, l in enumerate(periods_clean) if _valid_period(l)]
-            periods_final = [periods_clean[i] for i in valid_idx]
+
+            _PERIOD_RENAME = {
+                "Q5": "5T",   # 5 tháng (hiếm)
+                "Q6": "H1",   # 6 tháng đầu năm (bán niên)
+                "Q8": "8T",   # 8 tháng (hiếm)
+                "Q9": "9T",   # 9 tháng
+            }
+
+            def _normalize_label(lbl: str) -> str | None:
+                """Trả None nếu nên loại bỏ, string nhãn sạch nếu giữ lại."""
+                # Năm tương lai: loại
+                m_yr = re.match(r'^(\d{4})$', lbl)
+                if m_yr and int(m_yr.group(1)) >= today.year:
+                    return None
+                # Dedup năm tương lai: loại
+                m_dup = re.match(r'^(\d{4})-#\d+$', lbl)
+                if m_dup and int(m_dup.group(1)) >= today.year:
+                    return None
+                # Q5/Q6/Q9: đổi tên → H1/2025, 9T/2025...
+                m_q = re.match(r'^(\d{4})-Q(\d+)$', lbl)
+                if m_q:
+                    yr, qn = m_q.group(1), f"Q{m_q.group(2)}"
+                    if qn in _PERIOD_RENAME:
+                        return f"{_PERIOD_RENAME[qn]}/{yr}"
+                    # Q1-Q4: giữ nguyên format sạch
+                    if re.match(r'^Q[1-4]$', qn):
+                        return lbl
+                    return None  # Q7 hoặc format lạ khác: loại
+                # Dedup năm quá khứ, YYYY, format khác: giữ nguyên
+                return lbl
+
+            normalized = [_normalize_label(l) for l in periods_clean]
+            valid_idx      = [i for i, n in enumerate(normalized) if n is not None]
+            periods_final  = [normalized[i] for i in valid_idx]
             col_positions  = [period_idx[i] for i in valid_idx]
 
             data: dict[str, dict] = {}
