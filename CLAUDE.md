@@ -174,12 +174,28 @@ def _build_tech_context(symbol, sig, hist) -> str
 def _render_chatbot(tab_key, symbol, system_context, placeholder) -> None
 ```
 
-### _call_claude() — signature đầy đủ
+### _call_claude() và _call_claude_stream() — signatures
 ```python
 def _call_claude(prompt, model, max_tokens, system=None, messages=None) -> str:
+    # Blocking call — dùng cho AI analysis (nút bấm), phản biện
     # system → Anthropic top-level system parameter (context/data)
     # messages → multi-turn [{role, content}] — dùng cho chatbot
-    # Nếu messages=None → tự build từ prompt (1 user message)
+
+def _call_claude_stream(prompt, model, max_tokens, system=None, messages=None):
+    # Generator streaming SSE — PHẢI dùng cho chatbot (tránh treo UI)
+    # Dùng với: ans = st.write_stream(_call_claude_stream(...))
+    # st.write_stream trả về full string → lưu session_state bình thường
+```
+
+### Chatbot — BẮT BUỘC dùng streaming
+```python
+# SAI: httpx.post blocking → Streamlit timeout → treo UI
+ans = _call_claude(..., model="claude-sonnet-4-6")  # ← TREO nếu >60s
+
+# ĐÚNG: streaming hiện token ngay, không bao giờ treo
+with st.chat_message("assistant"):
+    ans = st.write_stream(_call_claude_stream(..., model="claude-sonnet-4-6"))
+st.session_state[chat_key].append({"q": user_q, "a": ans})
 ```
 
 ### Chatbot — dùng system param + multi-turn messages
@@ -244,13 +260,58 @@ if _fs_loaded:
 - **Events cảnh báo**: chỉ xét trong **180 ngày gần nhất** (6 tháng) — tránh false positive
 - **get_price_history**: signature `(symbol, days=int)` — KHÔNG có `period=`
 
-## RSS News (news_fetcher.py)
+### Period Normalization — _normalize_period() (data.py)
+vnstock VCI dùng nhãn kỳ nội bộ: Q6=bán niên, Q9=9 tháng.
+Hàm `_normalize_period(label)` là single source of truth cho mọi nơi xử lý kỳ:
+```python
+"2025-Q6"   → "H1/2025"   # bán niên — GIỮ LẠI (PTB và nhiều mid-cap chỉ báo cáo H1)
+"2025-Q9"   → "9T/2025"   # 9 tháng — GIỮ LẠI
+"2025-Q4_1" → "2025-Q4"   # bỏ suffix duplicate
+"2026"      → None         # năm hiện tại — BỎ (chưa đủ dữ liệu)
+"2025-Q7"   → None         # không hợp lệ — BỎ
+"2025-Q1"   → "2025-Q1"   # giữ nguyên
+```
+KHÔNG dùng blacklist (dễ miss format lạ) — luôn dùng whitelist/normalize.
+Dùng cho cả `get_financial_statements()` và `get_financial_ratios_history()`.
 
-- VN: VnEconomy chứng khoán/kinh tế, VnExpress kinh doanh
-- INT: SCMP, Bloomberg Markets, Financial Times
+### AI Analysis — Quy tắc dữ liệu
+```python
+# AI analysis LUÔN tự fetch BCTC quarterly riêng — không dùng session state UI
+_ai_fs = _fetch_statements(symbol, "quarterly")  # trong trigger block của AI
+
+# Ngày trong prompt: PHẢI dùng datetime động
+from datetime import date
+_today_str = f"thang {date.today().month}/{date.today().year}"
+
+# Trend block: tính QoQ % và cảnh báo "tăng DT giảm margin" tự động
+# → Claude nhận cảnh báo sẵn, không bỏ sót xu hướng
+```
+
+## RSS News & Commodity Prices (news_fetcher.py)
+
+### RSS Sources
+- VN: VnEconomy chứng khoán/kinh tế, VnExpress kinh doanh, CafeF chứng khoán
+- INT chung: Reuters Business, SCMP
+- INT chuyên ngành: Mining.com (quặng/kim loại), SteelOrbis (thép toàn cầu)
 - `search_market_news(symbol, company_name, sector, max_results=15)` → scored articles
 - `detect_conflicts(articles)` → list mâu thuẫn VN vs quốc tế
-- Cache 10 phút; lỗi RSS phải hiển thị rõ, không silent fail
+
+### Commodity Prices
+```python
+get_commodity_prices(sector)  # → list[{label, value, date, source}]
+# Ưu tiên: yfinance real-time (HRC=F, BZ=F, HG=F, NG=F, CT=F...)
+# Fallback: FRED CSV API (iron ore, copper, mortgage rate...)
+# 10 ngành: steel, oil gas, seafood, real estate, bank, retail, textile, timber, pharma, tech
+# Cache 30 phút
+```
+
+### Macro Data (data.py)
+```python
+get_macro_data()  # IMF WEO datamapper — có estimate/forecast năm hiện tại
+# Trả: {gdp_growth, cpi, current_acct} mỗi cái là list[{year, value, is_forecast}]
+# + usdvnd_spot từ open.er-api.com
+# Cache 6 tiếng
+```
 
 ## Lưu ý phát triển quan trọng
 
