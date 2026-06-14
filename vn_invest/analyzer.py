@@ -267,6 +267,64 @@ def _build_prompt(
         if price_lines:
             price_block = "Gia & khoi luong 10 phien gan nhat:\n" + "\n".join(price_lines)
 
+    # 6. Phân tích xu hướng tự động (tính % QoQ để AI đọc dễ)
+    trend_block = ""
+    try:
+        def _vals(store, iid):
+            return store.get(iid, {}).get("values", [])
+
+        rev_v  = _vals(income, "isa3")   # doanh thu thuần
+        gp_v   = _vals(income, "isa5")   # lợi nhuận gộp
+        pat_v  = _vals(income, "isa20")  # lợi nhuận sau thuế
+
+        def _pct_chg(new, old):
+            if new is None or old is None or old == 0:
+                return None
+            return (new - old) / abs(old) * 100
+
+        def _margin(gp, rev):
+            if gp is None or rev is None or rev == 0:
+                return None
+            return gp / rev * 100
+
+        trend_lines = []
+        n = min(len(periods), len(rev_v), len(gp_v), 5)
+        if n >= 2:
+            trend_lines.append("XU HUONG QoQ (ky moi nhat truoc, ky cu sau):")
+            for i in range(n - 1):
+                p_new, p_old = periods[i], periods[i + 1]
+                r_new, r_old = rev_v[i], rev_v[i + 1]
+                g_new, g_old = gp_v[i], gp_v[i + 1]
+                p_new_v = pat_v[i] if i < len(pat_v) else None
+                p_old_v = pat_v[i + 1] if i + 1 < len(pat_v) else None
+
+                rev_chg = _pct_chg(r_new, r_old)
+                gp_chg  = _pct_chg(g_new, g_old)
+                pat_chg = _pct_chg(p_new_v, p_old_v)
+                margin_new = _margin(g_new, r_new)
+                margin_old = _margin(g_old, r_old)
+
+                parts = [f"  {p_old} → {p_new}:"]
+                if rev_chg is not None:
+                    parts.append(f"Doanh thu {rev_chg:+.1f}%")
+                if gp_chg is not None:
+                    parts.append(f"LN gop {gp_chg:+.1f}%")
+                if pat_chg is not None:
+                    parts.append(f"LNST {pat_chg:+.1f}%")
+                if margin_new is not None and margin_old is not None:
+                    dm = margin_new - margin_old
+                    parts.append(f"Bien gop {margin_old:.1f}%→{margin_new:.1f}% ({dm:+.1f}pp)")
+                trend_lines.append(" | ".join(parts))
+
+                # Canh bao tang doanh thu giam bien
+                if (rev_chg is not None and rev_chg > 0
+                        and gp_chg is not None and gp_chg < 0):
+                    trend_lines.append(f"    ⚠️ CANH BAO: Tang doanh thu nhung giam LN gop — ap luc gia ban hoac tang chi phi")
+
+        trend_block = "\n".join(trend_lines) if trend_lines else ""
+    except Exception:
+        trend_block = ""
+
     return f"""Ban la chuyen gia phan tich tai chinh chung khoan Viet Nam voi 15 nam kinh nghiem.
 
 Hay phan tich BCTC cua **{symbol} - {company_name}** (nganh: {sector}).
@@ -285,6 +343,9 @@ Hay phan tich BCTC cua **{symbol} - {company_name}** (nganh: {sector}).
 
 ## TIN TUC THI TRUONG THOI SU (du lieu thuc te, uu tien nay khi phan tich)
 {news_section}
+
+## XU HUONG BCTC (tinh tu so lieu thuc te, chu y truoc khi doc bang so)
+{trend_block or "(Khong du du lieu de tinh xu huong)"}
 
 ## So lieu BCTC (don vi: ty dong, cac ky: {period_header})
 Ky moi nhat dung dau, ky cu hon theo sau.

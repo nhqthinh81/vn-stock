@@ -822,6 +822,15 @@ with tab_basic:
                                 st.session_state[f"rss_debug_{symbol_input}"] = _rss_debug
                             except Exception as _e:
                                 st.session_state[f"rss_debug_{symbol_input}"] = f"Lỗi: {_e}"
+
+                            # Luôn fetch BCTC quarterly mới nhất cho AI
+                            # Không dùng fs_periods từ session (có thể là annual hoặc rỗng)
+                            _ai_fs = _fetch_statements(symbol_input, "quarterly")
+                            _ai_periods  = _ai_fs.get("periods", [])
+                            _ai_income   = _ai_fs.get("income", {})
+                            _ai_balance  = _ai_fs.get("balance", {})
+                            _ai_cashflow = _ai_fs.get("cashflow", {})
+
                             # Lấy tin tức thực tế để đưa vào prompt
                             _news        = _fetch_news(symbol_input)
                             _events      = _fetch_events(symbol_input)
@@ -844,10 +853,10 @@ with tab_basic:
                                 company_name=_co_name,
                                 sector=_sector,
                                 profile=_profile,
-                                periods=fs_periods,
-                                income=fs_income,
-                                balance=fs_balance,
-                                cashflow=fs_cashflow,
+                                periods=_ai_periods,
+                                income=_ai_income,
+                                balance=_ai_balance,
+                                cashflow=_ai_cashflow,
                                 recent_news=_news,
                                 recent_events=_events,
                                 shareholders=_shareholders,
