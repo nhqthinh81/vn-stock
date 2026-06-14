@@ -440,14 +440,20 @@ def get_financial_statements(symbol: str, period: str = "quarterly", source: str
                     # Đây là kỳ sau cùng năm → gắn Q1/Q2...
                     periods_clean.append(f"{s}-#{seen[s]}")
 
-            # Lọc tương lai (cùng logic data.py)
+            # Lọc tương lai + kỳ không hợp lệ
+            # vnstock VCI trả thêm Q5 (5 tháng), Q6 (bán niên H1), Q9 (9 tháng)
+            # → chỉ giữ Q1-Q4 và nhãn dạng YYYY (năm)
             from datetime import date
             today = date.today()
-            def _future(lbl):
+            def _invalid_period(lbl):
+                # Loại kỳ lũy kế bán niên/9 tháng: Q5, Q6, Q7, Q8, Q9
+                if re.search(r'-Q([5-9]|[1-9]\d)', lbl):
+                    return True
+                # Loại năm tương lai
                 m = re.match(r'^(\d{4})$', lbl)
                 if m: return int(m.group(1)) >= today.year
                 return False
-            valid_idx = [i for i, l in enumerate(periods_clean) if not _future(l)]
+            valid_idx = [i for i, l in enumerate(periods_clean) if not _invalid_period(l)]
             periods_final = [periods_clean[i] for i in valid_idx]
             col_positions  = [period_idx[i] for i in valid_idx]
 
