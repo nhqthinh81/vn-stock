@@ -248,73 +248,126 @@ def detect_conflicts(articles: list[dict]) -> list[str]:
     return conflicts
 
 
-# ── Commodity prices (FRED API — free, no key) ───────────────────────────────
+# ── Commodity prices (yfinance real-time + FRED fallback) ────────────────────
 
-_COMMODITY_MAP = {
-    # sector key → list of (label, FRED series_id)
+# yfinance tickers: real-time futures (T+0 hoặc T-1)
+_YF_MAP = {
     "steel": [
-        ("Quang sat (Iron Ore, USD/MT)",    "PIORECRUSDM"),
-        ("Dong (Copper, USD/MT)",           "PCOPPUSDM"),
+        ("Thep HRC futures (USD/ton)",          "HRC=F"),
+        ("Quang sat SGX futures (USD/ton)",     "SCOA.SI"),   # SGX iron ore
+        ("Dong futures (USD/lb)",               "HG=F"),
+        ("Than luyen coc (USD/ton, AUS)",       "BTU"),       # proxy Peabody Energy
     ],
     "oil gas": [
-        ("Dau thu Brent (USD/barrel)",      "DCOILBRENTEU"),
-        ("Khi tu nhien Henry Hub (USD/MMBtu)", "DHHNGSP"),
+        ("Dau Brent futures (USD/barrel)",      "BZ=F"),
+        ("Dau WTI futures (USD/barrel)",        "CL=F"),
+        ("Khi tu nhien Henry Hub (USD/MMBtu)",  "NG=F"),
     ],
     "seafood": [
-        ("Chi so gia luong thuc FAO",       "PFOODINDEXM"),
+        ("Chi so hang hoa nong san (DJP ETF)",  "DJP"),
+        ("Gia tom (proxy: MOS fertilizer)",     "MOS"),
     ],
     "real estate": [
-        ("Lai suat 30Y My (%)",             "MORTGAGE30US"),
+        ("Lai suat 10Y US Treasury (%)",        "^TNX"),
+        ("ETF bat dong san My (VNQ)",           "VNQ"),
+    ],
+    "bank": [
+        ("Chi so ngan hang My (KBE ETF)",       "KBE"),
+        ("Lai suat 2Y US Treasury (%)",         "^IRX"),
+    ],
+    "retail": [
+        ("Chi so tieu dung My (XRT ETF)",       "XRT"),
+    ],
+    "textile": [
+        ("Bong (Cotton futures, USD/lb)",       "CT=F"),
+    ],
+    "timber": [
+        ("Go xu (Lumber futures, USD/1000bf)",  "LBS=F"),
+    ],
+    "pharma": [
+        ("ETF duoc pham My (XPH)",              "XPH"),
+    ],
+    "tech": [
+        ("Chi so ban dan (SOX)",                "^SOX"),
+        ("ETF ban dan (SOXX)",                  "SOXX"),
+    ],
+}
+
+# FRED fallback: monthly/weekly, lag ~1 tháng nhưng chính xác hơn
+_FRED_MAP = {
+    "steel": [
+        ("Quang sat World Bank (USD/MT)",       "PIORECRUSDM"),
+        ("Dong World Bank (USD/MT)",            "PCOPPUSDM"),
+    ],
+    "oil gas": [
+        ("Dau Brent (USD/barrel, EIA)",         "DCOILBRENTEU"),
+        ("Khi tu nhien (USD/MMBtu, EIA)",       "DHHNGSP"),
+    ],
+    "real estate": [
+        ("Lai suat vay nha 30Y My (%)",         "MORTGAGE30US"),
+    ],
+    "bank": [
+        ("Fed Funds Rate (%)",                  "FEDFUNDS"),
+    ],
+    "seafood": [
+        ("Chi so gia luong thuc FAO",           "PFOODINDEXM"),
     ],
 }
 
 _commodity_cache: dict = {}
-_COMMODITY_TTL = 3600  # 1 gio
+_COMMODITY_TTL = 1800  # 30 phut — yfinance data fresh hon
 
 
-def get_commodity_prices(sector: str) -> list[dict]:
-    """Lay gia hang hoa tu FRED API theo nganh.
-
-    Returns list of {label, value, unit, date, source}.
-    Miễn phí, không cần API key.
-    """
-    sector_key = None
-    s = sector.lower()
-    for k in _COMMODITY_MAP:
-        if k in s:
-            sector_key = k
-            break
-    if not sector_key:
+def _fetch_yfinance(tickers: list[tuple]) -> list[dict]:
+    """Lay gia cuoi phien tu yfinance. Tra [] neu yfinance chua cai."""
+    try:
+        import yfinance as yf
+        from datetime import date, timedelta
+    except ImportError:
         return []
 
-    cache_key = sector_key
-    now = time.time()
-    if _commodity_cache.get(cache_key) and now - _commodity_cache.get(cache_key + "_t", 0) < _COMMODITY_TTL:
-        return _commodity_cache[cache_key]
+    results = []
+    for label, ticker in tickers:
+        try:
+            t = yf.Ticker(ticker)
+            # fast_info nhanh hon history()
+            fi = t.fast_info
+            price = getattr(fi, "last_price", None) or getattr(fi, "previous_close", None)
+            if price and price > 0:
+                results.append({
+                    "label":  label,
+                    "value":  round(float(price), 2),
+                    "date":   str(date.today()),
+                    "source": f"yfinance ({ticker})",
+                    "ticker": ticker,
+                })
+        except Exception:
+            continue
+    return results
 
+
+def _fetch_fred(series_list: list[tuple]) -> list[dict]:
+    """Lay gia tu FRED CSV API. Miễn phí, không cần key."""
     FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
     results = []
     try:
         client = httpx.Client(timeout=10, follow_redirects=True)
-        for label, series_id in _COMMODITY_MAP[sector_key]:
+        for label, series_id in series_list:
             try:
                 r = client.get(f"{FRED_BASE}?id={series_id}")
                 if r.status_code != 200:
                     continue
-                lines = [l for l in r.text.strip().splitlines() if l and not l.startswith("DATE")]
-                if not lines:
-                    continue
-                # Lay dong cuoi cung co gia tri hop le (khong phai '.')
+                lines = [l for l in r.text.strip().splitlines()
+                         if l and not l.startswith("DATE")]
                 for line in reversed(lines):
                     parts = line.split(",")
-                    if len(parts) == 2 and parts[1].strip() != ".":
+                    if len(parts) == 2 and parts[1].strip() not in (".", ""):
                         try:
-                            val = float(parts[1].strip())
                             results.append({
                                 "label":  label,
-                                "value":  round(val, 2),
+                                "value":  round(float(parts[1].strip()), 2),
                                 "date":   parts[0].strip(),
-                                "source": "FRED (St. Louis Fed)",
+                                "source": f"FRED ({series_id})",
                             })
                             break
                         except ValueError:
@@ -324,6 +377,34 @@ def get_commodity_prices(sector: str) -> list[dict]:
         client.close()
     except Exception:
         pass
+    return results
+
+
+def get_commodity_prices(sector: str) -> list[dict]:
+    """Lay gia hang hoa theo nganh: yfinance (real-time) + FRED (fallback monthly).
+
+    Returns list of {label, value, date, source, ticker?}.
+    """
+    s = sector.lower()
+    sector_key = next((k for k in _YF_MAP if k in s), None)
+    if not sector_key:
+        return []
+
+    cache_key = sector_key
+    now = time.time()
+    if (_commodity_cache.get(cache_key)
+            and now - _commodity_cache.get(cache_key + "_t", 0) < _COMMODITY_TTL):
+        return _commodity_cache[cache_key]
+
+    # 1. Thử yfinance trước (real-time)
+    results = _fetch_yfinance(_YF_MAP.get(sector_key, []))
+
+    # 2. FRED bổ sung cho những chỉ số yfinance không có (hoặc yfinance chưa cài)
+    fred_labels_got = {r["label"] for r in results}
+    fred_needed = [(lbl, sid) for lbl, sid in _FRED_MAP.get(sector_key, [])
+                   if lbl not in fred_labels_got]
+    if fred_needed:
+        results += _fetch_fred(fred_needed)
 
     _commodity_cache[cache_key] = results
     _commodity_cache[cache_key + "_t"] = now
