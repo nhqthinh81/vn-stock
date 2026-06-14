@@ -56,6 +56,70 @@ def _call_claude(
     return text
 
 
+def _call_claude_stream(
+    prompt: str,
+    model: str = "claude-haiku-4-5-20251001",
+    max_tokens: int = 4096,
+    system: str = None,
+    messages: list = None,
+):
+    """Generator: stream tokens tu Anthropic API (SSE). Dung voi st.write_stream().
+
+    Yields tung chunk text de Streamlit hien thi ngay, tranh treo man hinh.
+    """
+    import httpx
+    import json
+
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        raise ValueError("ANTHROPIC_API_KEY chua duoc cau hinh trong .env")
+
+    msgs = messages if messages is not None else [{"role": "user", "content": prompt}]
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "messages": msgs,
+    }
+    if system:
+        payload["system"] = system
+
+    _timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+    with httpx.stream(
+        "POST",
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json=payload,
+        timeout=_timeout,
+    ) as resp:
+        if resp.status_code != 200:
+            body = resp.read()
+            try:
+                msg = json.loads(body).get("error", {}).get("message", body.decode())
+            except Exception:
+                msg = body.decode()
+            raise RuntimeError(msg)
+
+        for line in resp.iter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if raw == "[DONE]":
+                break
+            try:
+                event = json.loads(raw)
+            except Exception:
+                continue
+            if event.get("type") == "content_block_delta":
+                chunk = event.get("delta", {}).get("text", "")
+                if chunk:
+                    yield chunk
+
+
 def _fmt_b(val) -> str:
     if val is None:
         return "N/A"

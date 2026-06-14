@@ -256,11 +256,11 @@ def _build_tech_context(symbol: str, sig: dict, hist: dict) -> str:
 
 
 def _render_chatbot(tab_key: str, symbol: str, system_context: str, placeholder: str = "Nhập câu hỏi..."):
-    """Render chatbot có ngữ cảnh sẵn cho một tab."""
-    from vn_invest.analyzer import _call_claude
+    """Render chatbot có ngữ cảnh sẵn cho một tab. Dùng streaming để không treo UI."""
+    from vn_invest.analyzer import _call_claude_stream
 
     st.markdown("#### 💬 Chat với AI — Phân tích chuyên sâu")
-    st.caption(f"Model: Claude Sonnet | Ngữ cảnh: dữ liệu {symbol} đang hiển thị")
+    st.caption(f"Model: Claude Sonnet (streaming) | Ngữ cảnh: dữ liệu {symbol} đang hiển thị")
 
     chat_key = f"chat_{tab_key}_{symbol}"
     if chat_key not in st.session_state:
@@ -275,7 +275,6 @@ def _render_chatbot(tab_key: str, symbol: str, system_context: str, placeholder:
 
     user_q = st.chat_input(placeholder, key=f"input_{tab_key}_{symbol}")
     if user_q:
-        # System prompt: dữ liệu cổ phiếu + hướng dẫn cứng không được nói thiếu data
         sys_prompt = (
             "Bạn là chuyên gia phân tích chứng khoán Việt Nam với khả năng suy luận sâu.\n"
             "DỮ LIỆU CỔ PHIẾU ĐÃ ĐƯỢC CUNG CẤP ĐẦY ĐỦ TRONG CONTEXT NÀY — hãy phân tích dựa trên đó.\n"
@@ -285,21 +284,29 @@ def _render_chatbot(tab_key: str, symbol: str, system_context: str, placeholder:
             f"## DỮ LIỆU CỔ PHIẾU HIỆN TẠI\n{system_context}"
         )
 
-        # Multi-turn messages (đúng cách Anthropic API)
         msgs = []
-        for turn in st.session_state[chat_key][-6:]:  # 6 turn gần nhất
+        for turn in st.session_state[chat_key][-6:]:
             msgs.append({"role": "user",      "content": turn["q"]})
             msgs.append({"role": "assistant", "content": turn["a"]})
         msgs.append({"role": "user", "content": user_q})
 
-        with st.spinner("Đang phân tích... (~20-40 giây)"):
-            ans = _call_claude(
-                prompt="",
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
-                system=sys_prompt,
-                messages=msgs,
-            )
+        with st.chat_message("user"):
+            st.markdown(user_q)
+
+        with st.chat_message("assistant"):
+            try:
+                ans = st.write_stream(
+                    _call_claude_stream(
+                        prompt="",
+                        model="claude-sonnet-4-6",
+                        max_tokens=4096,
+                        system=sys_prompt,
+                        messages=msgs,
+                    )
+                )
+            except Exception as e:
+                ans = f"⚠️ Lỗi: {e}"
+                st.error(ans)
 
         st.session_state[chat_key].append({"q": user_q, "a": ans})
         st.rerun()
