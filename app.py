@@ -155,8 +155,8 @@ with st.sidebar:
     st.caption("v1.0.0 | vnstock + Streamlit")
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_basic, tab_tech, tab_scan, tab_port, tab_model = st.tabs([
-    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "💼 Danh Mục", "🤖 Model AI"
+tab_basic, tab_tech, tab_scan, tab_port, tab_model, tab_phaisinh = st.tabs([
+    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh"
 ])
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2049,6 +2049,7 @@ with tab_model:
 
     # Lịch sử đã gửi
     with st.expander("📋 Lịch sử cảnh báo đã gửi", expanded=False):
+
         hist_data = get_alert_history()
         if hist_data:
             df_hist = pd.DataFrame(hist_data)
@@ -2058,3 +2059,10 @@ with tab_model:
             }), use_container_width=True, hide_index=True)
         else:
             st.info("Chưa có lịch sử cảnh báo nào.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 6 — PHÁI SINH
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_phaisinh:
+    from vn_invest.phaisinh_tab import render_phaisinh_tab
+    render_phaisinh_tab()
