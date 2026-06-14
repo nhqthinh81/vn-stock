@@ -14,6 +14,41 @@ from .config import DEFAULT_SOURCE, DEFAULT_DAYS
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
+def _normalize_period(label: str) -> str | None:
+    """Chuẩn hóa nhãn kỳ vnstock → nhãn hiển thị sạch.
+
+    - Q1-Q4: giữ nguyên (2025-Q3)
+    - Q6 (bán niên H1): đổi thành H1/2025
+    - Q9 (9 tháng): đổi thành 9T/2025
+    - Q5, Q8: đổi thành 5T/2025, 8T/2025
+    - Q7 hoặc Q10+: bỏ (không hợp lệ)
+    - YYYY năm tương lai: bỏ
+    - Còn lại: giữ nguyên
+    """
+    import re
+    from datetime import date
+    today = date.today()
+    s = str(label).strip()
+
+    _RENAME = {"Q5": "5T", "Q6": "H1", "Q8": "8T", "Q9": "9T"}
+
+    m = re.match(r'^(\d{4})-Q(\d+)(?:_\d+)?$', s)
+    if m:
+        yr, qn_int = int(m.group(1)), int(m.group(2))
+        qn = f"Q{qn_int}"
+        if qn in _RENAME:
+            return f"{_RENAME[qn]}/{yr}"
+        if 1 <= qn_int <= 4:
+            return f"{yr}-Q{qn_int}"
+        return None  # Q7, Q10... bỏ
+
+    m_yr = re.match(r'^(\d{4})$', s)
+    if m_yr:
+        return None if int(m_yr.group(1)) >= today.year else s
+
+    return s  # format khác (H1/2025 đã rename trước...) giữ nguyên
+
+
 def _clean_float(val):
     if val is None:
         return None
@@ -149,38 +184,38 @@ def get_financial_ratios_history(
         if not all_period_cols:
             return {"periods": [], "data": {}, "actual_period": period, "actual_source": source}
 
-        # Loại bỏ kỳ tương lai trước mọi xử lý
-        all_period_cols = [c for c in all_period_cols if not _is_future(c)]
+        # Chuẩn hóa tất cả nhãn kỳ qua hàm chung _normalize_period
+        norm_map: dict = {}   # raw_col → normalized_label
+        for c in all_period_cols:
+            n = _normalize_period(str(c))
+            if n is not None:
+                norm_map[c] = n
 
         if period == "annual":
-            # Lọc chỉ Q4 (đại diện năm), dedup theo năm, bỏ Q4_1 (duplicate)
+            # Chỉ giữ Q4 (= kỳ cuối năm, đại diện cả năm) và nhãn YYYY
             seen_years: set[str] = set()
             period_cols = []
-            for c in all_period_cols:
-                s = str(c)
-                if not _is_quarterly_label(s):
-                    period_cols.append(c)          # nhãn YYYY → giữ nguyên
-                elif re.search(r'-Q4$', s):        # Q4 chính xác (không phải Q4_1)
-                    yr = _year_of(s)
+            for c, lbl in norm_map.items():
+                import re as _re
+                m4 = _re.match(r'^(\d{4})-Q4$', str(c))
+                m_yr = _re.match(r'^(\d{4})$', lbl)
+                if m4:
+                    yr = m4.group(1)
                     if yr not in seen_years:
                         seen_years.add(yr)
                         period_cols.append(c)
-            # Nếu không có Q4 nào (dữ liệu quá mới/cũ), fallback dùng tất cả
+                elif m_yr:
+                    yr = m_yr.group(1)
+                    if yr not in seen_years:
+                        seen_years.add(yr)
+                        period_cols.append(c)
             if not period_cols:
-                period_cols = all_period_cols
+                period_cols = list(norm_map.keys())
         else:
-            # Quý: lấy tất cả, bỏ Q4_1 (duplicate của Q4)
-            period_cols = [c for c in all_period_cols if not re.search(r'-Q\d_\d', str(c))]
-            if not period_cols:
-                period_cols = all_period_cols
+            # Quý / bán niên: tất cả kỳ hợp lệ sau normalize
+            period_cols = list(norm_map.keys())
 
         period_cols = period_cols[:n_periods]
-
-        def _display_label(c) -> str:
-            s = str(c)
-            if period == "annual" and _is_quarterly_label(s):
-                return _year_of(s)   # "2025-Q4" → "2025"
-            return s
 
         data: dict[str, list] = {}
         for _, row in df.iterrows():
@@ -191,7 +226,7 @@ def get_financial_ratios_history(
             data[str(item_id)] = vals
 
         return {
-            "periods":       [_display_label(c) for c in period_cols],
+            "periods":       [norm_map[c] for c in period_cols],
             "data":          data,
             "actual_period": period,
             "actual_source": source,
@@ -440,46 +475,10 @@ def get_financial_statements(symbol: str, period: str = "quarterly", source: str
                     # Đây là kỳ sau cùng năm → gắn Q1/Q2...
                     periods_clean.append(f"{s}-#{seen[s]}")
 
-            # Chuẩn hóa nhãn kỳ: đổi tên Q5/Q6/Q9 → nhãn có nghĩa thay vì xóa
-            # vnstock VCI dùng convention: Q6 = bán niên H1, Q9 = 9 tháng
-            # Công ty báo cáo bán niên (PTB, nhiều mid-cap) chỉ có Q6 — KHÔNG xóa
-            from datetime import date
-            today = date.today()
-
-            _PERIOD_RENAME = {
-                "Q5": "5T",   # 5 tháng (hiếm)
-                "Q6": "H1",   # 6 tháng đầu năm (bán niên)
-                "Q8": "8T",   # 8 tháng (hiếm)
-                "Q9": "9T",   # 9 tháng
-            }
-
-            def _normalize_label(lbl: str) -> str | None:
-                """Trả None nếu nên loại bỏ, string nhãn sạch nếu giữ lại."""
-                # Năm tương lai: loại
-                m_yr = re.match(r'^(\d{4})$', lbl)
-                if m_yr and int(m_yr.group(1)) >= today.year:
-                    return None
-                # Dedup năm tương lai: loại
-                m_dup = re.match(r'^(\d{4})-#\d+$', lbl)
-                if m_dup and int(m_dup.group(1)) >= today.year:
-                    return None
-                # Q5/Q6/Q9: đổi tên → H1/2025, 9T/2025...
-                m_q = re.match(r'^(\d{4})-Q(\d+)$', lbl)
-                if m_q:
-                    yr, qn = m_q.group(1), f"Q{m_q.group(2)}"
-                    if qn in _PERIOD_RENAME:
-                        return f"{_PERIOD_RENAME[qn]}/{yr}"
-                    # Q1-Q4: giữ nguyên format sạch
-                    if re.match(r'^Q[1-4]$', qn):
-                        return lbl
-                    return None  # Q7 hoặc format lạ khác: loại
-                # Dedup năm quá khứ, YYYY, format khác: giữ nguyên
-                return lbl
-
-            normalized = [_normalize_label(l) for l in periods_clean]
-            valid_idx      = [i for i, n in enumerate(normalized) if n is not None]
-            periods_final  = [normalized[i] for i in valid_idx]
-            col_positions  = [period_idx[i] for i in valid_idx]
+            normalized    = [_normalize_period(l) for l in periods_clean]
+            valid_idx     = [i for i, n in enumerate(normalized) if n is not None]
+            periods_final = [normalized[i] for i in valid_idx]
+            col_positions = [period_idx[i] for i in valid_idx]
 
             data: dict[str, dict] = {}
             for _, row in df.iterrows():
