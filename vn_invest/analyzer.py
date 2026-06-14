@@ -389,11 +389,23 @@ def _build_prompt(
     except Exception:
         trend_block = ""
 
+    from datetime import date as _date
+    _today      = _date.today()
+    _today_str  = f"thang {_today.month}/{_today.year}"
+    _bctc_latest = periods[0] if periods else "khong ro"
+    _has_realtime = bool(commodity_block or (news_block and "INT" in news_block))
+    _data_note = (
+        f"BCTC moi nhat: {_bctc_latest} (tu vnstock). "
+        + ("Gia hang hoa & tin tuc ngay hom nay da duoc cap nhat qua yfinance/FRED/RSS."
+           if _has_realtime else
+           "Tin tuc thi truong: xem phan TIN TUC ben duoi.")
+    )
+
     return f"""Ban la chuyen gia phan tich tai chinh chung khoan Viet Nam voi 15 nam kinh nghiem.
 
 Hay phan tich BCTC cua **{symbol} - {company_name}** (nganh: {sector}).
 
-**Ngay hom nay: thang 6/2026. Kien thuc cua ban co the chi den T8/2025.**
+**Ngay phan tich: {_today_str}. {_data_note}**
 
 ## Thong tin cong ty
 {profile_short}
@@ -440,17 +452,17 @@ Nhan dien 2-4 mang kinh doanh chinh cua cong ty dua tren profile va so lieu. Moi
 Dua tren nganh **{sector}**, phan tich:
 - Cac yeu to vi mo / thi truong dang anh huong (thue quan, ty gia, gia nguyen lieu, cau xuat khau...)
 - So sanh tinh hinh cong ty voi xu huong chung cua nganh
-- Neu cu the cac con so neu biet (vi du: "thue quan My tang X%, thi phan giam Y%")
+- Neu cu the cac con so neu biet. Chi ghi chu "can kiem tra cap nhat" neu thong tin thuc su khong co trong cac nguon du lieu da cung cap o tren.
 
 ### 4. Nhan dinh dau tu ngan gon
 Mot doan 3-5 cau tom tat: mua/giu/ban va ly do chinh tu goc do fundamental.
 
 Chu y quan trong:
 - Chi dung so lieu co trong BCTC duoc cung cap de phan tich dinh luong
-- Voi boi canh thi truong: uu tien dua tren tin tuc thuc te duoc cung cap o tren (neu co). Neu khong co tin tuc, su dung kien thuc ve nganh va ro rang ghi chu "thong tin tinh den T8/2025, can kiem tra cap nhat"
-- Neu tin tuc thuc te mau thuan voi kien thuc cu, uu tien tin tuc thuc te
-- **Khi phat hien mau thuan giua nguon Viet Nam va nguon quoc te (da danh dau ben tren), hay neu cu the trong phan Boi canh thi truong**: "Bao VN bao X, nhung SCMP/Bloomberg cho thay Y — can kiem tra them"
-- Ngay hom nay la thang 6/2026"""
+- Uu tien tuyet doi tin tuc thuc te va gia hang hoa hien tai da duoc cung cap o tren — day la du lieu moi nhat, khong phai kien thuc cu
+- KHONG viet cac cum nhu "du lieu cu", "can cap nhat", "han che thong tin" neu thong tin do da co trong phan du lieu ben tren
+- Neu tin tuc thuc te mau thuan voi nhau, hay neu ro: "Bao VN bao X, nhung SCMP/Reuters cho thay Y"
+- Ngay phan tich: {_today_str}"""
 
 
 def analyze_bctc(
