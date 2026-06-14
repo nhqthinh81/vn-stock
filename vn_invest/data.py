@@ -440,20 +440,25 @@ def get_financial_statements(symbol: str, period: str = "quarterly", source: str
                     # Đây là kỳ sau cùng năm → gắn Q1/Q2...
                     periods_clean.append(f"{s}-#{seen[s]}")
 
-            # Lọc tương lai + kỳ không hợp lệ
-            # vnstock VCI trả thêm Q5 (5 tháng), Q6 (bán niên H1), Q9 (9 tháng)
-            # → chỉ giữ Q1-Q4 và nhãn dạng YYYY (năm)
+            # Whitelist: chỉ giữ kỳ hợp lệ thực sự
+            # Hợp lệ: YYYY-Q1..Q4 (quý thực), YYYY (năm), YYYY-#N (dedup năm)
+            # Loại bỏ: Q5/Q6/Q9 (bán niên/9 tháng), năm tương lai
             from datetime import date
             today = date.today()
-            def _invalid_period(lbl):
-                # Loại kỳ lũy kế bán niên/9 tháng: Q5, Q6, Q7, Q8, Q9
-                if re.search(r'-Q([5-9]|[1-9]\d)', lbl):
+            def _valid_period(lbl):
+                # Quý thực: 2024-Q1 đến 2025-Q4
+                if re.match(r'^\d{4}-Q[1-4]$', lbl):
                     return True
-                # Loại năm tương lai
+                # Năm (annual): 2022, 2023, 2024 — chỉ quá khứ
                 m = re.match(r'^(\d{4})$', lbl)
-                if m: return int(m.group(1)) >= today.year
+                if m:
+                    return int(m.group(1)) < today.year
+                # Dedup năm: 2024-#2 (cùng năm, kỳ khác) — giữ nhưng đổi tên sau
+                if re.match(r'^\d{4}-#\d+$', lbl):
+                    yr = int(lbl[:4])
+                    return yr < today.year
                 return False
-            valid_idx = [i for i, l in enumerate(periods_clean) if not _invalid_period(l)]
+            valid_idx = [i for i, l in enumerate(periods_clean) if _valid_period(l)]
             periods_final = [periods_clean[i] for i in valid_idx]
             col_positions  = [period_idx[i] for i in valid_idx]
 
