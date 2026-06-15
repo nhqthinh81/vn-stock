@@ -127,7 +127,7 @@ def refresh_prices(source: str = DEFAULT_SOURCE) -> list[dict]:
 
 
 def get_ami_watchlist() -> list[str]:
-    """Đọc danh sách mã từ scan_result.csv của Amibroker Explorer.
+    """Đọc danh sách mã từ scan_result.csv của Amibroker Explorer (đã qua lọc).
     Đọc từng dòng lấy field đầu tiên để tránh lỗi do dấu phẩy trong số."""
     if not _AMI_SCAN.exists():
         return DEFAULT_WATCHLIST
@@ -142,6 +142,35 @@ def get_ami_watchlist() -> list[str]:
         return tickers if tickers else DEFAULT_WATCHLIST
     except Exception:
         return DEFAULT_WATCHLIST
+
+
+def get_all_ami_symbols() -> list[str]:
+    """Đọc toàn bộ mã có file CSV trong history_by_ticker/ — không qua lọc Amibroker Explorer.
+    Trả danh sách đầy đủ hơn scan_result.csv (có thể nhiều hơn đáng kể).
+    """
+    if not _AMI_DIR.exists():
+        return DEFAULT_WATCHLIST
+    try:
+        symbols = sorted(p.stem.upper() for p in _AMI_DIR.glob("*.csv"))
+        return symbols if symbols else DEFAULT_WATCHLIST
+    except Exception:
+        return DEFAULT_WATCHLIST
+
+
+def get_ami_scan_age() -> str | None:
+    """Trả thời gian sửa đổi cuối của scan_result.csv dạng 'X phút trước', hoặc None."""
+    if not _AMI_SCAN.exists():
+        return None
+    try:
+        mtime  = _AMI_SCAN.stat().st_mtime
+        mins   = int((time.time() - mtime) / 60)
+        if mins < 1:   return "vừa xong"
+        if mins < 60:  return f"{mins} phút trước"
+        hrs = mins // 60
+        if hrs < 24:   return f"{hrs} giờ trước"
+        return f"{hrs // 24} ngày trước"
+    except Exception:
+        return None
 
 
 def _parse_ami_date(date_val) -> str:

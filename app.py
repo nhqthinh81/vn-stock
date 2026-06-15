@@ -26,7 +26,8 @@ from vn_invest.data import (get_price_history, get_financial_ratios_history, get
 from vn_invest.indicators import add_all_indicators, get_latest_signals
 from vn_invest.lstm import predict as lstm_predict, model_ready, get_model_info
 from vn_invest.screener import (load_cache, load_cache_meta, scan_ami_watchlist, scan_ami_symbol,
-                                get_ami_watchlist, refresh_prices, filter_cache, scan_symbol)
+                                get_ami_watchlist, get_all_ami_symbols, get_ami_scan_age,
+                                refresh_prices, filter_cache, scan_symbol)
 from vn_invest.portfolio import load_portfolio, enrich_portfolio, portfolio_summary, sector_allocation
 
 # ── Cache functions (module-level để Streamlit hash đúng) ────────────────────
@@ -1474,8 +1475,10 @@ with tab_scan:
     if "scan_auto_interval" not in st.session_state:
         st.session_state.scan_auto_interval = 10
 
-    _ami_list   = get_ami_watchlist()
-    _lstm_avail = model_ready()
+    _ami_list      = get_ami_watchlist()       # từ scan_result.csv (đã lọc qua Amibroker Explorer)
+    _all_ami_syms  = get_all_ami_symbols()     # toàn bộ history_by_ticker/*.csv
+    _ami_scan_age  = get_ami_scan_age()        # tuổi file scan_result.csv
+    _lstm_avail    = model_ready()
 
     # ── Controls row ──────────────────────────────────────────────────────────
     scan_opt_c1, scan_opt_c2, scan_opt_c3, scan_opt_c4 = st.columns([2, 1, 1, 1])
@@ -1492,7 +1495,7 @@ with tab_scan:
                                           index=1, key="scan_interval",
                                           disabled=not _auto_refresh_price)
 
-    col_a, col_b, col_c = st.columns([2, 2, 2])
+    col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 2])
 
     with col_a:
         if st.button("🔄 Làm mới giá (nhanh ~2s)", use_container_width=True):
@@ -1501,7 +1504,12 @@ with tab_scan:
             st.success(f"Đã cập nhật giá cho {len(st.session_state.scan_cache)} mã")
 
     with col_b:
-        if st.button(f"⚡ Scan Amibroker ({len(_ami_list)} mã)", use_container_width=True):
+        _age_note = f" · {_ami_scan_age}" if _ami_scan_age else ""
+        if st.button(
+            f"⚡ Scan đã lọc ({len(_ami_list)} mã{_age_note})",
+            use_container_width=True,
+            help="Scan các mã trong scan_result.csv — đã qua bộ lọc Amibroker Explorer",
+        ):
             _pb = st.progress(0); _st = st.empty()
             def on_progress(i, total, sym):
                 _pb.progress(int((i+1)/total*100))
@@ -1514,6 +1522,23 @@ with tab_scan:
             st.success(f"Hoàn tất! Đã scan {len(st.session_state.scan_cache)} mã{ai_note}.")
 
     with col_c:
+        if st.button(
+            f"🌐 Scan tất cả ({len(_all_ami_syms)} mã)",
+            use_container_width=True,
+            help="Scan toàn bộ mã có data trong history_by_ticker/ — không qua lọc Amibroker",
+        ):
+            _pb2 = st.progress(0); _st2 = st.empty()
+            def on_progress_all(i, total, sym):
+                _pb2.progress(int((i+1)/total*100))
+                _st2.text(f"Đang scan {sym}... ({i+1}/{total})")
+            st.session_state.scan_cache = scan_ami_watchlist(
+                symbols=_all_ami_syms, with_lstm=_use_lstm_scan, progress_callback=on_progress_all
+            )
+            _pb2.empty(); _st2.empty()
+            ai_note = " (kèm AI Score)" if _use_lstm_scan else ""
+            st.success(f"Hoàn tất! Đã scan {len(st.session_state.scan_cache)} mã{ai_note}.")
+
+    with col_d:
         scan_single = st.text_input("Scan 1 mã", placeholder="VNM", key="scan_single_input").upper().strip()
         if st.button("Scan mã này", use_container_width=True) and scan_single:
             with st.spinner(f"Đang scan {scan_single}..."):
