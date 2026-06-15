@@ -1,20 +1,25 @@
 """Tab Phái Sinh — VN30F1M Signal Bot (Multi-TF + Trailing Stop).
 
-Adapted from D:/phaisinh.py for multi-tab Streamlit integration:
-- Removed while-loop; uses st.rerun() with auto-refresh toggle instead
-- Session state prefixed 'ps_' to avoid conflicts with other tabs
-- Telegram reads from .env (TELEGRAM_TOKEN / TELEGRAM_CHAT_ID)
-- Google Sheets optional: silent fail if credentials.json absent
+Fixes vs v1:
+- Trend cached by mtime: không recompute 5000-row resample mỗi giây
+- prob lưu session_state: hiển thị đúng khi đang giữ lệnh
+- Lỗi trading logic log ra UI thay vì nuốt im lặng
+- LSTM features: drop warmup rows thay vì fillna(0)
+- Cảnh báo scaler out-of-range khi giá ngoài training range
+- Kiểm tra giờ giao dịch VN30F1M, cảnh báo cuối phiên
+- Option "Chỉ trade khi đa khung đồng pha"
+- Thống kê session: PnL tổng, win rate, số lệnh
+- Trailing stop / SL nhập từ UI
 """
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ── Data paths (try D:\ first, then C:\) ─────────────────────────────────────
+# ── Đường dẫn dữ liệu ────────────────────────────────────────────────────────
 _POTENTIAL_PATHS = [
     r"D:\AmibrokerData",
     r"C:\AmibrokerData",
@@ -31,30 +36,67 @@ if _BASE_DATA_DIR:
 else:
     _DATA_FILE_1M = _MODEL_PATH = _SCALER_PATH = _JOURNAL_FILE = _CRED_FILE = None
 
-# ── Strategy constants ────────────────────────────────────────────────────────
-_SEQ_LEN           = 30
-_THRESHOLD_BUY     = 0.60
-_THRESHOLD_SELL    = 0.40
-_TRAILING_STOP_PTS = 3.0
-_INITIAL_SL_PTS    = 3.0
-_GSHEET_NAME       = "VN30_Trading_Journal"
+# ── Hằng số chiến thuật (default — có thể ghi đè qua UI) ────────────────────
+_SEQ_LEN             = 30
+_DEFAULT_THRESHOLD_BUY   = 0.60
+_DEFAULT_THRESHOLD_SELL  = 0.40
+_DEFAULT_TRAILING_PTS    = 3.0
+_DEFAULT_INITIAL_SL_PTS  = 3.0
+_GSHEET_NAME         = "VN30_Trading_Journal"
+
+# ── Giờ giao dịch VN30F1M ────────────────────────────────────────────────────
+_SESSION1_START = dtime(9, 0)
+_SESSION1_END   = dtime(11, 30)
+_SESSION2_START = dtime(13, 0)
+_SESSION2_END   = dtime(14, 45)
+_WARN_BEFORE_CLOSE_MIN = 5   # cảnh báo trước khi đóng phiên N phút
 
 
+def _in_trading_session(now: dtime | None = None) -> tuple[bool, str]:
+    """Trả (đang_trong_phiên, thông_điệp_trạng_thái)."""
+    if now is None:
+        now = datetime.now().time()
+    if _SESSION1_START <= now <= _SESSION1_END:
+        # Kiểm tra sắp hết phiên 1
+        from datetime import timedelta
+        dt_now  = datetime.combine(datetime.today(), now)
+        dt_end1 = datetime.combine(datetime.today(), _SESSION1_END)
+        mins_left = (dt_end1 - dt_now).seconds // 60
+        if mins_left <= _WARN_BEFORE_CLOSE_MIN:
+            return True, f"⚠️ Phiên 1 đóng cửa sau {mins_left} phút (11:30)"
+        return True, f"🟢 Phiên 1 ({_SESSION1_START.strftime('%H:%M')}–{_SESSION1_END.strftime('%H:%M')})"
+    if _SESSION2_START <= now <= _SESSION2_END:
+        from datetime import timedelta
+        dt_now  = datetime.combine(datetime.today(), now)
+        dt_end2 = datetime.combine(datetime.today(), _SESSION2_END)
+        mins_left = (dt_end2 - dt_now).seconds // 60
+        if mins_left <= _WARN_BEFORE_CLOSE_MIN:
+            return True, f"⚠️ Phiên 2 đóng cửa sau {mins_left} phút (14:45)"
+        return True, f"🟢 Phiên 2 ({_SESSION2_START.strftime('%H:%M')}–{_SESSION2_END.strftime('%H:%M')})"
+    if now < _SESSION1_START:
+        return False, f"⏳ Chờ mở phiên 1 (09:00)"
+    if _SESSION1_END < now < _SESSION2_START:
+        return False, "⏸ Nghỉ trưa (11:30–13:00)"
+    return False, "🔴 Ngoài giờ giao dịch (>14:45)"
+
+
+# ── Load AI model (cached toàn app) ──────────────────────────────────────────
 @st.cache_resource
 def _load_ai_system():
-    """Load LSTM model + scaler once; cached across reruns."""
     if not (_SCALER_PATH and _MODEL_PATH and
             os.path.exists(_SCALER_PATH) and os.path.exists(_MODEL_PATH)):
         return None, None
     try:
         import joblib
         from tensorflow.keras.models import load_model  # type: ignore
-        return joblib.load(_SCALER_PATH), load_model(_MODEL_PATH)
-    except Exception:
-        return None, None
+        scaler = joblib.load(_SCALER_PATH)
+        model  = load_model(_MODEL_PATH)
+        return scaler, model
+    except Exception as e:
+        return None, str(e)   # trả lỗi để UI hiển thị
 
 
-# ── Feature / prediction helpers ─────────────────────────────────────────────
+# ── Feature helpers ───────────────────────────────────────────────────────────
 
 def _clean_num(x):
     try:
@@ -74,65 +116,76 @@ def _load_df_1m(path: str):
         if "Date" in df.columns and "Time" in df.columns:
             df.index = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
         return df.dropna(subset=["Close"]).copy()
-    except Exception:
+    except Exception as e:
         return None
 
 
 def _calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Tính features, drop warmup rows thay vì fillna(0)."""
     import pandas_ta as ta  # type: ignore
     df = df.copy()
-    df["RSI"]       = ta.rsi(df["Close"], 14)
-    macd            = ta.macd(df["Close"])
-    df["MACD"]      = macd.iloc[:, 0] if macd is not None else 0
-    df["EMA_34"]    = ta.ema(df["Close"], 34)
-    df["Dist_EMA"]  = (df["Close"] - df["EMA_34"]) / df["Close"]
-    df["Log_Ret"]   = np.log(df["Close"] / df["Close"].shift(1))
+    df["RSI"]        = ta.rsi(df["Close"], 14)
+    macd             = ta.macd(df["Close"])
+    df["MACD"]       = macd.iloc[:, 0] if macd is not None else np.nan
+    df["EMA_34"]     = ta.ema(df["Close"], 34)
+    df["Dist_EMA"]   = (df["Close"] - df["EMA_34"]) / df["Close"]
+    df["Log_Ret"]    = np.log(df["Close"] / df["Close"].shift(1))
     df["Vol_Change"] = df["Volume"].pct_change()
-    df.fillna(0, inplace=True)
+    # Drop warmup NaN thay vì fill 0 — MACD cần ~26 rows, EMA34 cần 34 rows
+    df.dropna(subset=["RSI", "MACD", "EMA_34"], inplace=True)
+    # Log_Ret / Vol_Change row đầu vẫn NaN → fill 0 (hàng đầu sau warmup, an toàn)
+    df[["Log_Ret", "Vol_Change"]] = df[["Log_Ret", "Vol_Change"]].fillna(0)
     return df
 
 
-def _get_ai_prediction(df_1m: pd.DataFrame, scaler, model) -> float:
-    if scaler is None or model is None or len(df_1m) < _SEQ_LEN + 50:
-        return 0.5
+def _get_ai_prediction(df_1m: pd.DataFrame, scaler, model) -> tuple[float, str | None]:
+    """Trả (prob, warning_msg). warning_msg != None nếu scaler out-of-range."""
+    if scaler is None or model is None or len(df_1m) < _SEQ_LEN + 60:
+        return 0.5, None
     try:
-        df_f   = _calculate_features(df_1m.tail(150))
-        cols   = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
-        seq    = df_f[cols].tail(_SEQ_LEN).values
+        df_f  = _calculate_features(df_1m.tail(200))
+        if len(df_f) < _SEQ_LEN:
+            return 0.5, "Không đủ hàng sau drop warmup"
+        cols  = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
+        seq   = df_f[cols].tail(_SEQ_LEN).values
+
+        # Kiểm tra out-of-range so với data scaler đã fit
+        warn = None
+        if hasattr(scaler, "data_min_") and hasattr(scaler, "data_max_"):
+            lo, hi = scaler.data_min_, scaler.data_max_
+            if np.any(seq < lo * 0.8) or np.any(seq > hi * 1.2):
+                warn = "⚠️ Giá trị feature vượt ngoài range lúc train — dự báo có thể sai"
+
         scaled = scaler.transform(seq).reshape(1, _SEQ_LEN, len(cols))
-        return float(model.predict(scaled, verbose=0)[0][0])
-    except Exception:
-        return 0.5
+        prob   = float(model.predict(scaled, verbose=0)[0][0])
+        return prob, warn
+    except Exception as e:
+        return 0.5, f"Lỗi AI: {e}"
 
 
-def _get_trend_from_1m(df_1m: pd.DataFrame):
+def _get_trend_from_1m(df_1m: pd.DataFrame) -> tuple[int, str]:
+    """Multi-TF trend (Daily / 1H / 15m). Nặng — chỉ gọi khi mtime thay đổi."""
     import pandas_ta as ta  # type: ignore
     if df_1m is None or len(df_1m) < 80:
         return 0, "Không đủ dữ liệu"
-
-    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    agg    = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
     recent = df_1m.tail(5000).copy()
     df_15  = recent.resample("15T").agg(agg).dropna()
     df_1h  = recent.resample("60T").agg(agg).dropna()
     df_d   = recent.resample("1D").agg(agg).dropna()
-
     if len(df_15) < 10 or len(df_1h) < 10 or len(df_d) < 10:
         return 0, "Đang gom dữ liệu đa khung..."
-
     df_d["EMA20"]  = ta.ema(df_d["Close"], 20)
     df_1h["EMA20"] = ta.ema(df_1h["Close"], 20)
     df_15["EMA10"] = ta.ema(df_15["Close"], 10)
     df_d.dropna(subset=["EMA20"], inplace=True)
     df_1h.dropna(subset=["EMA20"], inplace=True)
     df_15.dropna(subset=["EMA10"], inplace=True)
-
     if not (len(df_d) and len(df_1h) and len(df_15)):
         return 0, "Đang gom dữ liệu đa khung..."
-
     t_d  = 1 if df_d.iloc[-1]["Close"]  > df_d.iloc[-1]["EMA20"]  else -1
     t_1h = 1 if df_1h.iloc[-1]["Close"] > df_1h.iloc[-1]["EMA20"] else -1
     t_15 = 1 if df_15.iloc[-1]["Close"] > df_15.iloc[-1]["EMA10"] else -1
-
     if t_d == t_1h == t_15 == 1:  return  1, "UPTREND (D/H/15p đồng pha)"
     if t_d == t_1h == t_15 == -1: return -1, "DOWNTREND (D/H/15p đồng pha)"
     if t_d == t_1h == 1:          return  1, "UPTREND (D/H đồng pha, 15p nhiễu)"
@@ -140,7 +193,7 @@ def _get_trend_from_1m(df_1m: pd.DataFrame):
     return 0, "Xu hướng đa khung xung đột"
 
 
-# ── Telegram / journal helpers ────────────────────────────────────────────────
+# ── Telegram / journal ────────────────────────────────────────────────────────
 
 def _send_telegram(msg: str):
     import requests  # type: ignore
@@ -175,9 +228,8 @@ def _append_journal(entry: dict):
         "reason": entry["reason"],
     }])
     try:
-        mode   = "a" if os.path.exists(_JOURNAL_FILE) else "w"
-        header = not os.path.exists(_JOURNAL_FILE)
-        row.to_csv(_JOURNAL_FILE, mode=mode, header=header, index=False)
+        exists = os.path.exists(_JOURNAL_FILE)
+        row.to_csv(_JOURNAL_FILE, mode="a" if exists else "w", header=not exists, index=False)
     except Exception:
         pass
 
@@ -185,7 +237,6 @@ def _append_journal(entry: dict):
 def _sync_gsheet_async(entry: dict):
     if not (_CRED_FILE and os.path.exists(_CRED_FILE)):
         return
-
     def _run():
         try:
             import gspread  # type: ignore
@@ -202,20 +253,51 @@ def _sync_gsheet_async(entry: dict):
             ])
         except Exception:
             pass
-
     threading.Thread(target=_run, daemon=True).start()
 
 
-# ── Main render ───────────────────────────────────────────────────────────────
+# ── Thống kê session từ log ───────────────────────────────────────────────────
+
+def _calc_session_stats(log: list[dict]) -> dict:
+    """Tính PnL tổng, win rate, số lệnh từ ps_log_history."""
+    closed = [x for x in log if x["act"].startswith("ĐÓNG")]
+    if not closed:
+        return {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "win_rate": 0.0}
+    total_pnl = 0.0
+    wins = losses = 0
+    for x in closed:
+        try:
+            pnl = float(str(x["pnl"]).replace("—", "0"))
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            else:
+                losses += 1
+        except Exception:
+            pass
+    n = wins + losses
+    return {
+        "total":     n,
+        "wins":      wins,
+        "losses":    losses,
+        "total_pnl": total_pnl,
+        "win_rate":  (wins / n * 100) if n else 0.0,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main render
+# ══════════════════════════════════════════════════════════════════════════════
 
 def render_phaisinh_tab():
-    """Render toàn bộ tab Phái Sinh. Gọi từ app.py bên trong with tab_phaisinh:"""
+    """Render toàn bộ tab Phái Sinh. Gọi từ app.py."""
     import time
 
-    # CSS
+    # ── CSS ──────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
-        .ps-box    { background:#1E2129;padding:16px;border-radius:10px;text-align:center;border:1px solid #333; }
+        .ps-box    { background:#1E2129;padding:16px;border-radius:10px;
+                     text-align:center;border:1px solid #333;margin-bottom:4px; }
         .ps-active { border:2px solid #00E676 !important;background:rgba(0,230,118,.08) !important; }
         .ps-warn   { border:2px solid #FF5252 !important;background:rgba(255,82,82,.08) !important; }
         .ps-log    { width:100%;border-collapse:collapse;margin-top:8px; }
@@ -228,13 +310,18 @@ def render_phaisinh_tab():
     </style>
     """, unsafe_allow_html=True)
 
-    # Session state defaults
+    # ── Session state defaults ────────────────────────────────────────────────
     _defaults = {
-        "ps_active_trade": None,
-        "ps_log_history":  [],
-        "ps_last_time":    "",
-        "ps_last_mtime":   0,
-        "ps_df_1m":        None,
+        "ps_active_trade":  None,
+        "ps_log_history":   [],
+        "ps_last_time":     "",
+        "ps_last_mtime":    0,
+        "ps_df_1m":         None,
+        "ps_last_prob":     0.5,        # FIX: lưu prob liên tục
+        "ps_last_trend":    (0, "—"),   # FIX: cache trend theo mtime
+        "ps_trend_mtime":   -1,         # mtime lần tính trend gần nhất
+        "ps_errors":        [],         # FIX: log lỗi trading ra UI
+        "ps_ai_warn":       None,       # cảnh báo scaler out-of-range
     }
     for k, v in _defaults.items():
         if k not in st.session_state:
@@ -242,7 +329,6 @@ def render_phaisinh_tab():
 
     st.header("⚡ VN30F1M — Signal Bot (Multi-TF + Trailing Stop)")
 
-    # No data directory
     if not _BASE_DATA_DIR:
         st.error(
             "❌ Không tìm thấy thư mục AmibrokerData tại D:\\ hoặc C:\\. "
@@ -250,34 +336,51 @@ def render_phaisinh_tab():
         )
         return
 
-    # ── Controls bar ─────────────────────────────────────────────────────────
-    c1, c2, c3 = st.columns([1, 1, 3])
-    auto_refresh = c1.toggle("🔄 Auto Refresh (1s)", value=False, key="ps_auto_toggle")
-    if c2.button("🚨 Reset Khẩn Cấp", use_container_width=True):
+    # ── Controls ──────────────────────────────────────────────────────────────
+    with st.expander("⚙️ Cấu hình chiến thuật", expanded=False):
+        cfg_c1, cfg_c2, cfg_c3, cfg_c4 = st.columns(4)
+        trailing_pts   = cfg_c1.number_input("Trailing Stop (điểm)", 0.5, 20.0, _DEFAULT_TRAILING_PTS,   0.5, key="ps_trailing")
+        initial_sl_pts = cfg_c2.number_input("SL ban đầu (điểm)",   0.5, 20.0, _DEFAULT_INITIAL_SL_PTS, 0.5, key="ps_sl")
+        thr_buy        = cfg_c3.slider("Ngưỡng LONG (%)", 50, 90, int(_DEFAULT_THRESHOLD_BUY * 100), key="ps_thr_buy")  / 100
+        thr_sell       = cfg_c4.slider("Ngưỡng SHORT (%)", 10, 50, int(_DEFAULT_THRESHOLD_SELL * 100), key="ps_thr_sell") / 100
+        strict_trend   = st.checkbox(
+            "Chỉ trade khi đa khung đồng pha (D+H+15p cùng chiều)",
+            value=False, key="ps_strict_trend",
+            help="Bật: chỉ vào lệnh khi cả 3 khung D/H/15p đồng pha. Tắt: cho phép khi D+H đồng pha dù 15p khác."
+        )
+
+    top_c1, top_c2, top_c3 = st.columns([1, 1, 2])
+    auto_refresh = top_c1.toggle("🔄 Auto Refresh (1s)", value=False, key="ps_auto_toggle")
+    if top_c2.button("🚨 Reset Khẩn Cấp", use_container_width=True):
         st.session_state["ps_active_trade"] = None
+        st.session_state["ps_errors"]       = []
         st.success("Đã reset về trạng thái Quan sát!")
-    c3.caption(
-        f"Trailing: **{_TRAILING_STOP_PTS} đ** | "
-        f"LONG khi AI > **{_THRESHOLD_BUY*100:.0f}%** | "
-        f"SHORT khi AI < **{_THRESHOLD_SELL*100:.0f}%**"
-    )
+
+    # ── Giờ giao dịch ─────────────────────────────────────────────────────────
+    in_session, session_msg = _in_trading_session()
+    top_c3.caption(session_msg)
+    if not in_session and st.session_state["ps_active_trade"] is not None:
+        st.warning(
+            "⚠️ Đang ngoài giờ giao dịch nhưng còn lệnh mở trong session. "
+            "Kiểm tra lại trạng thái lệnh thực tế trên sàn."
+        )
 
     st.divider()
 
-    # ── Load AI (cached) ──────────────────────────────────────────────────────
-    ai_scaler, ai_model = _load_ai_system()
+    # ── Load AI ───────────────────────────────────────────────────────────────
+    ai_result = _load_ai_system()
+    # _load_ai_system trả (scaler, model) hoặc (None, error_str) nếu lỗi load
+    if isinstance(ai_result[1], str) and ai_result[0] is None:
+        st.error(f"❌ Lỗi load model LSTM: {ai_result[1]}")
+        ai_scaler, ai_model = None, None
+    else:
+        ai_scaler, ai_model = ai_result
 
-    if ai_model is None:
-        st.warning(
-            f"⚠️ Chưa có model LSTM (`{_MODEL_PATH}`). "
-            "Bot chạy ở chế độ đa khung, không có xác nhận AI."
-        )
+    if ai_model is None and not isinstance(ai_result[1], str):
+        st.warning(f"⚠️ Chưa có model LSTM (`{_MODEL_PATH}`). Bot chạy chế độ đa khung.")
 
-    # ── Read CSV only when Amibroker writes new data ──────────────────────────
+    # ── Đọc CSV khi Amibroker ghi file mới ───────────────────────────────────
     current_price = 0.0
-    prob          = 0.5
-    trend         = 0
-    trend_text    = "Chưa xác định"
     last_time     = st.session_state["ps_last_time"]
     ai_signal     = "WAIT"
 
@@ -291,11 +394,24 @@ def render_phaisinh_tab():
 
     df_1m = st.session_state["ps_df_1m"]
 
+    # ── FIX: Cache trend — chỉ tính lại khi mtime đổi ───────────────────────
+    cur_mtime_val = st.session_state["ps_last_mtime"]
+    if cur_mtime_val != st.session_state["ps_trend_mtime"] and df_1m is not None:
+        trend, trend_text = _get_trend_from_1m(df_1m)
+        st.session_state["ps_last_trend"]  = (trend, trend_text)
+        st.session_state["ps_trend_mtime"] = cur_mtime_val
+    else:
+        trend, trend_text = st.session_state["ps_last_trend"]
+
+    # ── FIX: Lấy prob từ session (không reset về 0.5 mỗi rerun) ─────────────
+    prob = st.session_state["ps_last_prob"]
+
+    # ── Logic trading (có error logging) ─────────────────────────────────────
     if df_1m is not None and len(df_1m) > 0:
+        _trade_error = None
         try:
             current_price = float(df_1m.iloc[-1]["Close"])
             last_time     = df_1m.index[-1].strftime("%Y-%m-%d %H:%M")
-            trend, trend_text = _get_trend_from_1m(df_1m)
 
             # A. Quản lý lệnh đang mở
             trade = st.session_state["ps_active_trade"]
@@ -305,13 +421,13 @@ def render_phaisinh_tab():
                     if trade["type"] == "LONG":
                         if current_price > trade["peak"]:
                             trade["peak"] = current_price
-                            trade["sl"]   = max(trade["sl"], trade["peak"] - _TRAILING_STOP_PTS)
+                            trade["sl"]   = max(trade["sl"], trade["peak"] - trailing_pts)
                         if current_price <= trade["sl"]:
                             exit_triggered, exit_reason = True, "Chạm Trailing Stop / SL"
                     elif trade["type"] == "SHORT":
                         if current_price < trade["peak"]:
                             trade["peak"] = current_price
-                            trade["sl"]   = min(trade["sl"], trade["peak"] + _TRAILING_STOP_PTS)
+                            trade["sl"]   = min(trade["sl"], trade["peak"] + trailing_pts)
                         if current_price >= trade["sl"]:
                             exit_triggered, exit_reason = True, "Chạm Trailing Stop / SL"
 
@@ -334,27 +450,42 @@ def render_phaisinh_tab():
                     _sync_gsheet_async(log_entry)
                     st.session_state["ps_active_trade"] = None
 
-            # B. Phát tín hiệu mới
+            # B. Phát tín hiệu mới (candle mới chưa xử lý)
             elif last_time != st.session_state["ps_last_time"]:
                 if ai_model is not None:
-                    prob = _get_ai_prediction(df_1m, ai_scaler, ai_model)
+                    prob_new, ai_warn = _get_ai_prediction(df_1m, ai_scaler, ai_model)
+                    prob = prob_new
+                    st.session_state["ps_last_prob"] = prob
+                    st.session_state["ps_ai_warn"]   = ai_warn
                 conf = prob * 100 if prob >= 0.5 else (1 - prob) * 100
 
-                if prob >= _THRESHOLD_BUY:
+                if prob >= thr_buy:
                     ai_signal = "LONG"
-                elif prob <= _THRESHOLD_SELL:
+                elif prob <= thr_sell:
                     ai_signal = "SHORT"
 
-                # Filter: không trade ngược trend mạnh
-                cho_vao = (
-                    ai_signal != "WAIT"
-                    and not (trend == 1  and ai_signal == "SHORT")
-                    and not (trend == -1 and ai_signal == "LONG")
-                )
+                # FIX: Filter "strict trend" option
+                if strict_trend:
+                    # Chỉ cho vào khi 3 khung đồng pha hoàn toàn
+                    cho_vao = (
+                        (ai_signal == "LONG"  and trend == 1)
+                        or (ai_signal == "SHORT" and trend == -1)
+                    )
+                    if ai_signal != "WAIT" and not cho_vao:
+                        ai_signal = "WAIT"  # block signal khi không đồng pha
+                else:
+                    # Chỉ cấm ngược trend rõ ràng (D+H đồng pha)
+                    if (trend == 1  and ai_signal == "SHORT") or (trend == -1 and ai_signal == "LONG"):
+                        ai_signal = "WAIT"
+                    cho_vao = ai_signal != "WAIT"
 
-                if cho_vao:
-                    sl = (current_price - _INITIAL_SL_PTS if ai_signal == "LONG"
-                          else current_price + _INITIAL_SL_PTS)
+                # Không vào lệnh ngoài giờ giao dịch
+                if not in_session:
+                    cho_vao = False
+
+                if ai_signal != "WAIT" and cho_vao:
+                    sl = (current_price - initial_sl_pts if ai_signal == "LONG"
+                          else current_price + initial_sl_pts)
                     st.session_state["ps_active_trade"] = {
                         "type": ai_signal, "entry": current_price,
                         "peak": current_price, "sl": sl, "entry_time": last_time,
@@ -379,13 +510,30 @@ def render_phaisinh_tab():
 
             st.session_state["ps_last_time"] = last_time
 
-        except Exception:
-            pass
+        except Exception as e:
+            # FIX: Log lỗi ra session thay vì nuốt im lặng
+            err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {type(e).__name__}: {e}"
+            errs = st.session_state["ps_errors"]
+            errs.insert(0, err_msg)
+            st.session_state["ps_errors"] = errs[:10]  # giữ 10 lỗi gần nhất
 
     elif _DATA_FILE_1M and not os.path.exists(_DATA_FILE_1M):
         st.info(f"📂 Đang chờ file `{_DATA_FILE_1M}` từ Amibroker...")
 
-    # ── Signal display ────────────────────────────────────────────────────────
+    # Hiện cảnh báo scaler out-of-range
+    if st.session_state.get("ps_ai_warn"):
+        st.warning(st.session_state["ps_ai_warn"])
+
+    # ── Hiển thị lỗi trading (nếu có) ────────────────────────────────────────
+    if st.session_state["ps_errors"]:
+        with st.expander(f"🐛 Lỗi hệ thống ({len(st.session_state['ps_errors'])})", expanded=True):
+            for err in st.session_state["ps_errors"]:
+                st.code(err, language=None)
+            if st.button("Xóa log lỗi", key="ps_clear_err"):
+                st.session_state["ps_errors"] = []
+                st.rerun()
+
+    # ── Tín hiệu hành động ───────────────────────────────────────────────────
     st.subheader("🎯 Tín Hiệu Hành Động Hiện Tại")
     col1, col2, col3 = st.columns([1, 1.5, 1])
 
@@ -408,24 +556,23 @@ def render_phaisinh_tab():
         col2.markdown(
             f"<div class='ps-box {box_cls}'>TRẠNG THÁI<br>"
             f"<span class='{dir_cls}' style='font-size:20px'>ĐANG GIỮ {active['type']}</span><br>"
-            f"Vào lệnh: <b>{active['entry']:,.1f}</b><br>"
+            f"Vào lệnh: <b>{active['entry']:,.1f}</b> &nbsp;|&nbsp; "
             f"Lãi/Lỗ: <b style='font-size:22px;color:{clr}'>{cur_pnl:+.1f} đ</b></div>",
             unsafe_allow_html=True,
         )
         col3.markdown(
             f"<div class='ps-box'>Trailing SL<br>"
-            f"<b style='font-size:28px;color:#FFD600'>{active['sl']:.1f}</b></div>",
+            f"<b style='font-size:28px;color:#FFD600'>{active['sl']:.1f}</b><br>"
+            f"<span style='font-size:12px;color:#9CA3AF'>AI {prob*100:.0f}% | {trend_text}</span></div>",
             unsafe_allow_html=True,
         )
     else:
-        # Show AI probability / trend when flat
         if ai_signal == "LONG":
             sig_color, sig_label = "#00E676", "🚀 LONG"
         elif ai_signal == "SHORT":
             sig_color, sig_label = "#FF5252", "🔻 SHORT"
         else:
             sig_color, sig_label = "#9CA3AF", "QUAN SÁT"
-
         col2.markdown(
             "<div class='ps-box'>TRẠNG THÁI<br>"
             "<b style='font-size:22px;color:#AAA'>ĐỨNG NGOÀI</b></div>",
@@ -441,7 +588,19 @@ def render_phaisinh_tab():
 
     st.divider()
 
-    # ── Signal log ────────────────────────────────────────────────────────────
+    # ── Thống kê session ──────────────────────────────────────────────────────
+    stats = _calc_session_stats(st.session_state["ps_log_history"])
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Số lệnh đóng",  stats["total"])
+    s2.metric("Thắng / Thua",  f"{stats['wins']} / {stats['losses']}")
+    s3.metric("Win Rate",       f"{stats['win_rate']:.0f}%")
+    pnl_color = "normal" if stats["total_pnl"] >= 0 else "inverse"
+    s4.metric("PnL session",    f"{stats['total_pnl']:+.1f} đ",
+              delta_color=pnl_color)
+
+    st.divider()
+
+    # ── Nhật ký tín hiệu ─────────────────────────────────────────────────────
     st.subheader("📜 Nhật Ký Tín Hiệu (Session)")
     log = st.session_state["ps_log_history"]
     if log:
@@ -472,7 +631,7 @@ def render_phaisinh_tab():
     else:
         st.info("Hệ thống đang quan sát đồ thị. Chờ AI xuất tín hiệu đầu tiên...")
 
-    # ── Journal file history ──────────────────────────────────────────────────
+    # ── Journal từ file ───────────────────────────────────────────────────────
     if _JOURNAL_FILE and os.path.exists(_JOURNAL_FILE):
         with st.expander("📂 Lịch sử Journal (file CSV)", expanded=False):
             try:
@@ -481,7 +640,7 @@ def render_phaisinh_tab():
             except Exception:
                 st.warning("Không đọc được file journal.")
 
-    # ── Auto-refresh (phải ở cuối để render xong trước khi rerun) ────────────
+    # ── Auto-refresh (cuối cùng) ──────────────────────────────────────────────
     if auto_refresh:
         time.sleep(1)
         st.rerun()
