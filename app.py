@@ -25,7 +25,7 @@ from vn_invest.data import (get_price_history, get_financial_ratios_history, get
                             get_side_stats, get_market_indices, get_capital_history, get_macro_data)
 from vn_invest.indicators import add_all_indicators, get_latest_signals
 from vn_invest.lstm import predict as lstm_predict, model_ready, get_model_info
-from vn_invest.screener import (load_cache, scan_ami_watchlist, scan_ami_symbol,
+from vn_invest.screener import (load_cache, load_cache_meta, scan_ami_watchlist, scan_ami_symbol,
                                 get_ami_watchlist, refresh_prices, filter_cache, scan_symbol)
 from vn_invest.portfolio import load_portfolio, enrich_portfolio, portfolio_summary, sector_allocation
 
@@ -1462,20 +1462,35 @@ with tab_tech:
 # TAB 3 — QUICK SCAN
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_scan:
+    from datetime import datetime as _dt
+
     st.header("Quick Scan — Toàn thị trường")
 
+    # ── Session state ─────────────────────────────────────────────────────────
     if "scan_cache" not in st.session_state:
         st.session_state.scan_cache = load_cache()
+    if "scan_auto_refresh" not in st.session_state:
+        st.session_state.scan_auto_refresh = False
+    if "scan_auto_interval" not in st.session_state:
+        st.session_state.scan_auto_interval = 10
 
     _ami_list   = get_ami_watchlist()
     _lstm_avail = model_ready()
-    scan_opt_c1, scan_opt_c2 = st.columns([3, 1])
+
+    # ── Controls row ──────────────────────────────────────────────────────────
+    scan_opt_c1, scan_opt_c2, scan_opt_c3, scan_opt_c4 = st.columns([2, 1, 1, 1])
     with scan_opt_c2:
         _use_lstm_scan = st.checkbox(
             "Kèm AI Score", value=_lstm_avail,
             disabled=not _lstm_avail,
             help="Chạy LSTM cho mỗi mã khi scan (~2-3s thêm/mã nếu không có GPU)"
         )
+    with scan_opt_c3:
+        _auto_refresh_price = st.toggle("⏱ Tự làm mới giá", value=False, key="scan_auto_toggle")
+    with scan_opt_c4:
+        _auto_interval_min = st.selectbox("Mỗi (phút)", [5, 10, 15, 30],
+                                          index=1, key="scan_interval",
+                                          disabled=not _auto_refresh_price)
 
     col_a, col_b, col_c = st.columns([2, 2, 2])
 
@@ -1506,6 +1521,46 @@ with tab_scan:
             if rec: st.session_state["single_scan_result"] = rec
             else:   st.error("Không lấy được dữ liệu")
 
+    # ── Fix 2+3: Hiển thị tuổi cache + cảnh báo signal cũ ───────────────────
+    _meta = load_cache_meta()
+    _scanned_str   = _meta.get("scanned_at")
+    _refreshed_str = _meta.get("price_refreshed_at")
+
+    def _age_label(ts_str: str | None) -> str:
+        if not ts_str:
+            return "chưa có"
+        try:
+            dt   = _dt.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            mins = int((_dt.now() - dt).total_seconds() / 60)
+            if mins < 1:   return "vừa xong"
+            if mins < 60:  return f"{mins} phút trước"
+            hrs = mins // 60
+            if hrs < 24:   return f"{hrs} giờ trước"
+            return f"{hrs // 24} ngày trước"
+        except Exception:
+            return ts_str
+
+    _info_parts = [f"📊 Signal scan: **{_age_label(_scanned_str)}**"]
+    if _refreshed_str:
+        _info_parts.append(f"⚡ Giá làm mới: **{_age_label(_refreshed_str)}**")
+    if _meta.get("count"):
+        _info_parts.append(f"**{_meta['count']} mã**")
+    st.caption(" &nbsp;|&nbsp; ".join(_info_parts))
+
+    # Cảnh báo khi giá mới hơn signal scan
+    if _scanned_str and _refreshed_str:
+        try:
+            _t_scan    = _dt.strptime(_scanned_str,   "%Y-%m-%d %H:%M:%S")
+            _t_refresh = _dt.strptime(_refreshed_str, "%Y-%m-%d %H:%M:%S")
+            if _t_refresh > _t_scan:
+                st.warning(
+                    "⚠️ **Giá đã được làm mới** sau lần Scan cuối — "
+                    "cột Giá phản ánh giá hiện tại nhưng **Signal / RSI / MACD vẫn từ lần Scan trước**. "
+                    "Nhấn '⚡ Scan Amibroker' để tính lại tín hiệu."
+                )
+        except Exception:
+            pass
+
     if "single_scan_result" in st.session_state:
         rec = st.session_state["single_scan_result"]
         st.divider()
@@ -1534,14 +1589,16 @@ with tab_scan:
     f_phase  = filter_cols[2].selectbox("Giai đoạn",["Tất cả","Accumulation","Markup","Distribution","Markdown","Neutral"])
     f_ai     = filter_cols[3].selectbox("AI Score",  ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
 
+    # Fix 1: dùng session_state thay vì đọc disk 2 lần
     filtered = filter_cache(
         signal=None if f_signal=="Tất cả" else f_signal,
         risk=None   if f_risk=="Tất cả"   else f_risk,
         phase=None  if f_phase=="Tất cả"  else f_phase,
+        data=st.session_state.scan_cache,
     )
 
-    # Toàn bộ cache — dùng cho Khuyến Nghị Nhanh (không phụ thuộc filter)
-    _full_cache = load_cache()
+    # Toàn bộ cache từ session_state (không đọc disk nữa)
+    _full_cache = st.session_state.scan_cache
     _df_full    = pd.DataFrame(_full_cache) if _full_cache else pd.DataFrame()
     _has_ai_full = "ai_score" in _df_full.columns and _df_full["ai_score"].notna().any() if not _df_full.empty else False
 
@@ -1678,6 +1735,28 @@ with tab_scan:
             sig_count = df_scan["signal"].value_counts().reset_index()
             sig_count.columns = ["Tín hiệu","Số mã"]
             st.bar_chart(sig_count.set_index("Tín hiệu"), use_container_width=True)
+
+    # ── Fix 4: Auto price-refresh ─────────────────────────────────────────────
+    if _auto_refresh_price:
+        import time as _time
+        _interval_secs = _auto_interval_min * 60
+        # Lưu thời điểm refresh cuối vào session_state
+        if "scan_last_auto_refresh" not in st.session_state:
+            st.session_state.scan_last_auto_refresh = 0.0
+        _now_ts  = _time.time()
+        _elapsed = _now_ts - st.session_state.scan_last_auto_refresh
+        _remain  = max(0, int(_interval_secs - _elapsed))
+        st.caption(f"⏱ Auto làm mới giá mỗi {_auto_interval_min} phút — "
+                   f"lần tới sau **{_remain // 60}:{_remain % 60:02d}**")
+        if _elapsed >= _interval_secs:
+            with st.spinner("Auto làm mới giá..."):
+                st.session_state.scan_cache = refresh_prices(source=source)
+            st.session_state.scan_last_auto_refresh = _time.time()
+            st.rerun()
+        else:
+            # Sleep ngắn rồi rerun để đếm ngược
+            _time.sleep(min(30, _remain))
+            st.rerun()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

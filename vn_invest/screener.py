@@ -3,6 +3,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -26,9 +27,36 @@ def load_cache() -> list[dict]:
     return []
 
 
-def save_cache(data: list[dict]) -> None:
+_META_PATH = CACHE_PATH.with_suffix(".meta.json")
+
+
+def save_cache(data: list[dict], scanned_at: datetime | None = None) -> None:
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Ghi metadata riêng để không làm thay đổi format cache chính
+    meta = {
+        "scanned_at":          (scanned_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "count":               len(data),
+        "price_refreshed_at":  None,
+    }
+    _META_PATH.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def load_cache_meta() -> dict:
+    """Đọc metadata: scanned_at, count, price_refreshed_at."""
+    if _META_PATH.exists():
+        try:
+            return json.loads(_META_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"scanned_at": None, "count": 0, "price_refreshed_at": None}
+
+
+def save_price_refresh_time() -> None:
+    """Cập nhật price_refreshed_at trong metadata sau refresh_prices()."""
+    meta = load_cache_meta()
+    meta["price_refreshed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _META_PATH.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
 def scan_symbol(symbol: str, source: str = DEFAULT_SOURCE) -> Optional[dict]:
@@ -90,7 +118,11 @@ def refresh_prices(source: str = DEFAULT_SOURCE) -> list[dict]:
         if sym in price_map:
             rec["close"] = price_map[sym]
 
-    save_cache(cache)
+    save_cache(cache, scanned_at=datetime.strptime(
+        load_cache_meta().get("scanned_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "%Y-%m-%d %H:%M:%S"
+    ))
+    save_price_refresh_time()
     return cache
 
 
@@ -183,13 +215,16 @@ def filter_cache(
     signal: Optional[str] = None,
     risk: Optional[str] = None,
     phase: Optional[str] = None,
+    data: Optional[list[dict]] = None,  # nếu truyền vào thì không đọc disk
 ) -> list[dict]:
-    """Lọc cache theo tín hiệu, rủi ro, giai đoạn."""
-    data = load_cache()
+    """Lọc cache theo tín hiệu, rủi ro, giai đoạn.
+    Truyền data= để tránh đọc disk khi đã có trong session_state.
+    """
+    rows = data if data is not None else load_cache()
     if signal:
-        data = [r for r in data if r.get("signal") == signal]
+        rows = [r for r in rows if r.get("signal") == signal]
     if risk:
-        data = [r for r in data if r.get("risk") == risk]
+        rows = [r for r in rows if r.get("risk") == risk]
     if phase:
-        data = [r for r in data if r.get("phase") == phase]
-    return sorted(data, key=lambda x: x.get("tech_score", 0), reverse=True)
+        rows = [r for r in rows if r.get("phase") == phase]
+    return sorted(rows, key=lambda x: x.get("tech_score", 0), reverse=True)
