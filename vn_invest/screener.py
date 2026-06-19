@@ -9,7 +9,9 @@ from typing import Optional
 
 import pandas as pd
 
-from .config import CACHE_FILE, DEFAULT_SOURCE, DEFAULT_WATCHLIST
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from .config import CACHE_FILE, DEFAULT_SOURCE, DEFAULT_WATCHLIST, RESTRICTED_SYMBOLS
 from .data import get_price_history, get_price_board
 from .indicators import add_all_indicators, get_latest_signals
 
@@ -62,8 +64,10 @@ def save_price_refresh_time() -> None:
 def scan_symbol(symbol: str, source: str = DEFAULT_SOURCE) -> Optional[dict]:
     """Scan 1 mã, trả dict với đầy đủ signals. None nếu lỗi."""
     try:
-        df = get_price_history(symbol, days=40, source=source)
-        if df is None or len(df) < 15:
+        # Fix: 40 calendar days ≈ 28 trading days → MACD(12,26,9) cần 35+ bars để hội tụ
+        # SMA50 luôn NaN với <50 bars; nâng lên 120 days ≈ 85 trading days
+        df = get_price_history(symbol, days=120, source=source)
+        if df is None or len(df) < 35:
             return None
         df = add_all_indicators(df)
         sig = get_latest_signals(df)
@@ -124,6 +128,51 @@ def refresh_prices(source: str = DEFAULT_SOURCE) -> list[dict]:
     ))
     save_price_refresh_time()
     return cache
+
+
+_AMI_REC_LABELS = {3: "STRONG BUY", 2: "ACCUMULATE", 1: "WATCHING", -2: "RISK SELL", -3: "TOP SELL"}
+
+
+def get_ami_scan_data() -> dict[str, dict]:
+    """Đọc scan_result.csv trả dict {TICKER: {rec, rec_label, ami_score, ami_setup, ami_forecast}}.
+    Hỗ trợ cả 2 format:
+      - Cũ (6 cột): Ticker,Date,Close,Vol,Rec,Score
+      - Mới (8 cột): Ticker,Date,Close,Vol,Rec,Score,Setup,Forecast
+    """
+    if not _AMI_SCAN.exists():
+        return {}
+    result: dict[str, dict] = {}
+    try:
+        with open(_AMI_SCAN, encoding="utf-8", errors="replace") as f:
+            header = None
+            for i, line in enumerate(f):
+                parts = line.strip().split(",")
+                if i == 0:
+                    header = [p.strip().lower() for p in parts]
+                    continue
+                if len(parts) < 6:
+                    continue
+                ticker = parts[0].strip().upper()
+                if not ticker or ticker == "TICKER":
+                    continue
+                try:
+                    rec   = int(float(parts[4].strip()))
+                    score = float(parts[5].strip())
+                except (ValueError, IndexError):
+                    rec = 1; score = 0.0
+                # Setup và Forecast — chỉ có trong format mới (>= 8 cột)
+                setup    = parts[6].strip() if len(parts) > 6 else "---"
+                forecast = parts[7].strip() if len(parts) > 7 else "---"
+                result[ticker] = {
+                    "ami_rec":       rec,
+                    "ami_rec_label": _AMI_REC_LABELS.get(rec, "WATCHING"),
+                    "ami_score":     round(score, 1),
+                    "ami_setup":     setup    if setup    != "---" else None,
+                    "ami_forecast":  forecast if forecast != "---" else None,
+                }
+    except Exception:
+        pass
+    return result
 
 
 def get_ami_watchlist() -> list[str]:
@@ -201,6 +250,10 @@ def scan_ami_symbol(symbol: str, with_lstm: bool = False) -> Optional[dict]:
         sig = get_latest_signals(df)
         rec = {"symbol": symbol, **sig}
 
+        # Lớp 1: đánh dấu ngay từ blacklist tĩnh
+        if symbol.upper() in RESTRICTED_SYMBOLS:
+            rec["stock_status"] = "restricted"
+
         if with_lstm:
             try:
                 from .lstm import predict as _lstm_predict, model_ready as _model_ready
@@ -221,35 +274,100 @@ def scan_ami_symbol(symbol: str, with_lstm: bool = False) -> Optional[dict]:
         return None
 
 
+def _enrich_stock_status(results: list[dict]) -> None:
+    """Fetch stock_status động từ vnstock cho các mã tín hiệu BUY (chạy sau scan).
+    Chỉ fetch mã chưa có status từ blacklist tĩnh để tiết kiệm thời gian.
+    Cập nhật in-place.
+    """
+    from .data import get_stock_status
+    buy_signals = {"BUY-A", "BUY-B"}
+    targets = [
+        r for r in results
+        if r.get("signal") in buy_signals and "stock_status" not in r
+    ]
+    for rec in targets:
+        try:
+            status_info = get_stock_status(rec["symbol"])
+            st = status_info.get("status", "normal")
+            if st != "normal":
+                rec["stock_status"] = st
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+
 def scan_ami_watchlist(
     symbols: Optional[list[str]] = None,
     with_lstm: bool = False,
     progress_callback=None,
+    max_workers: int = 8,
 ) -> list[dict]:
-    """Scan danh sách mã từ Amibroker data (nhanh, không gọi vnstock).
-    with_lstm=True: kèm LSTM inference cho mỗi mã."""
+    """Scan danh sách mã từ Amibroker data song song (ThreadPoolExecutor).
+    with_lstm=True: kèm LSTM inference — tự động giảm workers=2 vì Keras không thread-safe.
+    stock_status đánh dấu từ RESTRICTED_SYMBOLS tĩnh, không fetch vnstock.
+    """
     symbols = symbols or get_ami_watchlist()
+    total = len(symbols)
+    # Keras không thread-safe — bắt buộc dùng 1 worker khi có LSTM để tránh deadlock
+    workers = 1 if with_lstm else max_workers
+    results_map: dict[str, dict] = {}
+    done_count = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(scan_ami_symbol, sym, with_lstm): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym = futures[future]
+            done_count += 1
+            if progress_callback:
+                progress_callback(done_count - 1, total, sym)
+            try:
+                rec = future.result()
+                if rec:
+                    results_map[sym] = rec
+            except Exception:
+                pass
+
+    # Giữ thứ tự ban đầu; merge Amibroker Rec/Score nếu có
+    ami_data = get_ami_scan_data()
     results = []
-    for i, sym in enumerate(symbols):
-        if progress_callback:
-            progress_callback(i, len(symbols), sym)
-        rec = scan_ami_symbol(sym, with_lstm=with_lstm)
-        if rec:
-            results.append(rec)
+    for s in symbols:
+        if s not in results_map:
+            continue
+        rec = results_map[s]
+        if s in ami_data:
+            rec.setdefault("ami_rec",       ami_data[s]["ami_rec"])
+            rec.setdefault("ami_rec_label", ami_data[s]["ami_rec_label"])
+            rec.setdefault("ami_score",     ami_data[s]["ami_score"])
+            if ami_data[s].get("ami_setup"):
+                rec.setdefault("ami_setup",    ami_data[s]["ami_setup"])
+            if ami_data[s].get("ami_forecast"):
+                rec.setdefault("ami_forecast", ami_data[s]["ami_forecast"])
+        results.append(rec)
     save_cache(results)
     return results
+
+
+_BAD_STATUSES = {"restricted", "suspended", "delisted", "warning"}
 
 
 def filter_cache(
     signal: Optional[str] = None,
     risk: Optional[str] = None,
     phase: Optional[str] = None,
-    data: Optional[list[dict]] = None,  # nếu truyền vào thì không đọc disk
+    data: Optional[list[dict]] = None,
+    exclude_restricted: bool = True,
 ) -> list[dict]:
     """Lọc cache theo tín hiệu, rủi ro, giai đoạn.
+    exclude_restricted=True (mặc định): loại mã có stock_status restricted/suspended/delisted/warning
     Truyền data= để tránh đọc disk khi đã có trong session_state.
     """
     rows = data if data is not None else load_cache()
+    if exclude_restricted:
+        rows = [
+            r for r in rows
+            if r.get("stock_status", "normal") not in _BAD_STATUSES
+            and r.get("symbol", "") not in RESTRICTED_SYMBOLS
+        ]
     if signal:
         rows = [r for r in rows if r.get("signal") == signal]
     if risk:

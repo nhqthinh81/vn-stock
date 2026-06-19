@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -18,16 +19,20 @@ if _api_key:
 
 import pandas as pd
 import streamlit as st
+import threading
 
 from vn_invest.data import (get_price_history, get_financial_ratios_history, get_company_overview,
                             get_company_news, get_company_events, get_company_dividends,
                             get_company_shareholders, get_financial_statements, get_stock_status,
                             get_side_stats, get_market_indices, get_capital_history, get_macro_data)
+from vn_invest.investing import COMMON_PAIRS, get_global_price
 from vn_invest.indicators import add_all_indicators, get_latest_signals
 from vn_invest.lstm import predict as lstm_predict, model_ready, get_model_info
 from vn_invest.screener import (load_cache, load_cache_meta, scan_ami_watchlist, scan_ami_symbol,
                                 get_ami_watchlist, get_all_ami_symbols, get_ami_scan_age,
-                                refresh_prices, filter_cache, scan_symbol)
+                                refresh_prices, filter_cache, scan_symbol,
+                                _BAD_STATUSES)
+from vn_invest.config import RESTRICTED_SYMBOLS
 from vn_invest.portfolio import load_portfolio, enrich_portfolio, portfolio_summary, sector_allocation
 
 # ── Cache functions (module-level để Streamlit hash đúng) ────────────────────
@@ -74,8 +79,38 @@ def _fetch_dividends(sym):
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_price(sym, d, src):
     from vn_invest.indicators import add_all_indicators
-    df = get_price_history(sym, days=d, source=src)
+    try:
+        if sym in COMMON_PAIRS or "/" in sym:
+            from datetime import datetime, timedelta
+            start = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+            df = get_global_price(sym, start=start, end=end)
+        else:
+            df = get_price_history(sym, days=d, source=src)
+    except Exception:
+        return None
     return add_all_indicators(df) if df is not None and not df.empty else None
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_macro_ticker_data():
+    results = {}
+    from datetime import datetime, timedelta
+    start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    end = datetime.now().strftime("%Y-%m-%d")
+    for macro_sym in ["SP500", "GOLD", "WTI", "USD/VND", "DXY"]:
+        try:
+            df = get_global_price(macro_sym, start=start, end=end)
+            if df is not None and not df.empty:
+                current_price = df.iloc[-1]['close']
+                if len(df) > 1:
+                    prev_price = df.iloc[-2]['close']
+                    pct_change = (current_price - prev_price) / prev_price * 100
+                    results[macro_sym] = (current_price, pct_change)
+                else:
+                    results[macro_sym] = (current_price, None)
+        except Exception:
+            pass
+    return results
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_side_stats(sym, src):
@@ -149,7 +184,23 @@ with st.sidebar:
             _cols[_ci].metric(_lbl, _val_str, _delta_str, delta_color="normal")
         st.divider()
 
-    symbol_input = st.text_input("Mã cổ phiếu", value="HPG", max_chars=10).upper().strip()
+    # ── Chỉ số Vĩ mô (Macro) ───────────────────────────────────────────────
+    macro_data = _fetch_macro_ticker_data()
+    if macro_data:
+        st.markdown("**Chỉ số Vĩ mô & Toàn cầu**")
+        # Split into columns, 2 items per row
+        macro_items = list(macro_data.items())
+        for i in range(0, len(macro_items), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                if i + j < len(macro_items):
+                    m_sym, (current_p, pct_change) = macro_items[i + j]
+                    val_str = f"{current_p:,.2f}" if current_p is not None else "—"
+                    delta_str = f"{pct_change:+.2f}%" if pct_change is not None else None
+                    cols[j].metric(m_sym, val_str, delta_str, delta_color="normal")
+        st.divider()
+
+    symbol_input = st.text_input("Mã cổ phiếu", value="HPG", max_chars=15).upper().strip()
     source = st.selectbox("Nguồn dữ liệu", ["KBS", "VCI"], index=0)
     days = st.slider("Lịch sử (ngày)", 60, 365, 120)
     st.divider()
@@ -332,10 +383,16 @@ with tab_basic:
     b_n       = n_col.slider("Số kỳ", 4, 12, 8)
     api_period = "annual" if b_period == "Năm" else "quarter"
 
-    with st.spinner("Đang tải dữ liệu..."):
-        overview     = _fetch_overview(symbol_input, source)
-        hist         = _fetch_ratio_hist(symbol_input, api_period, b_n, source)
-        stock_status = _fetch_stock_status(symbol_input)
+    if symbol_input in COMMON_PAIRS or "/" in symbol_input:
+        st.info(f"ℹ️ **{symbol_input}** là tài sản vĩ mô / hàng hóa toàn cầu. Tài sản này không có báo cáo tài chính. Vui lòng chuyển sang **Tab Kỹ Thuật** để xem biểu đồ giá.")
+        overview = {}
+        hist = {"periods": [], "data": {}}
+        stock_status = {"status": "normal", "badges": [], "alerts": [], "events": [], "stats": {}}
+    else:
+        with st.spinner("Đang tải dữ liệu..."):
+            overview     = _fetch_overview(symbol_input, source)
+            hist         = _fetch_ratio_hist(symbol_input, api_period, b_n, source)
+            stock_status = _fetch_stock_status(symbol_input)
 
     if overview:
         # Dòng 1: Tên đầy đủ
@@ -1291,7 +1348,7 @@ with tab_tech:
         df_price = _fetch_price(symbol_input, days, source)
 
     if df_price is None or df_price.empty:
-        st.error("Không tải được dữ liệu giá.")
+        st.error(f"Không tải được dữ liệu giá cho **{symbol_input}**. Kiểm tra mã hoặc thử nguồn khác.")
     else:
         sig = get_latest_signals(df_price)
 
@@ -1378,12 +1435,25 @@ with tab_tech:
         col_left, col_right = st.columns(2)
         with col_left:
             st.subheader("Thông số kỹ thuật (Rule-based)")
-            st.dataframe(pd.DataFrame([
-                {"Chỉ số": "Điểm kỹ thuật", "Giá trị": f"{sig['tech_score']:.1f}/100"},
-                {"Chỉ số": "MACD Histogram", "Giá trị": f"{sig['macd_hist']:.4f}"},
-                {"Chỉ số": "Dist EMA34 (%)", "Giá trị": f"{sig['dist_ema34_pct']:.2f}%"},
-                {"Chỉ số": "Log Return",      "Giá trị": f"{sig['log_return']:.4f}"},
-            ]), use_container_width=True, hide_index=True)
+            _tech_rows = [
+                {"Chỉ số": "Điểm kỹ thuật",    "Giá trị": f"{sig['tech_score']:.1f}/100",  "Lý thuyết": "Momentum tổng hợp"},
+                {"Chỉ số": "MACD Histogram",    "Giá trị": f"{sig['macd_hist']:.4f}",        "Lý thuyết": "Appel (1979)"},
+                {"Chỉ số": "Dist EMA34 (%)",    "Giá trị": f"{sig['dist_ema34_pct']:.2f}%",  "Lý thuyết": "Elder Triple Screen"},
+                {"Chỉ số": "Log Return",        "Giá trị": f"{sig['log_return']:.4f}",       "Lý thuyết": "Random Walk / CAPM"},
+            ]
+            _atr = sig.get("atr_pct")
+            _bbw = sig.get("bb_width_pct")
+            _vol = sig.get("volume_ratio")
+            if _atr is not None:
+                _tech_rows.append({"Chỉ số": "ATR% (Volatility)", "Giá trị": f"{_atr:.2f}%",
+                                    "Lý thuyết": "Wilder ATR (1978)"})
+            if _bbw is not None:
+                _tech_rows.append({"Chỉ số": "BB Width% (Độ nén)", "Giá trị": f"{_bbw:.1f}%",
+                                    "Lý thuyết": "Bollinger Band (1983)"})
+            if _vol is not None:
+                _tech_rows.append({"Chỉ số": "Volume Ratio",      "Giá trị": f"{_vol:.2f}x",
+                                    "Lý thuyết": "Granville's Law (1963)"})
+            st.dataframe(pd.DataFrame(_tech_rows), use_container_width=True, hide_index=True)
 
         with col_right:
             st.subheader("Phiên giao dịch gần nhất")
@@ -1480,6 +1550,30 @@ with tab_scan:
     _ami_scan_age  = get_ami_scan_age()        # tuổi file scan_result.csv
     _lstm_avail    = model_ready()
 
+    # ── Cảnh báo cache stale: Amibroker Explore đã chạy mới hơn cache ──────────
+    try:
+        import os as _os
+        _ami_scan_path = _os.getenv("AMIBROKER_SCAN_CSV", r"C:\AmibrokerData\scan_result.csv")
+        _cache_path = str(_APP_DIR / "data" / "scores_cache.json")
+        if _os.path.exists(_ami_scan_path) and _os.path.exists(_cache_path):
+            _ami_mtime   = _os.path.getmtime(_ami_scan_path)
+            _cache_mtime = _os.path.getmtime(_cache_path)
+            _cache_sym_count = len(st.session_state.scan_cache)
+            _ami_sym_count   = len(_ami_list)
+            _all_sym_count   = len(_all_ami_syms)
+            if _ami_mtime > _cache_mtime:
+                _diff_min = int((_ami_mtime - _cache_mtime) / 60)
+                _diff_label = f"{_diff_min} phút" if _diff_min < 60 else f"{_diff_min//60} giờ {_diff_min%60} phút"
+                st.warning(
+                    f"⚠️ **Amibroker đã Explore lại** ({_diff_label} trước khi cache được tạo). "
+                    f"Cache hiện có **{_cache_sym_count} mã** — "
+                    f"Scan đã lọc có **{_ami_sym_count} mã**, Toàn bộ history có **{_all_sym_count} mã**. "
+                    f"Nhấn **⚡ Scan** để cập nhật tín hiệu (~20s).",
+                    icon="🔁"
+                )
+    except Exception:
+        pass
+
     # ── Controls row ──────────────────────────────────────────────────────────
     scan_opt_c1, scan_opt_c2, scan_opt_c3, scan_opt_c4 = st.columns([2, 1, 1, 1])
     with scan_opt_c2:
@@ -1505,38 +1599,45 @@ with tab_scan:
 
     with col_b:
         _age_note = f" · {_ami_scan_age}" if _ami_scan_age else ""
-        if st.button(
+        _btn_filtered = st.button(
             f"⚡ Scan đã lọc ({len(_ami_list)} mã{_age_note})",
             use_container_width=True,
-            help="Scan các mã trong scan_result.csv — đã qua bộ lọc Amibroker Explorer",
-        ):
-            _pb = st.progress(0); _st = st.empty()
-            def on_progress(i, total, sym):
-                _pb.progress(int((i+1)/total*100))
-                _st.text(f"Đang scan {sym}... ({i+1}/{total})")
-            st.session_state.scan_cache = scan_ami_watchlist(
-                symbols=_ami_list, with_lstm=_use_lstm_scan, progress_callback=on_progress
-            )
-            _pb.empty(); _st.empty()
-            ai_note = " (kèm AI Score)" if _use_lstm_scan else ""
-            st.success(f"Hoàn tất! Đã scan {len(st.session_state.scan_cache)} mã{ai_note}.")
+            help="Scan các mã trong scan_result.csv — đã qua bộ lọc Amibroker Explorer (~20s)",
+        )
 
     with col_c:
-        if st.button(
+        _btn_all = st.button(
             f"🌐 Scan tất cả ({len(_all_ami_syms)} mã)",
             use_container_width=True,
-            help="Scan toàn bộ mã có data trong history_by_ticker/ — không qua lọc Amibroker",
-        ):
-            _pb2 = st.progress(0); _st2 = st.empty()
-            def on_progress_all(i, total, sym):
-                _pb2.progress(int((i+1)/total*100))
-                _st2.text(f"Đang scan {sym}... ({i+1}/{total})")
-            st.session_state.scan_cache = scan_ami_watchlist(
-                symbols=_all_ami_syms, with_lstm=_use_lstm_scan, progress_callback=on_progress_all
-            )
-            _pb2.empty(); _st2.empty()
-            ai_note = " (kèm AI Score)" if _use_lstm_scan else ""
-            st.success(f"Hoàn tất! Đã scan {len(st.session_state.scan_cache)} mã{ai_note}.")
+            help="Scan toàn bộ mã có data trong history_by_ticker/ (~20s)",
+        )
+
+    # Placeholders đặt NGOÀI button block — Streamlit render ngay khi bắt đầu scan
+    # (không đặt trong if button: vì Streamlit batch update cho đến khi script xong)
+    _scan_pb_ph   = st.empty()
+    _scan_txt_ph  = st.empty()
+
+    if _btn_filtered or _btn_all:
+        _syms_to_scan = _ami_list if _btn_filtered else _all_ami_syms
+        _total_scan   = len(_syms_to_scan)
+        _scan_pb_ph.progress(0)
+        _scan_txt_ph.info(f"⏳ Đang scan 0/{_total_scan} mã... (~20 giây, vui lòng chờ)")
+        _lock_s = threading.Lock(); _cnt_s = [0]
+        def on_progress_scan(i, total, sym):
+            with _lock_s:
+                _cnt_s[0] += 1
+                pct = min(int(_cnt_s[0] / total * 100), 100)
+                _scan_pb_ph.progress(pct)
+                _scan_txt_ph.info(f"⏳ Scan {sym}... ({_cnt_s[0]}/{total} — {pct}%)")
+        st.session_state.scan_cache = scan_ami_watchlist(
+            symbols=_syms_to_scan, with_lstm=_use_lstm_scan, progress_callback=on_progress_scan
+        )
+        _scan_pb_ph.empty()
+        ai_note = " (kèm AI Score)" if _use_lstm_scan else ""
+        _scan_txt_ph.success(
+            f"✅ Hoàn tất! Scan {len(st.session_state.scan_cache)}/{_total_scan} mã{ai_note}."
+        )
+        st.rerun()
 
     with col_d:
         scan_single = st.text_input("Scan 1 mã", placeholder="VNM", key="scan_single_input").upper().strip()
@@ -1608,18 +1709,28 @@ with tab_scan:
     cache_data = st.session_state.scan_cache
     st.divider()
 
-    filter_cols = st.columns(4)
-    f_signal = filter_cols[0].selectbox("Tín hiệu", ["Tất cả","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
-    f_risk   = filter_cols[1].selectbox("Rủi ro",   ["Tất cả","Low","Medium","High"])
-    f_phase  = filter_cols[2].selectbox("Giai đoạn",["Tất cả","Accumulation","Markup","Distribution","Markdown","Neutral"])
-    f_ai     = filter_cols[3].selectbox("AI Score",  ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
+    filter_cols = st.columns(5)
+    f_signal   = filter_cols[0].selectbox("Tín hiệu Python", ["Tất cả","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
+    f_risk     = filter_cols[1].selectbox("Rủi ro",          ["Tất cả","Low","Medium","High"])
+    f_phase    = filter_cols[2].selectbox("Giai đoạn",       ["Tất cả","Accumulation","Markup","Distribution","Markdown","Neutral"])
+    f_ai       = filter_cols[3].selectbox("AI Score",        ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
+    f_ami_rec  = filter_cols[4].selectbox("Ami Rec",         ["Tất cả","STRONG BUY","ACCUMULATE","WATCHING","RISK SELL","TOP SELL"])
+
+    filter_cols2 = st.columns(2)
+    f_setup    = filter_cols2[0].selectbox("Setup (Ami)", ["Tất cả","FLAT BASE","VCP TIGHT","PKT PIVOT","PULLBACK","PWR-PLAY","GAP UP"])
+    f_forecast = filter_cols2[1].selectbox("Forecast (Ami)", ["Tất cả","BULL DIV","BEAR DIV","BB BOT REV"])
+
+    # Checkbox hiện mã bị hạn chế (ẩn mặc định)
+    show_restricted = st.checkbox("Hiện mã bị hạn chế/cảnh báo", value=False,
+                                  help="Mặc định ẩn mã restricted/suspended/warning khỏi kết quả")
 
     # Fix 1: dùng session_state thay vì đọc disk 2 lần
-    filtered = filter_cache(
+    filtered = filter_cache(  # type: ignore[call-arg]
         signal=None if f_signal=="Tất cả" else f_signal,
         risk=None   if f_risk=="Tất cả"   else f_risk,
         phase=None  if f_phase=="Tất cả"  else f_phase,
         data=st.session_state.scan_cache,
+        exclude_restricted=not show_restricted,
     )
 
     # Toàn bộ cache từ session_state (không đọc disk nữa)
@@ -1628,25 +1739,109 @@ with tab_scan:
     _has_ai_full = "ai_score" in _df_full.columns and _df_full["ai_score"].notna().any() if not _df_full.empty else False
 
     # ── Khuyến nghị nhanh (luôn từ full cache, không phụ thuộc filter) ─────────
-    if _has_ai_full:
+    if not _df_full.empty:
         st.subheader("⚡ Khuyến Nghị Nhanh")
 
-        def _con_label(row):
-            ai = row.get("ai_score"); kt = row.get("tech_score", 50)
-            if ai is None or pd.isna(ai): return "—"
-            if ai >= 70 and kt >= 60:  return "✅ Mua mạnh"
-            if ai >= 50 and kt >= 50:  return "🟢 Tích cực"
-            if ai <= 30 and kt <= 35:  return "🔴 Bán"
-            if ai <= 40 and kt <= 45:  return "🟠 Thận trọng"
-            if ai >= 70 and kt < 50:   return "⚠️ AI↑ KT↓"
-            if ai < 40  and kt >= 60:  return "⚠️ AI↓ KT↑"
-            return "🟡 Trung tính"
+        _BAD_PHASES  = {"Distribution", "Markdown"}
+        _BUY_SIGNALS = {"BUY-A", "BUY-B"}
 
-        _df_full["_con"] = _df_full.apply(_con_label, axis=1)
-        _buy_strong = _df_full[_df_full["_con"] == "✅ Mua mạnh"].nlargest(5, "ai_score")
-        _buy_pos    = _df_full[_df_full["_con"] == "🟢 Tích cực"].nlargest(5, "ai_score")
-        _sell       = _df_full[_df_full["_con"] == "🔴 Bán"].nsmallest(5, "ai_score")
-        _warning    = _df_full[_df_full["_con"].isin(["⚠️ AI↑ KT↓","⚠️ AI↓ KT↑","🟠 Thận trọng"])].nlargest(5, "ai_score")
+        # Mẫu bearish mạnh (Bulkowski ≥ 70%) → chặn Mua mạnh
+        _STRONG_BEAR_PATTERNS = {
+            "three black crows", "evening star", "bearish engulfing",
+            "head & shoulders", "double top", "descending triangle",
+            "shooting star", "hanging man",
+        }
+
+        def _has_strong_bear(row) -> bool:
+            """Kiểm tra cache có mẫu bearish mạnh không."""
+            pats = " ".join([
+                str(row.get("candle_patterns") or ""),
+                str(row.get("chart_patterns")  or ""),
+            ]).lower()
+            return any(p in pats for p in _STRONG_BEAR_PATTERNS)
+
+        def _rsi_ok_for_buy(rsi: float) -> bool:
+            """RSI hợp lệ để xét BUY:
+            - RSI ≤ 30: oversold → đảo chiều tăng tiềm năng ✅
+            - RSI 31–40: đang giảm, chưa đảo chiều ❌
+            - RSI 41–69: momentum bình thường ✅
+            - RSI ≥ 70: overbought → đảo chiều xuống tiềm năng ❌
+            """
+            return rsi <= 30 or (41 <= rsi < 70)
+
+        def _con_label(row):
+            ai    = row.get("ai_score")
+            kt    = float(row.get("tech_score", 50) or 50)
+            risk  = row.get("risk",   "Medium") or "Medium"
+            phase = row.get("phase",  "Neutral") or "Neutral"
+            sig   = row.get("signal", "HOLD") or "HOLD"
+            dist  = float(row.get("dist_ema34_pct", 0) or 0)
+            rsi   = float(row.get("rsi", 50) or 50)
+            has_ai = ai is not None and not (isinstance(ai, float) and pd.isna(ai))
+
+            # Điều kiện 1: MACD phải dương cho "Tích cực" trở lên
+            macd_pos = float(row.get("macd_hist", 0) or 0) > 0
+
+            # Điều kiện 2: RSI hợp lệ (oversold đảo chiều hoặc vùng bình thường)
+            rsi_ok = _rsi_ok_for_buy(rsi)
+
+            # Điều kiện 3: xu hướng 3–5 phiên (ít nhất 1 trong 2 thoả)
+            trend_ok = bool(row.get("macd_rising")) or bool(row.get("price_above_sma5_3d"))
+
+            # Đảo chiều: reversal engine phát hiện tín hiệu đủ mạnh
+            # Fix #4: ngưỡng 40 (không phải 55) — 1 tín hiệu divergence (68%×0.80=54%) vẫn lọt qua
+            # Fix #5: bearish reversal → cờ riêng để tích hợp vào Thận trọng
+            rev_type     = row.get("reversal_type", "none") or "none"
+            rev_strength = int(row.get("reversal_strength", 0) or 0)
+            is_bull_rev  = rev_type == "bullish"  and rev_strength >= 40
+            is_bear_rev  = rev_type == "bearish"  and rev_strength >= 40
+
+            # Chặn: mẫu bearish mạnh hoặc dist quá âm
+            bear_block = _has_strong_bear(row) or dist < -20
+            buy_ok     = macd_pos and rsi_ok and trend_ok and not bear_block
+
+            if has_ai:
+                ai = float(ai)
+                if (ai >= 70 and kt >= 60
+                        and risk != "High"
+                        and phase not in _BAD_PHASES
+                        and sig in _BUY_SIGNALS
+                        and buy_ok):
+                    return "✅ Mua mạnh"
+                if ai >= 50 and kt >= 50 and buy_ok:              return "🟢 Tích cực"
+                # Fix #5: bull reversal hiện nhãn riêng; bear reversal → Thận trọng
+                if is_bull_rev and not bear_block and risk != "High": return "🔄 Đảo Chiều"
+                if ai <= 30 and kt <= 35:                          return "🔴 Bán"
+                if ai <= 40 and kt <= 45:                          return "🟠 Thận trọng"
+                if bear_block or is_bear_rev:                      return "🟠 Thận trọng"
+                if ai >= 70 and kt < 50:                           return "⚠️ AI↑ KT↓"
+                if ai < 40  and kt >= 60:                          return "⚠️ AI↓ KT↑"
+                return "🟡 Trung tính"
+            else:
+                if (sig == "BUY-A" and risk != "High"
+                        and phase not in _BAD_PHASES
+                        and buy_ok):
+                    return "✅ Mua mạnh"
+                if sig in ("BUY-A", "BUY-B") and phase not in _BAD_PHASES and buy_ok:
+                    return "🟢 Tích cực"
+                if is_bull_rev and not bear_block and risk != "High": return "🔄 Đảo Chiều"
+                if sig in ("SELL-A", "SELL-B"):                    return "🔴 Bán"
+                if risk == "High" or bear_block or is_bear_rev:    return "🟠 Thận trọng"
+                return "🟡 Trung tính"
+
+        # Loại mã bị hạn chế khỏi khuyến nghị nhanh (blacklist tĩnh + stock_status động)
+        _mask_restricted = _df_full["symbol"].isin(RESTRICTED_SYMBOLS)
+        if "stock_status" in _df_full.columns:
+            _mask_restricted |= _df_full["stock_status"].isin(_BAD_STATUSES)
+        _df_rec = _df_full[~_mask_restricted].copy()
+        _df_rec["_con"] = _df_rec.apply(_con_label, axis=1)
+        _sort_col = "ai_score" if "ai_score" in _df_rec.columns else "tech_score"
+        _buy_strong = _df_rec[_df_rec["_con"] == "✅ Mua mạnh"].nlargest(5, _sort_col)
+        _buy_pos    = _df_rec[_df_rec["_con"] == "🟢 Tích cực"].nlargest(5, _sort_col)
+        _reversal   = _df_rec[_df_rec["_con"] == "🔄 Đảo Chiều"].nlargest(5, "reversal_strength") \
+                      if "reversal_strength" in _df_rec.columns else pd.DataFrame()
+        _sell       = _df_rec[_df_rec["_con"] == "🔴 Bán"].nsmallest(5, _sort_col)
+        _warning    = _df_rec[_df_rec["_con"].isin(["⚠️ AI↑ KT↓","⚠️ AI↓ KT↑","🟠 Thận trọng"])].nlargest(5, _sort_col)
 
         def _rec_cards(df_grp, bg_color, label):
             if df_grp.empty:
@@ -1654,34 +1849,83 @@ with tab_scan:
                 return
             cols = st.columns(min(len(df_grp), 5))
             for col, (_, row) in zip(cols, df_grp.iterrows()):
-                sym   = row["symbol"]
-                ai    = row.get("ai_score", 0)
-                kt    = row.get("tech_score", 0)
-                close = row.get("close", 0)
-                rsi   = row.get("rsi", 0)
-                dist  = row.get("dist_ema34_pct", 0)
-                phase = row.get("phase", "")
-                _ps   = {"Accumulation":"Tích lũy","Markup":"Tăng","Distribution":"Phân phối",
-                         "Markdown":"Giảm","Neutral":"Trung tính"}.get(phase, phase)
-                col.markdown(f"""
-<div style="background:{bg_color};border-radius:10px;padding:12px 14px;margin:2px 0;min-height:130px;color:#ffffff">
-<b style="font-size:1.15em;color:#ffffff">{sym}</b><br>
-<span style="font-size:0.85em;color:#cccccc">{close:,.0f} &nbsp;|&nbsp; RSI {rsi:.0f}</span><br>
-<span style="font-size:0.82em;color:#aaaaaa">Dist {dist:+.1f}% &nbsp;·&nbsp; {_ps}</span><br>
-<hr style="margin:6px 0;border-color:rgba(255,255,255,0.2)">
-<span style="color:#ffffff">🤖 AI <b>{ai:.0f}</b> &nbsp; KT <b>{kt:.0f}</b></span>
-</div>""", unsafe_allow_html=True)
+                def _fv(v, default=0.0):
+                    """Safe float — trả default nếu None/NaN."""
+                    try:
+                        f = float(v)
+                        return f if f == f else default  # NaN check
+                    except (TypeError, ValueError):
+                        return default
 
-        kn_t1, kn_t2, kn_t3, kn_t4 = st.tabs([
+                sym        = row["symbol"]
+                ai         = _fv(row.get("ai_score"))
+                kt         = _fv(row.get("tech_score"))
+                close      = _fv(row.get("close"))
+                rsi        = _fv(row.get("rsi"))
+                dist       = _fv(row.get("dist_ema34_pct"))
+                phase      = str(row.get("phase") or "")
+                risk_s     = str(row.get("risk")  or "")
+                candle_pats = str(row.get("candle_patterns") or "")
+                candle_tf   = str(row.get("candle_timeframe") or "none")
+                chart_pats  = str(row.get("chart_patterns")  or "")
+                reason      = str(row.get("reason") or "")
+
+                _ps     = {"Accumulation":"Tích lũy","Markup":"Tăng","Distribution":"Phân phối",
+                           "Markdown":"Giảm","Neutral":"Trung tính"}.get(phase, phase)
+                _ri_col = {"Low":"#00e676","Medium":"#ffd740","High":"#ff1744"}.get(risk_s,"#aaaaaa")
+                _ai_lbl = f"{ai:.0f}" if ai > 0 else "—"
+
+                # Mẫu nến: phân biệt daily (vàng) vs weekly (cam, kém tin hơn)
+                if candle_pats:
+                    if candle_tf == "weekly":
+                        _cpat_lbl  = "Nến [Tuần — tin cậy thấp hơn daily]"
+                        _cpat_color = "#ffb74d"  # cam
+                    else:
+                        _cpat_lbl  = "Nến [Daily]"
+                        _cpat_color = "#ffe082"  # vàng
+                    _cpat_html = (f'<div style="font-size:0.76em;color:{_cpat_color};margin-top:3px">'
+                                  f'{_cpat_lbl}: {candle_pats}</div>')
+                else:
+                    _cpat_html = ""
+
+                _gpat_html = (f'<div style="font-size:0.76em;color:#80cbc4;margin-top:2px">'
+                              f'Chart: {chart_pats}</div>') if chart_pats else ""
+                _bullets   = [b for b in reason.split(" • ") if b.strip()] if reason else []
+                _rea_short = " • ".join(_bullets[:2])
+                _rea_html  = (f'<div style="font-size:0.74em;color:#b0bec5;margin-top:3px;line-height:1.45">'
+                              f'{_rea_short}</div>') if _rea_short else ""
+
+                col.markdown(f"""
+<div style="background:{bg_color};border-radius:10px;padding:12px 14px;margin:2px 0;color:#ffffff">
+<b style="font-size:1.1em">{sym}</b><br>
+<span style="font-size:0.85em;color:#cccccc">{close:,.0f} &nbsp;|&nbsp; RSI {rsi:.0f}</span><br>
+<span style="font-size:0.82em;color:#aaaaaa">Dist {dist:+.1f}% &nbsp;·&nbsp; {_ps}</span>
+{_cpat_html}{_gpat_html}
+<hr style="margin:5px 0;border-color:rgba(255,255,255,0.15)">
+<span>🤖 AI <b>{_ai_lbl}</b> &nbsp; KT <b>{kt:.0f}</b></span>
+&nbsp;<span style="font-size:0.8em;color:{_ri_col}">● {risk_s}</span>
+{_rea_html}
+</div>""", unsafe_allow_html=True)
+                if _bullets:
+                    with col.expander("Chi tiet phan tich"):
+                        for bullet in _bullets:
+                            st.markdown(f"- {bullet}")
+
+        kn_t1, kn_t2, kn_t3, kn_t4, kn_t5 = st.tabs([
             f"✅ Mua mạnh ({len(_buy_strong)})",
             f"🟢 Tích cực ({len(_buy_pos)})",
+            f"🔄 Đảo Chiều ({len(_reversal)})",
             f"🔴 Bán ({len(_sell)})",
             f"⚠️ Thận trọng ({len(_warning)})",
         ])
         with kn_t1: _rec_cards(_buy_strong, "#1a3a2a", "Mua mạnh")
         with kn_t2: _rec_cards(_buy_pos,    "#1a2e1a", "Tích cực")
-        with kn_t3: _rec_cards(_sell,        "#3a1a1a", "Bán")
-        with kn_t4: _rec_cards(_warning,     "#2a2a1a", "Thận trọng")
+        with kn_t3:
+            if not _reversal.empty:
+                st.caption("⚠️ Tín hiệu đảo chiều tiềm năng — chưa xác nhận, rủi ro cao hơn Mua mạnh. Chỉ tham khảo.")
+            _rec_cards(_reversal, "#1a2535", "Đảo Chiều")
+        with kn_t4: _rec_cards(_sell,        "#3a1a1a", "Bán")
+        with kn_t5: _rec_cards(_warning,     "#2a2a1a", "Thận trọng")
 
         st.divider()
 
@@ -1699,38 +1943,83 @@ with tab_scan:
             elif f_ai == "≤ 30 (Yếu)":      df_scan = df_scan[df_scan["ai_score"] <= 30]
             elif f_ai == "Có AI Score":      df_scan = df_scan[df_scan["ai_score"].notna()]
 
+        # Lọc Ami Rec (từ Amibroker scan_result.csv)
+        if f_ami_rec != "Tất cả" and "ami_rec_label" in df_scan.columns:
+            df_scan = df_scan[df_scan["ami_rec_label"] == f_ami_rec]
+
+        # Lọc Setup
+        if f_setup != "Tất cả" and "ami_setup" in df_scan.columns:
+            df_scan = df_scan[df_scan["ami_setup"] == f_setup].copy()
+
+        # Lọc Forecast
+        if f_forecast != "Tất cả" and "ami_forecast" in df_scan.columns:
+            df_scan = df_scan[df_scan["ami_forecast"] == f_forecast].copy()
+
+        # Đếm mã restricted đang bị ẩn
+        _all_rows = st.session_state.scan_cache
+        _n_restricted = sum(
+            1 for r in _all_rows
+            if r.get("stock_status", "normal") in _BAD_STATUSES
+        ) if not show_restricted else 0
+        if _n_restricted:
+            _restricted_names = ", ".join(
+                r["symbol"] for r in _all_rows
+                if r.get("stock_status", "normal") in _BAD_STATUSES
+            )
+            st.warning(
+                f"⛔ Đã ẩn **{_n_restricted} mã** bị hạn chế/cảnh báo khỏi kết quả: "
+                f"`{_restricted_names}` — tick 'Hiện mã bị hạn chế' để xem."
+            )
+
         if not has_ai and model_ready():
             st.caption(f"Hiển thị {len(df_scan)} mã — tick 'Kèm AI Score' rồi Scan lại để lọc theo AI Score")
         else:
             st.caption(f"Hiển thị {len(df_scan)} mã" + (" | AI Score: LSTM" if has_ai else ""))
 
-        # Cột Đồng thuận (dùng cùng logic với Khuyến Nghị Nhanh)
-        if has_ai:
-            def _con_table(row):
-                ai = row.get("ai_score"); kt = row.get("tech_score", 50)
-                if ai is None or pd.isna(ai): return "—"
-                if ai >= 70 and kt >= 60:  return "✅ Mua mạnh"
-                if ai >= 50 and kt >= 50:  return "🟢 Tích cực"
-                if ai <= 30 and kt <= 35:  return "🔴 Bán"
-                if ai <= 40 and kt <= 45:  return "🟠 Thận trọng"
-                if ai >= 70 and kt < 50:   return "⚠️ AI↑ KT↓"
-                if ai < 40  and kt >= 60:  return "⚠️ AI↓ KT↑"
-                return "🟡 Trung tính"
-            df_scan["consensus"] = df_scan.apply(_con_table, axis=1)
+        # Cột Đồng thuận — dùng list comprehension tránh pandas apply quirks
+        df_scan = df_scan.reset_index(drop=True).copy()
+        df_scan["consensus"] = [_con_label(df_scan.iloc[_i]) for _i in range(len(df_scan))]
 
-        display_cols = [c for c in ["symbol","close","rsi","dist_ema34_pct","ai_score","tech_score","consensus","signal","risk","phase"] if c in df_scan.columns]
+        # Lớp 3: badge cảnh báo cho mã bị hạn chế (hiện khi show_restricted=True)
+        _STATUS_BADGE = {"restricted": "⛔ Hạn chế", "suspended": "🚫 Tạm ngừng",
+                         "warning": "⚠️ Cảnh báo", "delisted": "❌ Hủy niêm yết"}
+        if "stock_status" in df_scan.columns:
+            df_scan["_warn"] = df_scan["stock_status"].map(
+                lambda s: _STATUS_BADGE.get(s, "") if pd.notna(s) else ""
+            )
+        else:
+            df_scan["_warn"] = ""
+
+        display_cols = [c for c in [
+            "symbol","_warn","close","rsi","dist_ema34_pct",
+            "atr_pct","bb_width_pct","volume_ratio",
+            "ai_score","tech_score","consensus","signal","risk","phase",
+            "ami_rec_label","ami_score","ami_setup","ami_forecast",
+        ] if c in df_scan.columns]
         df_display = df_scan[display_cols].rename(columns={
-            "symbol":"Mã","close":"Giá","rsi":"RSI","dist_ema34_pct":"Dist EMA34%",
+            "symbol":"Mã","_warn":"Trạng thái","close":"Giá","rsi":"RSI","dist_ema34_pct":"Dist EMA34%",
+            "atr_pct":"ATR%","bb_width_pct":"BB Width%","volume_ratio":"Vol Ratio",
             "ai_score":"AI Score","tech_score":"Điểm KT","consensus":"Đồng thuận",
-            "signal":"Tín hiệu","risk":"Rủi ro","phase":"Giai đoạn"
+            "signal":"Tín hiệu","risk":"Rủi ro","phase":"Giai đoạn",
+            "ami_rec_label":"Ami Rec","ami_score":"Ami Score",
+            "ami_setup":"Setup","ami_forecast":"Forecast",
         })
+        # Ẩn cột Trạng thái nếu không có mã nào bị đánh dấu
+        if df_display["Trạng thái"].eq("").all():
+            df_display = df_display.drop(columns=["Trạng thái"])
         st.dataframe(df_display, use_container_width=True, hide_index=True,
             column_config={
-                "Giá": st.column_config.NumberColumn(format="%,.0f"),
-                "RSI": st.column_config.NumberColumn(format="%.1f"),
+                "Giá":       st.column_config.NumberColumn(format="%,.0f"),
+                "RSI":       st.column_config.NumberColumn(format="%.1f"),
                 "Dist EMA34%": st.column_config.NumberColumn(format="%.2f%%"),
-                "Điểm KT":  st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                "AI Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                "ATR%":      st.column_config.NumberColumn(format="%.2f%%",
+                                 help="ATR/Giá — volatility thực tế (Wilder). >3%: biến động cao"),
+                "BB Width%": st.column_config.NumberColumn(format="%.1f%%",
+                                 help="Bollinger Band Width. <5%: squeeze (chuẩn bị bùng nổ), >15%: đang giãn"),
+                "Vol Ratio": st.column_config.NumberColumn(format="%.2f",
+                                 help="Khối lượng / SMA20(KL). >1.5: xác nhận tín hiệu mạnh"),
+                "Điểm KT":   st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                "AI Score":  st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
             })
 
         # ── PyGWalker — Phân tích nâng cao ──────────────────────────────────

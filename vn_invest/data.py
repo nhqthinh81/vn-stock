@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from .config import DEFAULT_SOURCE, DEFAULT_DAYS
+from .investing import get_global_price
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -74,10 +75,17 @@ def _get_stock(symbol: str, source: str):
 
 def get_price_history(symbol: str, days: int = DEFAULT_DAYS, source: str = DEFAULT_SOURCE) -> pd.DataFrame:
     """Lấy lịch sử giá OHLCV. Trả DataFrame: time, open, high, low, close, volume."""
+    try:
+        from tenacity import RetryError
+    except ImportError:
+        RetryError = Exception
     end = datetime.today().strftime("%Y-%m-%d")
     start = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
     stock = _get_stock(symbol, source)
-    df = stock.quote.history(start=start, end=end, interval="1D")
+    try:
+        df = stock.quote.history(start=start, end=end, interval="1D")
+    except (RetryError, ValueError) as e:
+        raise ValueError(f"Không lấy được giá cho '{symbol}': {e}") from e
     df = df.sort_values("time").reset_index(drop=True)
     # Strip giờ khỏi timestamp (vnstock trả 07:00:00 UTC+7)
     df["time"] = df["time"].dt.normalize()
@@ -679,7 +687,7 @@ def get_macro_data() -> dict:
                 for yr_str, val in values_map.items():
                     yr  = int(yr_str)
                     v   = _clean_float(val)
-                    if v is not None and yr >= current_year - 4:
+                    if v is not None and current_year - 4 <= yr <= current_year + 1:
                         series.append({
                             "year":        yr,
                             "value":       round(v, 2),
