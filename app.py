@@ -97,7 +97,7 @@ def _fetch_macro_ticker_data():
     from datetime import datetime, timedelta
     start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     end = datetime.now().strftime("%Y-%m-%d")
-    for macro_sym in ["SP500", "GOLD", "WTI", "USD/VND", "DXY"]:
+    for macro_sym in ["SP500", "NASDAQ", "DOW", "GOLD", "BRENT", "WTI", "BTC/USD", "EUR/USD", "USD/VND", "DXY"]:
         try:
             df = get_global_price(macro_sym, start=start, end=end)
             if df is not None and not df.empty:
@@ -111,6 +111,35 @@ def _fetch_macro_ticker_data():
         except Exception:
             pass
     return results
+
+# Tickers yfinance cho các chỉ số Châu Á
+_ASIA_INDICES = {
+    "Nikkei":   "^N225",   # Nhật Bản
+    "Hang Seng":"^HSI",    # Hồng Kông
+    "Shanghai": "000001.SS",# Trung Quốc
+    "KOSPI":    "^KS11",   # Hàn Quốc
+    "ASX200":   "^AXJO",   # Úc
+    "STI":      "^STI",    # Singapore
+}
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_asia_indices():
+    try:
+        import yfinance as yf
+        results = {}
+        tickers = yf.Tickers(" ".join(_ASIA_INDICES.values()))
+        for label, yfticker in _ASIA_INDICES.items():
+            try:
+                hist = tickers.tickers[yfticker].history(period="5d")
+                if hist is not None and len(hist) >= 1:
+                    cur = float(hist["Close"].iloc[-1])
+                    pct = float((hist["Close"].iloc[-1] - hist["Close"].iloc[-2]) / hist["Close"].iloc[-2] * 100) if len(hist) >= 2 else None
+                    results[label] = (cur, pct)
+            except Exception:
+                pass
+        return results
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_side_stats(sym, src):
@@ -184,20 +213,75 @@ with st.sidebar:
             _cols[_ci].metric(_lbl, _val_str, _delta_str, delta_color="normal")
         st.divider()
 
-    # ── Chỉ số Vĩ mô (Macro) ───────────────────────────────────────────────
-    macro_data = _fetch_macro_ticker_data()
-    if macro_data:
-        st.markdown("**Chỉ số Vĩ mô & Toàn cầu**")
-        # Split into columns, 2 items per row
-        macro_items = list(macro_data.items())
-        for i in range(0, len(macro_items), 2):
-            cols = st.columns(2)
-            for j in range(2):
-                if i + j < len(macro_items):
-                    m_sym, (current_p, pct_change) = macro_items[i + j]
-                    val_str = f"{current_p:,.2f}" if current_p is not None else "—"
-                    delta_str = f"{pct_change:+.2f}%" if pct_change is not None else None
-                    cols[j].metric(m_sym, val_str, delta_str, delta_color="normal")
+    # ── Chỉ số Vĩ mô & Châu Á — Scrolling Ticker ─────────────────────────
+    macro_data  = _fetch_macro_ticker_data()
+    asia_data   = _fetch_asia_indices()
+
+    # VNINDEX từ _indices đã fetch sẵn (không cần gọi thêm API)
+    _vnidx = _idx_map.get("VNINDEX")
+    vnindex_entry = {}
+    if _vnidx:
+        _v = _vnidx.get("index_value")
+        _p = _vnidx.get("pct_change")
+        if _v is not None:
+            vnindex_entry = {"VN-Index": (_v, _p)}
+
+    # Ghép: VN-Index → Châu Á → Toàn cầu
+    combined = {**vnindex_entry, **asia_data, **macro_data}
+
+    if combined:
+        def _ticker_item(sym, price, pct):
+            val_str = f"{price:,.2f}" if price is not None else "—"
+            if pct is not None:
+                color = "#00c853" if pct >= 0 else "#ff1744"
+                arrow = "▲" if pct >= 0 else "▼"
+                pct_str = f'<span style="color:{color}">{arrow}{abs(pct):.2f}%</span>'
+            else:
+                pct_str = '<span style="color:#888">—</span>'
+            return (
+                f'<span style="color:#aaa;font-weight:600">{sym}</span>'
+                f'&nbsp;<span style="color:#fff">{val_str}</span>'
+                f'&nbsp;{pct_str}'
+                f'&nbsp;&nbsp;<span style="color:#333">|</span>&nbsp;&nbsp;'
+            )
+
+        items_html = "".join(
+            _ticker_item(sym, price, pct)
+            for sym, (price, pct) in combined.items()
+        )
+        ticker_content = items_html * 2
+        speed = max(30, len(combined) * 3)
+
+        st.markdown(
+            f"""
+<style>
+@keyframes vni-scroll {{
+  0%   {{ transform: translateX(0); }}
+  100% {{ transform: translateX(-50%); }}
+}}
+.vni-ticker-wrap {{
+  overflow: hidden;
+  background: #0e1117;
+  border: 1px solid #2d3139;
+  border-radius: 6px;
+  padding: 5px 0;
+  margin-bottom: 4px;
+}}
+.vni-ticker-inner {{
+  display: inline-block;
+  white-space: nowrap;
+  animation: vni-scroll {speed}s linear infinite;
+  font-size: 12px;
+  font-family: monospace;
+}}
+.vni-ticker-inner:hover {{ animation-play-state: paused; }}
+</style>
+<div class="vni-ticker-wrap">
+  <div class="vni-ticker-inner">{ticker_content}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
         st.divider()
 
     symbol_input = st.text_input("Mã cổ phiếu", value="HPG", max_chars=15).upper().strip()
@@ -207,8 +291,8 @@ with st.sidebar:
     st.caption("v1.0.0 | vnstock + Streamlit")
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
-tab_basic, tab_tech, tab_scan, tab_port, tab_model, tab_phaisinh = st.tabs([
-    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh"
+tab_basic, tab_tech, tab_scan, tab_port, tab_model, tab_phaisinh, tab_news = st.tabs([
+    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh", "📰 Tin Tức"
 ])
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2459,3 +2543,80 @@ with tab_model:
 with tab_phaisinh:
     from vn_invest.phaisinh_tab import render_phaisinh_tab
     render_phaisinh_tab()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 7 — TIN TỨC THỊ TRƯỜNG
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_news:
+    from vn_invest.news_fetcher import _fetch_all_rss, _RSS_SOURCES
+
+    st.header("📰 Tin Tức Thị Trường")
+    st.caption(f"{len(_RSS_SOURCES)} nguồn: VnEconomy · VnExpress · CafeF · Investing.com VN · NguoiDuaTin · Reuters · SCMP · Mining.com · SteelOrbis")
+
+    # Bộ lọc
+    _nc1, _nc2, _nc3 = st.columns([2, 2, 1])
+    _news_lang = _nc1.selectbox("Ngôn ngữ", ["Tất cả", "Tiếng Việt", "English"], key="news_lang")
+    _news_src  = _nc2.selectbox(
+        "Nguồn",
+        ["Tất cả"] + sorted({s for s, _, _ in _RSS_SOURCES}),
+        key="news_src",
+    )
+    _news_kw   = _nc3.text_input("Tìm kiếm", placeholder="vnindex, thep...", key="news_kw")
+
+    _btn_reload = st.button("🔄 Tải lại tin tức", key="btn_news_reload")
+    if _btn_reload:
+        # Xóa cache để fetch lại
+        import vn_invest.news_fetcher as _nf
+        _nf._cache.clear()
+
+    _news_placeholder = st.empty()
+
+    with _news_placeholder.container():
+        with st.spinner("Đang tải tin tức..."):
+            _all_news = _fetch_all_rss()
+
+        # Lọc
+        _filtered = _all_news
+        if _news_lang == "Tiếng Việt":
+            _filtered = [a for a in _filtered if a.get("lang") == "vi"]
+        elif _news_lang == "English":
+            _filtered = [a for a in _filtered if a.get("lang") == "en"]
+        if _news_src != "Tất cả":
+            _filtered = [a for a in _filtered if a.get("source") == _news_src]
+        if _news_kw.strip():
+            _kw = _news_kw.strip().lower()
+            _filtered = [
+                a for a in _filtered
+                if _kw in a.get("title", "").lower() or _kw in a.get("desc", "").lower()
+            ]
+
+        # Sắp xếp mới nhất trước
+        _filtered.sort(key=lambda x: x.get("date", ""), reverse=True)
+
+        st.markdown(f"**{len(_filtered)} bài** · Cache 10 phút")
+        st.divider()
+
+        # Nhóm theo nguồn
+        _by_source: dict = {}
+        for _art in _filtered:
+            _by_source.setdefault(_art["source"], []).append(_art)
+
+        if not _filtered:
+            st.info("Không có bài viết nào phù hợp với bộ lọc.")
+        else:
+            # Hiển thị theo từng nguồn
+            for _src_name, _arts in _by_source.items():
+                _lang_flag = "🇻🇳" if _arts[0].get("lang") == "vi" else "🌐"
+                with st.expander(f"{_lang_flag} **{_src_name}** — {len(_arts)} bài", expanded=True):
+                    for _a in _arts[:20]:
+                        _col_a, _col_b = st.columns([5, 1])
+                        with _col_a:
+                            if _a.get("url"):
+                                st.markdown(f"**[{_a['title']}]({_a['url']})**")
+                            else:
+                                st.markdown(f"**{_a['title']}**")
+                            if _a.get("desc"):
+                                st.caption(_a["desc"][:200])
+                        with _col_b:
+                            st.caption(_a.get("date", "")[:10])
