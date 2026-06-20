@@ -2151,10 +2151,7 @@ with tab_scan:
                 st.session_state.scan_cache = refresh_prices(source=source)
             st.session_state.scan_last_auto_refresh = _time.time()
             st.rerun()
-        else:
-            # Sleep ngắn rồi rerun để đếm ngược
-            _time.sleep(min(30, _remain))
-            st.rerun()
+        # Không sleep+rerun trong nhánh countdown — tránh chặn render tab_model/phaisinh/news
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2549,6 +2546,7 @@ with tab_phaisinh:
 # TAB 7 — TIN TỨC THỊ TRƯỜNG
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_news:
+    st.write("TEST TAB NEWS OK")
     from vn_invest.news_fetcher import _fetch_all_rss, _RSS_SOURCES
 
     st.header("📰 Tin Tức Thị Trường")
@@ -2570,11 +2568,16 @@ with tab_news:
         import vn_invest.news_fetcher as _nf
         _nf._cache.clear()
 
-    with st.spinner("Đang tải tin tức..."):
-        _all_news = _fetch_all_rss()
+    try:
+        with st.spinner("Đang tải tin tức..."):
+            _all_news = _fetch_all_rss()
+        st.write(f"DEBUG fetch OK: {len(_all_news)} bài")
+    except Exception as _e:
+        st.error(f"DEBUG fetch lỗi: {_e}")
+        _all_news = []
 
     # Lọc
-    _filtered = _all_news
+    _filtered = list(_all_news)
     if _news_lang == "Tiếng Việt":
         _filtered = [a for a in _filtered if a.get("lang") == "vi"]
     elif _news_lang == "English":
@@ -2587,6 +2590,8 @@ with tab_news:
             a for a in _filtered
             if _kw in a.get("title", "").lower() or _kw in a.get("desc", "").lower()
         ]
+
+    st.write(f"DEBUG filtered: {len(_filtered)} bài")
 
     # Sắp xếp mới nhất trước
     _filtered.sort(key=lambda x: x.get("date", ""), reverse=True)
