@@ -1,6 +1,6 @@
 """Lay tin tuc thi truong thoi su tu RSS bao uy tin Viet Nam va quoc te.
 
-Nguon Viet Nam  : VnEconomy, VnExpress, CafeF
+Nguon Viet Nam  : VnEconomy, VnExpress, CafeF, Investing.com VN, NguoiDuaTin
 Nguon quoc te   : Reuters, SCMP, Mining.com, SteelOrbis
 Cross-check     : Phat hien mau thuan giua tin VN va quoc te
 """
@@ -18,19 +18,27 @@ _HEADERS = {
 
 # [tag, url, ngon_ngu]
 _RSS_SOURCES = [
-    # Viet Nam
-    ("VnEconomy [VN]",  "https://vneconomy.vn/chung-khoan.rss",             "vi"),
-    ("VnEconomy [VN]",  "https://vneconomy.vn/kinh-te.rss",                 "vi"),
-    ("VnExpress [VN]",  "https://vnexpress.net/rss/kinh-doanh.rss",         "vi"),
-    ("CafeF [VN]",      "https://cafef.vn/thi-truong-chung-khoan.rss",      "vi"),
+    # Viet Nam — bao kinh te / chung khoan
+    ("VnEconomy [VN]",       "https://vneconomy.vn/chung-khoan.rss",                    "vi"),
+    ("VnEconomy [VN]",       "https://vneconomy.vn/kinh-te.rss",                        "vi"),
+    ("VnExpress [VN]",       "https://vnexpress.net/rss/kinh-doanh.rss",                "vi"),
+    ("CafeF [VN]",           "https://cafef.vn/thi-truong-chung-khoan.rss",             "vi"),
+    # Investing.com Viet Nam — macro + co phieu VN (encoding utf-8, khong dung r.text)
+    ("Investing.com [VN]",   "https://vn.investing.com/rss/news.rss",                   "vi"),
+    ("Investing.com [VN]",   "https://vn.investing.com/rss/news_25.rss",                "vi"),
+    # NguoiDuaTin kinh te — 50 bai/lan cap nhat, co tin chung khoan
+    ("NguoiDuaTin [VN]",     "https://www.nguoiduatin.vn/rss/kinh-te.rss",              "vi"),
     # Quoc te chung
-    ("Reuters [INT]",   "https://feeds.reuters.com/reuters/businessNews",    "en"),
-    ("SCMP [INT]",      "https://www.scmp.com/rss/91/feed",                  "en"),
+    ("Reuters [INT]",        "https://feeds.reuters.com/reuters/businessNews",           "en"),
+    ("SCMP [INT]",           "https://www.scmp.com/rss/91/feed",                        "en"),
     # Chuyen nganh hang hoa / kim loai / thep
-    ("Mining.com [INT]","https://www.mining.com/feed/",                      "en"),
-    ("SteelOrbis [INT]","https://www.steelorbis.com/steel-news/rss.xml",     "en"),
-    ("Reuters Metals",  "https://feeds.reuters.com/reuters/companyNews",     "en"),
+    ("Mining.com [INT]",     "https://www.mining.com/feed/",                            "en"),
+    ("SteelOrbis [INT]",     "https://www.steelorbis.com/steel-news/rss.xml",           "en"),
+    ("Reuters Metals",       "https://feeds.reuters.com/reuters/companyNews",           "en"),
 ]
+
+# Nguon can doc content bang bytes (UTF-8) thay vi r.text (co the bi mis-decode tren Windows)
+_BYTES_DECODE_SOURCES = {"vn.investing.com"}
 
 _cache: dict = {}
 _CACHE_TTL = 600  # 10 phut
@@ -82,8 +90,15 @@ def _fetch_all_rss() -> list[dict]:
     for source_tag, url, lang in _RSS_SOURCES:
         try:
             r = httpx.get(url, headers=_HEADERS, timeout=10, follow_redirects=True)
-            if r.status_code == 200:
-                all_articles.extend(_parse_rss(r.text, source_tag, lang))
+            if r.status_code != 200:
+                continue
+            # Investing.com tra ve UTF-8 nhung Windows co the mis-decode qua r.text
+            domain = url.split("/")[2]
+            if any(d in domain for d in _BYTES_DECODE_SOURCES):
+                xml = r.content.decode("utf-8", errors="replace")
+            else:
+                xml = r.text
+            all_articles.extend(_parse_rss(xml, source_tag, lang))
         except Exception:
             pass
 
@@ -423,7 +438,7 @@ def format_for_prompt(articles: list[dict], conflicts: list[str] = None) -> str:
     lines = [f"## Tin tuc thi truong thoi su (cap nhat {articles[0].get('date','')[:10] if articles else 'N/A'})\n"]
 
     if vi_arts:
-        lines.append("### Nguon Viet Nam (VnEconomy, VnExpress)")
+        lines.append("### Nguon Viet Nam (VnEconomy, VnExpress, Investing.com, NguoiDuaTin)")
         for a in vi_arts[:7]:
             rel = a.get("relevance_score", 0)
             tag = "🔴" if rel >= 15 else "🟡" if rel >= 6 else "🔵"
