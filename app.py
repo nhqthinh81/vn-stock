@@ -1547,6 +1547,60 @@ with tab_tech:
             last10["rsi"]    = last10["rsi"].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "—")
             st.dataframe(last10, use_container_width=True, hide_index=True)
 
+        # ── Mẫu hình giá (Bulkowski VN) ──────────────────────────────────────
+        from vn_invest.indicators import detect_chart_patterns, detect_candle_patterns
+        _cp_list  = detect_chart_patterns(df_price)
+        _can_list, _can_tf = detect_candle_patterns(df_price)
+
+        if _cp_list or _can_list:
+            st.divider()
+            st.subheader("📐 Mẫu hình giá (Bulkowski VN)")
+
+            _DIR_COLOR = {"bull": "#00e676", "bear": "#ff5252", "neutral": "#ffd740"}
+            _DIR_LABEL = {"bull": "Tăng ▲", "bear": "Giảm ▼", "neutral": "Trung tính →"}
+
+            if _cp_list:
+                st.markdown("**Chart Patterns (Price Action)**")
+                cp_cols = st.columns(min(len(_cp_list), 3))
+                for idx, (name, direction, rate) in enumerate(_cp_list):
+                    short = name.split("(")[0].strip()
+                    color = _DIR_COLOR.get(direction, "#aaa")
+                    label = _DIR_LABEL.get(direction, direction)
+                    cp_cols[idx % 3].markdown(
+                        f"""<div style="background:#1e2130;border-left:4px solid {color};
+                        border-radius:6px;padding:10px 14px;margin-bottom:8px">
+                        <div style="font-size:0.95em;font-weight:600;color:{color}">{short}</div>
+                        <div style="font-size:0.82em;color:#aaa;margin-top:2px">{label}</div>
+                        <div style="margin-top:6px">
+                          <span style="font-size:1.1em;font-weight:700;color:#fff">{rate}%</span>
+                          <span style="font-size:0.78em;color:#888;margin-left:6px">xác suất thành công (VN)</span>
+                        </div></div>""",
+                        unsafe_allow_html=True,
+                    )
+
+            if _can_list:
+                st.markdown(f"**Candle Patterns** *(khung {_can_tf})*")
+                can_cols = st.columns(min(len(_can_list), 3))
+                for idx, (name, direction, rate) in enumerate(_can_list):
+                    short = name.split("(")[0].strip()
+                    color = _DIR_COLOR.get(direction, "#aaa")
+                    label = _DIR_LABEL.get(direction, direction)
+                    can_cols[idx % 3].markdown(
+                        f"""<div style="background:#1e2130;border-left:4px solid {color};
+                        border-radius:6px;padding:10px 14px;margin-bottom:8px">
+                        <div style="font-size:0.95em;font-weight:600;color:{color}">{short}</div>
+                        <div style="font-size:0.82em;color:#aaa;margin-top:2px">{label}</div>
+                        <div style="margin-top:6px">
+                          <span style="font-size:1.1em;font-weight:700;color:#fff">{rate}%</span>
+                          <span style="font-size:0.78em;color:#888;margin-left:6px">xác suất thành công (VN)</span>
+                        </div></div>""",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.divider()
+            st.subheader("📐 Mẫu hình giá (Bulkowski VN)")
+            st.caption("Không phát hiện mẫu hình rõ ràng trong 60 phiên gần nhất.")
+
         st.divider()
 
         import plotly.graph_objects as go
@@ -1800,9 +1854,10 @@ with tab_scan:
     f_ai       = filter_cols[3].selectbox("AI Score",        ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
     f_ami_rec  = filter_cols[4].selectbox("Ami Rec",         ["Tất cả","STRONG BUY","ACCUMULATE","WATCHING","RISK SELL","TOP SELL"])
 
-    filter_cols2 = st.columns(2)
+    filter_cols2 = st.columns(3)
     f_setup    = filter_cols2[0].selectbox("Setup (Ami)", ["Tất cả","FLAT BASE","VCP TIGHT","PKT PIVOT","PULLBACK","PWR-PLAY","GAP UP"])
     f_forecast = filter_cols2[1].selectbox("Forecast (Ami)", ["Tất cả","BULL DIV","BEAR DIV","BB BOT REV"])
+    f_pattern  = filter_cols2[2].selectbox("Mẫu hình giá", ["Tất cả","Có mẫu bull","Có mẫu bear","Có mẫu neutral","Không có mẫu"])
 
     # Checkbox hiện mã bị hạn chế (ẩn mặc định)
     show_restricted = st.checkbox("Hiện mã bị hạn chế/cảnh báo", value=False,
@@ -2039,6 +2094,18 @@ with tab_scan:
         if f_forecast != "Tất cả" and "ami_forecast" in df_scan.columns:
             df_scan = df_scan[df_scan["ami_forecast"] == f_forecast].copy()
 
+        # Lọc Mẫu hình giá
+        if f_pattern != "Tất cả" and "chart_patterns" in df_scan.columns:
+            cp = df_scan["chart_patterns"].fillna("")
+            if f_pattern == "Có mẫu bull":
+                df_scan = df_scan[cp.str.contains(r"\[bull,", na=False)].copy()
+            elif f_pattern == "Có mẫu bear":
+                df_scan = df_scan[cp.str.contains(r"\[bear,", na=False)].copy()
+            elif f_pattern == "Có mẫu neutral":
+                df_scan = df_scan[cp.str.contains(r"\[neutral,", na=False)].copy()
+            elif f_pattern == "Không có mẫu":
+                df_scan = df_scan[cp.eq("")].copy()
+
         # Đếm mã restricted đang bị ẩn
         _all_rows = st.session_state.scan_cache
         _n_restricted = sum(
@@ -2079,31 +2146,51 @@ with tab_scan:
             "atr_pct","bb_width_pct","volume_ratio",
             "ai_score","tech_score","consensus","signal","risk","phase",
             "ami_rec_label","ami_score","ami_setup","ami_forecast",
+            "chart_patterns",
         ] if c in df_scan.columns]
         df_display = df_scan[display_cols].rename(columns={
-            "symbol":"Mã","_warn":"Trạng thái","close":"Giá","rsi":"RSI","dist_ema34_pct":"Dist EMA34%",
-            "atr_pct":"ATR%","bb_width_pct":"BB Width%","volume_ratio":"Vol Ratio",
-            "ai_score":"AI Score","tech_score":"Điểm KT","consensus":"Đồng thuận",
+            "symbol":"Mã","_warn":"Trạng thái","close":"Giá","rsi":"RSI","dist_ema34_pct":"Dist%",
+            "atr_pct":"ATR%","bb_width_pct":"BB%","volume_ratio":"VolR",
+            "ai_score":"AI","tech_score":"KT","consensus":"Đồng thuận",
             "signal":"Tín hiệu","risk":"Rủi ro","phase":"Giai đoạn",
-            "ami_rec_label":"Ami Rec","ami_score":"Ami Score",
+            "ami_rec_label":"Ami Rec","ami_score":"AmiSc",
             "ami_setup":"Setup","ami_forecast":"Forecast",
+            "chart_patterns":"Mẫu hình giá",
         })
         # Ẩn cột Trạng thái nếu không có mã nào bị đánh dấu
         if df_display["Trạng thái"].eq("").all():
             df_display = df_display.drop(columns=["Trạng thái"])
+        st.markdown("""<style>
+[data-testid="stDataFrame"] .ag-cell {
+    white-space: normal !important;
+    word-break: break-word !important;
+    line-height: 1.5 !important;
+}
+</style>""", unsafe_allow_html=True)
         st.dataframe(df_display, use_container_width=True, hide_index=True,
             column_config={
-                "Giá":       st.column_config.NumberColumn(format="%,.0f"),
-                "RSI":       st.column_config.NumberColumn(format="%.1f"),
-                "Dist EMA34%": st.column_config.NumberColumn(format="%.2f%%"),
-                "ATR%":      st.column_config.NumberColumn(format="%.2f%%",
-                                 help="ATR/Giá — volatility thực tế (Wilder). >3%: biến động cao"),
-                "BB Width%": st.column_config.NumberColumn(format="%.1f%%",
-                                 help="Bollinger Band Width. <5%: squeeze (chuẩn bị bùng nổ), >15%: đang giãn"),
-                "Vol Ratio": st.column_config.NumberColumn(format="%.2f",
+                "Mã":        st.column_config.TextColumn(width="small"),
+                "Giá":       st.column_config.NumberColumn(format="%,.0f", width="small"),
+                "RSI":       st.column_config.NumberColumn(format="%.1f",  width="small"),
+                "Dist%":     st.column_config.NumberColumn(format="%.1f%%", width="small",
+                                 help="Dist EMA34%"),
+                "ATR%":      st.column_config.NumberColumn(format="%.1f%%", width="small",
+                                 help="ATR/Giá — volatility thực tế. >3%: biến động cao"),
+                "BB%":       st.column_config.NumberColumn(format="%.1f%%", width="small",
+                                 help="Bollinger Band Width. <5%: squeeze, >15%: đang giãn"),
+                "VolR":      st.column_config.NumberColumn(format="%.2f",   width="small",
                                  help="Khối lượng / SMA20(KL). >1.5: xác nhận tín hiệu mạnh"),
-                "Điểm KT":   st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
-                "AI Score":  st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                "KT":        st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                "AI":        st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                "Đồng thuận":st.column_config.TextColumn(width="small"),
+                "Tín hiệu":  st.column_config.TextColumn(width="small"),
+                "Rủi ro":    st.column_config.TextColumn(width="small"),
+                "Giai đoạn": st.column_config.TextColumn(width="small"),
+                "Ami Rec":   st.column_config.TextColumn(width="small"),
+                "AmiSc":     st.column_config.NumberColumn(format="%.0f", width="small"),
+                "Setup":     st.column_config.TextColumn(width="small"),
+                "Forecast":  st.column_config.TextColumn(width="small"),
+                "Mẫu hình giá": st.column_config.TextColumn(width="large"),
             })
 
         # ── PyGWalker — Phân tích nâng cao ──────────────────────────────────

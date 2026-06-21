@@ -10,9 +10,11 @@ from .config import RSI_OVERSOLD, RSI_OVERBOUGHT, SCORE_BUY_A, SCORE_BUY_B, SCOR
 # ── Chỉ báo cơ bản ──────────────────────────────────────────────────────────
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    # Wilder's Smoothed Moving Average (alpha=1/period), đúng với định nghĩa gốc RSI-1978
+    # SMA gây dao động rộng hơn và lag khác — không tương thích với ngưỡng 30/70 chuẩn
     delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
@@ -103,43 +105,101 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["volume_ratio"] = np.nan
 
+    # MA Alignment Score: đo cấu trúc xu hướng (SMA20 vs SMA50 vs close)
+    # +2: close>SMA20>SMA50 — bull aligned hoàn toàn
+    # +1: SMA20>SMA50 nhưng close<SMA20 — uptrend nhưng pullback
+    #  0: SMA20 ≈ SMA50 (within 1%) — sideways
+    # -1: SMA20<SMA50 nhưng close>SMA20 — downtrend, bounce tạm
+    # -2: close<SMA20<SMA50 — bear aligned hoàn toàn
+    if "sma20" in df.columns and "sma50" in df.columns:
+        s20, s50 = df["sma20"], df["sma50"]
+        sma_diff_pct = (s20 - s50) / s50.replace(0, np.nan) * 100
+        bull_structure = s20 > s50                    # SMA20 > SMA50
+        price_above_s20 = close > s20
+
+        ma_score = pd.Series(0, index=df.index, dtype=int)
+        ma_score = ma_score.where(sma_diff_pct.abs() > 1, 0)  # sideways → 0
+        ma_score = ma_score.where(~(bull_structure & price_above_s20), ma_score)
+        ma_score[bull_structure & price_above_s20]   = 2
+        ma_score[bull_structure & ~price_above_s20]  = 1
+        ma_score[~bull_structure & price_above_s20]  = -1
+        ma_score[~bull_structure & ~price_above_s20] = -2
+        # Khi SMA20 ≈ SMA50 (sideways) → ghi đè về 0
+        ma_score[sma_diff_pct.abs() <= 1] = 0
+        df["ma_aligned"] = ma_score
+    else:
+        df["ma_aligned"] = 0
+
+    # Price trend 20d: % thay đổi close so với 20 phiên trước
+    df["price_trend_20d"] = close.pct_change(20) * 100
+
     return df
 
 
 # ── Phân loại tín hiệu ───────────────────────────────────────────────────────
 
-def calculate_tech_score(rsi: float, macd_hist: float, dist_ema_pct: float) -> float:
-    """Tính tech_score 0–100 từ 3 chỉ báo."""
-    score = 50.0  # baseline
+def calculate_tech_score(
+    rsi: float,
+    macd_hist: float,
+    dist_ema_pct: float,
+    ma_aligned: int = 0,        # -2/-1/0/+1/+2 từ MA alignment (xem add_all_indicators)
+    volume_ratio: float = float("nan"),
+) -> float:
+    """Tính tech_score 0–100 từ 4 chiều độc lập.
 
-    # RSI component (±20 điểm)
-    # Fix: ±25 tao cliff 5+ diem tai nguong 30/70 (RSI=30→+25 vs RSI=31→+19)
-    # Doi sang ±20 de gap jump tai nguong chi con 1 diem (30→+20 vs 31→+19)
-    if rsi <= RSI_OVERSOLD:
-        score += 20
-    elif rsi >= RSI_OVERBOUGHT:
-        score -= 20
-    else:
-        score += (RSI_OVERSOLD + RSI_OVERBOUGHT) / 2 - rsi
+    Chiều 1 — Momentum/overbought (RSI Wilder): ±15 điểm
+    Chiều 2 — Trend direction (MACD sign): ±12 điểm
+    Chiều 3 — Trend structure (MA alignment): ±13 điểm  ← mới
+    Chiều 4 — Mean reversion position (Dist EMA34): ±10 điểm
+    Bonus    — Volume confirmation: ±5 điểm            ← mới
+    """
+    score = 50.0
 
-    # MACD histogram component (±15 điểm)
-    # Chỉ dùng dấu (âm/dương) để tránh phụ thuộc vào đơn vị tuyệt đối của histogram
-    # (các mã giá thấp có histogram ~0.001, mã giá cao có histogram ~5 — không so được)
-    if macd_hist > 0:
+    # ── Chiều 1: RSI — momentum/overbought position (±15) ────────────────────
+    if rsi <= RSI_OVERSOLD:        # oversold → cơ hội đảo chiều
         score += 15
-    elif macd_hist < 0:
+    elif rsi >= RSI_OVERBOUGHT:    # overbought → áp lực chốt
         score -= 15
+    else:
+        # Tuyến tính trong vùng 30–70; trung tính tại RSI=50
+        score += (50 - rsi) * 15 / 20
 
-    # Dist EMA34 component (±10 điểm)
-    # -5% đến -15%: pullback vừa → cơ hội mua (+10)
-    # < -15%: downtrend mạnh, không phải pullback → phạt (-10)
-    # > 10%: quá mua → phạt (-10)
+    # ── Chiều 2: MACD — momentum direction (±12) ─────────────────────────────
+    # Chỉ dùng dấu, không dùng magnitude (histogram unit không chuẩn hóa)
+    if macd_hist > 0:
+        score += 12
+    elif macd_hist < 0:
+        score -= 12
+
+    # ── Chiều 3: MA Alignment — trend structure (±13) ─────────────────────────
+    # ma_aligned được tính bên ngoài từ SMA20 vs SMA50 vs close:
+    #  +2: close>SMA20>SMA50 (bull aligned, uptrend rõ)
+    #  +1: SMA20>SMA50 nhưng close<SMA20 (uptrend nhưng pullback)
+    #   0: SMA20 ≈ SMA50 (sideways)
+    #  -1: SMA20<SMA50 nhưng close>SMA20 (downtrend, bounce nhỏ)
+    #  -2: close<SMA20<SMA50 (bear aligned, downtrend rõ)
+    score += ma_aligned * 6.5   # ±2 × 6.5 = ±13
+
+    # ── Chiều 4: Dist EMA34 — mean reversion position (±10) ──────────────────
+    # Pullback vào EMA34 (−5% đến −15%) là cơ hội tốt nhất
+    # Quá xa EMA34 theo cả 2 chiều đều rủi ro hơn
     if -15 <= dist_ema_pct < -5:
-        score += 10
+        score += 10   # pullback lý tưởng
+    elif -5 <= dist_ema_pct <= 5:
+        score += 3    # sát EMA34, trung tính
     elif dist_ema_pct < -15:
-        score -= 10
-    elif dist_ema_pct > 10:
-        score -= 10
+        score -= 10   # downtrend sâu
+    elif dist_ema_pct > 15:
+        score -= 10   # overextended cao
+    elif dist_ema_pct > 5:
+        score -= 3    # xa EMA34 nhẹ
+
+    # ── Bonus: Volume confirmation (±5) ───────────────────────────────────────
+    if not math.isnan(volume_ratio):
+        if volume_ratio >= 1.5:
+            score += 5    # volume đột biến xác nhận move
+        elif volume_ratio < 0.6:
+            score -= 5    # volume cạn — move thiếu lực
 
     return max(0.0, min(100.0, score))
 
@@ -214,20 +274,38 @@ def classify_risk(
         return "High"
 
 
-def classify_phase(rsi: float, dist_ema_pct: float) -> str:
-    # Fix: Accumulation cu qua rong (rsi<50 AND dist<3%) nuot ca downtrend vao "Accumulation"
-    # Ví dụ: rsi=45, dist=-20% → cũ = Accumulation, thực tế = Markdown
-    # Fix: them bound dist >= -15% cho Accumulation; dist < -5% ma rsi >= 40 → Neutral/Markdown
-    if rsi < 40 and dist_ema_pct < -5:
+def classify_phase(
+    rsi: float,
+    dist_ema_pct: float,
+    price_trend_20d: float = 0.0,   # % thay đổi giá 20 phiên gần nhất
+    ma_aligned: int = 0,            # -2/-1/0/+1/+2 từ MA alignment
+) -> str:
+    """Phân loại Wyckoff phase dựa trên 4 chiều.
+
+    Wyckoff gốc đo hành vi giá-volume theo thời gian. Ở đây dùng proxy:
+    - RSI: đo momentum hiện tại
+    - dist_ema_pct: đo vị trí giá so với xu hướng trung hạn
+    - price_trend_20d: đo hướng di chuyển thực tế 20 phiên (thay thế HH/HL pattern)
+    - ma_aligned: đo cấu trúc xu hướng dài hạn (SMA20 vs SMA50)
+    """
+    # Markdown: giá đang giảm rõ ràng, cả momentum lẫn cấu trúc đều yếu
+    if rsi < 45 and dist_ema_pct < -8 and (price_trend_20d < -5 or ma_aligned <= -1):
         return "Markdown"
-    elif rsi < 50 and -15 <= dist_ema_pct < 3:
-        return "Accumulation"
-    elif rsi > 60 and dist_ema_pct > 3:
+
+    # Distribution: giá cao, momentum hạ nhiệt, xu hướng bắt đầu yếu
+    if rsi > 58 and dist_ema_pct > 5 and price_trend_20d < 2 and ma_aligned >= 0:
         return "Distribution"
-    elif rsi > 50 and dist_ema_pct > 0:
+
+    # Markup: giá đang tăng rõ ràng, cấu trúc MA ủng hộ
+    if rsi > 52 and dist_ema_pct > 0 and (price_trend_20d > 3 or ma_aligned >= 1):
         return "Markup"
-    else:
-        return "Neutral"
+
+    # Accumulation: giá sideways sau downtrend, momentum chưa hồi phục
+    # Điều kiện: không giảm tiếp (dist không quá thấp), nhưng chưa có trend tăng rõ
+    if rsi < 55 and -20 <= dist_ema_pct < 5 and -3 <= price_trend_20d < 5:
+        return "Accumulation"
+
+    return "Neutral"
 
 
 # ── Nhận diện mẫu hình ──────────────────────────────────────────────────────
@@ -320,20 +398,23 @@ def detect_candle_patterns(df: pd.DataFrame) -> tuple[list[tuple[str, str, int]]
 
     # Hammer / Hanging Man
     if body >= min_body and lower_wick >= 2 * body and upper_wick < body * 1.5:
-        # Fix: 3-bar look quá nông → dùng 5-bar để xác nhận xu hướng trước đó
-        prev_down = i >= 5 and c[i-1] < c[i-5]
+        # Trend context 10 bar: downtrend rõ → Hammer; uptrend → Hanging Man
+        _w = min(10, i)
+        prev_down = i >= _w and c[i-1] < c[i-_w] * 0.97   # giảm ≥3% trong 10 bar
+        prev_up   = i >= _w and c[i-1] > c[i-_w] * 1.03
         if prev_down:
             patterns.append(("Hammer (bua)", "bull", 60))
-        else:
+        elif prev_up:
             patterns.append(("Hanging Man (nguoi treo)", "bear", 59))
 
     # Shooting Star / Inverted Hammer
     if body >= min_body and upper_wick >= 2 * body and lower_wick < body * 1.5:
-        # Fix: 5-bar context cho Shooting Star
-        prev_up = i >= 5 and c[i-1] > c[i-5]
+        _w = min(10, i)
+        prev_up   = i >= _w and c[i-1] > c[i-_w] * 1.03
+        prev_down = i >= _w and c[i-1] < c[i-_w] * 0.97
         if prev_up:
             patterns.append(("Shooting Star (sao bang)", "bear", 59))
-        else:
+        elif prev_down:
             patterns.append(("Inverted Hammer (can xac nhan)", "neutral", 50))
 
     # Marubozu — body phải ≥ avg_body để không trigger trên candle tí hon
@@ -359,46 +440,64 @@ def detect_candle_patterns(df: pd.DataFrame) -> tuple[list[tuple[str, str, int]]
                 and body >= avg_body * 0.5 and prev_body >= avg_body * 0.5):
             patterns.append(("Bearish Engulfing (nuot nen tang)", "bear", 63))
 
-    # Morning Star — nến 1 và 3 phải có body ≥ avg_body * 0.5
+    # Morning Star — nến 2 phải mở thấp hơn close nến 1 (gap down hoặc sát đáy thân)
+    # nến 3 đóng trên midpoint thân nến 1; wick nến 3 không quá dài
     if i >= 2:
         b1 = abs(c[i-2] - o[i-2])
         b3 = abs(c[i]   - o[i])
         rng1 = h[i-2] - l[i-2]
         rng3 = h[i]   - l[i]
         n1_bear  = c[i-2] < o[i-2] and b1 > rng1 * 0.5 and b1 >= avg_body * 0.5
-        n2_small = abs(c[i-1]-o[i-1]) < (h[i-1]-l[i-1]) * 0.3
+        # nến 2: mở trong/dưới phần thấp của thân nến 1, body nhỏ
+        n2_small = (abs(c[i-1]-o[i-1]) < (h[i-1]-l[i-1]) * 0.35
+                    and max(c[i-1], o[i-1]) <= c[i-2] + b1 * 0.3)
         n3_bull  = bull and b3 > rng3 * 0.5 and b3 >= avg_body * 0.5
-        if n1_bear and n2_small and n3_bull and c[i] > (o[i-2] + c[i-2]) / 2:
+        # nến 3 đóng trên midpoint thân nến 1; upper wick không quá 50% body (lực mua thật)
+        n3_clean = upper_wick < b3 * 0.5
+        if n1_bear and n2_small and n3_bull and n3_clean and c[i] > (o[i-2] + c[i-2]) / 2:
             patterns.append(("Morning Star (dao chieu tang manh)", "bull", 78))
 
-    # Evening Star — cùng logic body filter
+    # Evening Star — nến 2 mở cao hơn close nến 1, body nhỏ; nến 3 đóng dưới midpoint nến 1
     if i >= 2:
         b1 = abs(c[i-2] - o[i-2])
         b3 = abs(c[i]   - o[i])
         rng1 = h[i-2] - l[i-2]
         rng3 = h[i]   - l[i]
         n1_bull  = c[i-2] > o[i-2] and b1 > rng1 * 0.5 and b1 >= avg_body * 0.5
-        n2_small = abs(c[i-1]-o[i-1]) < (h[i-1]-l[i-1]) * 0.3
+        n2_small = (abs(c[i-1]-o[i-1]) < (h[i-1]-l[i-1]) * 0.35
+                    and min(c[i-1], o[i-1]) >= c[i-2] - b1 * 0.3)
         n3_bear  = not bull and b3 > rng3 * 0.5 and b3 >= avg_body * 0.5
-        if n1_bull and n2_small and n3_bear and c[i] < (o[i-2] + c[i-2]) / 2:
+        n3_clean = lower_wick < b3 * 0.5   # lower wick ngắn — áp lực bán thật
+        if n1_bull and n2_small and n3_bear and n3_clean and c[i] < (o[i-2] + c[i-2]) / 2:
             patterns.append(("Evening Star (dao chieu giam)", "bear", 72))
 
     # Three White Soldiers — body >= avg*0.5, mỗi nến mở trong thân nến trước
+    # THÊM: upper wick phải ngắn (< 20% body) — soldiers thật không có bóng trên dài
     if i >= 2:
-        if (all(c[j] > o[j] and c[j] > c[j-1]
+        def _uw(j): return h[j] - max(c[j], o[j])
+        soldiers_ok = (
+            all(c[j] > o[j] and c[j] > c[j-1]
                 and abs(c[j]-o[j]) >= avg_body * 0.5
+                and _uw(j) < abs(c[j]-o[j]) * 0.20    # upper wick < 20% body
                 for j in [i-2, i-1, i])
-                and o[i-1] >= o[i-2] and o[i-1] <= c[i-2]
-                and o[i] >= o[i-1] and o[i] <= c[i-1]):
+            and o[i-1] >= o[i-2] and o[i-1] <= c[i-2]
+            and o[i]   >= o[i-1] and o[i]   <= c[i-1]
+        )
+        if soldiers_ok:
             patterns.append(("Three White Soldiers (3 nen tang lien tiep)", "bull", 83))
 
-    # Three Black Crows — body >= avg*0.5, mỗi nến mở trong thân nến trước
+    # Three Black Crows — body >= avg*0.5, lower wick ngắn (< 20% body)
     if i >= 2:
-        if (all(c[j] < o[j] and c[j] < c[j-1]
+        def _lw(j): return min(c[j], o[j]) - l[j]
+        crows_ok = (
+            all(c[j] < o[j] and c[j] < c[j-1]
                 and abs(c[j]-o[j]) >= avg_body * 0.5
+                and _lw(j) < abs(c[j]-o[j]) * 0.20    # lower wick < 20% body
                 for j in [i-2, i-1, i])
-                and o[i-1] >= c[i-2] and o[i-1] <= o[i-2]
-                and o[i] >= c[i-1] and o[i] <= o[i-1]):
+            and o[i-1] >= c[i-2] and o[i-1] <= o[i-2]
+            and o[i]   >= c[i-1] and o[i]   <= o[i-1]
+        )
+        if crows_ok:
             patterns.append(("Three Black Crows (3 nen giam lien tiep)", "bear", 78))
 
     # Weekly: giảm confidence 10% + gắn [W] vào tên để phân biệt với daily
@@ -441,56 +540,101 @@ def detect_chart_patterns(df: pd.DataFrame) -> list[tuple[str, str, int]]:
     lows  = local_lows()
     tol   = 0.03   # 3% tolerance cho đỉnh/đáy tương đương
 
-    # ── Double Bottom (W) — Bulkowski: 64% bull, avg gain +40% ───────────────
+    # ── Helper: phân loại Adam (nhọn) vs Eve (tròn) ─────────────────────────
+    # Adam: đáy/đỉnh hình thành trong 1-3 bar, giá biến động mạnh (V-shape)
+    # Eve: đáy/đỉnh trải rộng nhiều bar, giá đi từ từ (U-shape)
+    # Dùng tỷ lệ (high-low) của 3 bar quanh pivot so với ATR trung bình:
+    # Adam: spread hẹp (1-2 bar chiếm phần lớn range) → std thấp
+    # Eve: spread rộng (nhiều bar chia đều range) → std cao
+    def _is_adam(idx: int, is_low: bool, half_w: int = 3) -> bool:
+        start = max(0, idx - half_w)
+        end   = min(n, idx + half_w + 1)
+        if end - start < 3:
+            return True
+        segment = l[start:end] if is_low else h[start:end]
+        span    = max(segment) - min(segment)
+        if span == 0:
+            return True
+        # Adam: pivot chiếm >60% range trong vòng 1 bar (nhọn)
+        neighbors = [abs(segment[j] - segment[j-1]) for j in range(1, len(segment))]
+        max_step  = max(neighbors) if neighbors else 0
+        # Nếu bước nhảy lớn nhất > 40% tổng span → đáy/đỉnh nhọn = Adam
+        return max_step / span > 0.40
+
+    # ── Double Bottom — thống kê VN (Bulkowski VN Edition 1, 2026) ───────────
+    # Adam&Adam: 181 mẫu, 77.35% | Adam&Eve: 51 mẫu, 64.71%
+    # Eve&Adam:  39 mẫu, 79.49%  | Eve&Eve:  31 mẫu, 74.19%
     if len(lows) >= 2:
         b1, b2 = lows[-2], lows[-1]
         if b2 > b1 and abs(l[b1] - l[b2]) / l[b1] < tol:
-            # Neckline phải bị phá vỡ (giá hiện tại > đỉnh giữa 2 đáy)
             mid_highs = [i for i in highs if b1 < i < b2]
             if mid_highs:
                 neck = max(h[i] for i in mid_highs)
-                # Fix: phai close TREN neckline moi la breakout hop le (truoc: cho phep -2% duoi)
-                if c[-1] > neck * 0.995:
-                    patterns.append(("Double Bottom (day doi W)", "bull", 64))
+                # Khoảng cách đủ lớn (sách: đỉnh giữa ≥ 10% trên đáy thấp nhất)
+                low_pt  = min(l[b1], l[b2])
+                height  = neck - low_pt
+                if height / low_pt >= 0.08 and c[-1] > neck * 0.995:
+                    b1_adam = _is_adam(b1, is_low=True)
+                    b2_adam = _is_adam(b2, is_low=True)
+                    if b1_adam and b2_adam:
+                        patterns.append(("Hai day Adam & Adam (VN: 77%)", "bull", 77))
+                    elif b1_adam and not b2_adam:
+                        patterns.append(("Hai day Adam & Eve (VN: 65%)", "bull", 65))
+                    elif not b1_adam and b2_adam:
+                        patterns.append(("Hai day Eve & Adam (VN: 79%)", "bull", 79))
+                    else:
+                        patterns.append(("Hai day Eve & Eve (VN: 74%)", "bull", 74))
 
-    # ── Double Top (M) — Bulkowski: 73% bear, avg decline -18% ──────────────
+    # ── Double Top — thống kê VN (Bulkowski VN Edition 1, 2026) ─────────────
+    # Adam&Adam: 141 mẫu, 72.34% | Adam&Eve: 45 mẫu, 77.78%
+    # Eve&Adam:  34 mẫu, 73.53%  | Eve&Eve:  1 mẫu (bỏ qua — không đủ mẫu)
     if len(highs) >= 2:
         t1, t2 = highs[-2], highs[-1]
         if t2 > t1 and abs(h[t1] - h[t2]) / h[t1] < tol:
             mid_lows = [i for i in lows if t1 < i < t2]
             if mid_lows:
                 neck = min(l[i] for i in mid_lows)
-                # Fix: phai close DUOI neckline moi la breakdown hop le (truoc: cho phep +2% tren)
-                if c[-1] < neck * 1.005:
-                    patterns.append(("Double Top (dinh doi M)", "bear", 73))
+                high_pt = max(h[t1], h[t2])
+                height  = high_pt - neck
+                if height / neck >= 0.08 and c[-1] < neck * 1.005:
+                    t1_adam = _is_adam(t1, is_low=False)
+                    t2_adam = _is_adam(t2, is_low=False)
+                    if t1_adam and t2_adam:
+                        patterns.append(("Hai dinh Adam & Adam (VN: 72%)", "bear", 72))
+                    elif t1_adam and not t2_adam:
+                        patterns.append(("Hai dinh Adam & Eve (VN: 78%)", "bear", 78))
+                    elif not t1_adam and t2_adam:
+                        patterns.append(("Hai dinh Eve & Adam (VN: 74%)", "bear", 74))
+                    else:
+                        patterns.append(("Hai dinh Eve & Eve (it mau)", "bear", 70))
 
-    # ── Head & Shoulders — Bulkowski: 93% bear, avg decline -22% (hiếm gặp) ─
+    # ── Head & Shoulders đỉnh — VN: 72.73% (11 mẫu), phức hợp: 72.56% (164 mẫu)
     if len(highs) >= 3:
         ls, hd, rs = highs[-3], highs[-2], highs[-1]
         head_h = h[hd]
         if (h[ls] < head_h and h[rs] < head_h
                 and abs(h[ls] - h[rs]) / head_h < tol * 2
-                and rs - ls >= 20):  # Cần ít nhất 20 bars để tránh false positive
+                and rs - ls >= 20):
             mid_lows_l = [i for i in lows if ls < i < hd]
             mid_lows_r = [i for i in lows if hd < i < rs]
             if mid_lows_l and mid_lows_r:
                 neck = (l[mid_lows_l[-1]] + l[mid_lows_r[0]]) / 2
                 if c[-1] < neck * 1.03:
-                    patterns.append(("Head & Shoulders (dau vai dinh)", "bear", 93))
+                    patterns.append(("Vai dau vai dinh (VN: 73%)", "bear", 73))
 
-    # ── Inverse H&S — Bulkowski: 89% bull ────────────────────────────────────
+    # ── Inverse H&S đáy — VN: 81.25% (32 mẫu), phức hợp: 72.73% (99 mẫu) ───
     if len(lows) >= 3:
         ls, hd, rs = lows[-3], lows[-2], lows[-1]
         head_l = l[hd]
         if (l[ls] > head_l and l[rs] > head_l
                 and abs(l[ls] - l[rs]) / max(l[ls], l[rs]) < tol * 2
-                and rs - ls >= 20):  # Cần ít nhất 20 bars để tránh false positive
+                and rs - ls >= 20):
             mid_highs_l = [i for i in highs if ls < i < hd]
             mid_highs_r = [i for i in highs if hd < i < rs]
             if mid_highs_l and mid_highs_r:
                 neck = (h[mid_highs_l[-1]] + h[mid_highs_r[0]]) / 2
                 if c[-1] > neck * 0.97:
-                    patterns.append(("Inverse H&S (dau vai day)", "bull", 89))
+                    patterns.append(("Vai dau vai day (VN: 81%)", "bull", 81))
 
     # ── Ascending Triangle — Bulkowski: 77% bull breakout ────────────────────
     if len(highs) >= 3 and len(lows) >= 3:
@@ -520,6 +664,181 @@ def detect_chart_patterns(df: pd.DataFrame) -> list[tuple[str, str, int]]:
         rising_l  = l[rec_lows[-1]]  > l[rec_lows[0]]  * 1.01
         if falling_h and rising_l:
             patterns.append(("Symmetrical Triangle (tam giac can bang)", "neutral", 54))
+
+    # ─────────────────── PHASE 2 PATTERNS ────────────────────────────────────
+
+    # Volume array (optional — dùng cho Flag và Gap)
+    vol = df["volume"].values if "volume" in df.columns else None
+
+    # ── 1. Flag / Pennant — có volume confirmation ────────────────────────────
+    # Pole: volume lớn (tăng mạnh có lực); consolidation: volume co lại (giảm quan tâm)
+    if n >= 25 and vol is not None:
+        pole_bars = 12
+        cons_bars = 6
+        if n >= pole_bars + cons_bars:
+            pole_start = n - pole_bars - cons_bars
+            pole_end   = n - cons_bars
+
+            c_pole  = c[pole_start:pole_end]
+            c_cons  = c[pole_end:]
+            h_cons  = h[pole_end:]
+            l_cons  = l[pole_end:]
+            v_pole  = vol[pole_start:pole_end]
+            v_cons  = vol[pole_end:]
+
+            pole_move  = (c_pole[-1] - c_pole[0]) / c_pole[0] if c_pole[0] > 0 else 0
+            cons_range = (h_cons.max() - l_cons.min()) / c_pole[-1] if c_pole[-1] > 0 else 0
+
+            # Volume confirmation: pole avg > consolidation avg (volume co lại khi nghỉ)
+            v_pole_avg = v_pole.mean()
+            v_cons_avg = v_cons.mean()
+            vol_contraction = v_cons_avg < v_pole_avg * 0.80 if v_pole_avg > 0 else False
+
+            if vol_contraction:
+                if pole_move >= 0.90 and cons_range <= 0.25:
+                    # High Tight Flag VN 63%
+                    patterns.append(("High Tight Flag (co cao va chat)", "bull", 63))
+
+                elif pole_move >= 0.15 and cons_range <= 0.25:
+                    # Bull flag/pennant: consolidation phải nghiêng ngược chiều pole (xuống)
+                    cons_slope = (c_cons[-1] - c_cons[0]) / c_cons[0] if c_cons[0] > 0 else 0
+                    if -0.12 <= cons_slope <= 0.02:
+                        if len(h_cons) >= 4:
+                            mid = len(h_cons) // 2
+                            # Pennant: cả highs lẫn lows hội tụ vào nhau
+                            h_shrinks = h_cons[:mid].max() > h_cons[mid:].max() * 1.005
+                            l_rises   = l_cons[:mid].min() < l_cons[mid:].min() * 0.995
+                            if h_shrinks and l_rises:
+                                patterns.append(("Bull Pennant (co duoi nheo tang)", "bull", 70))
+                            else:
+                                patterns.append(("Bull Flag (co tang)", "bull", 68))
+                        else:
+                            patterns.append(("Bull Flag (co tang)", "bull", 68))
+
+                elif pole_move <= -0.15 and cons_range <= 0.25:
+                    # Bear flag/pennant: consolidation nghiêng lên (counter-trend nhẹ)
+                    cons_slope = (c_cons[-1] - c_cons[0]) / c_cons[0] if c_cons[0] > 0 else 0
+                    if -0.02 <= cons_slope <= 0.12:
+                        if len(h_cons) >= 4:
+                            mid = len(h_cons) // 2
+                            h_shrinks = h_cons[:mid].max() > h_cons[mid:].max() * 1.005
+                            l_rises   = l_cons[:mid].min() < l_cons[mid:].min() * 0.995
+                            if h_shrinks and l_rises:
+                                patterns.append(("Bear Pennant (co duoi nheo giam)", "bear", 54))
+                            else:
+                                patterns.append(("Bear Flag (co giam)", "bear", 70))
+                        else:
+                            patterns.append(("Bear Flag (co giam)", "bear", 70))
+
+    # ── 2. Gap patterns — chỉ 5 bars gần nhất, volume ≥ 1.5x SMA20 ──────────
+    if "open" in df.columns and vol is not None and n >= 21:
+        o       = df["open"].values
+        _slices = [vol[max(0, i-20):i] for i in range(n)]
+        vol_ma  = np.array([s.mean() if len(s) > 0 else np.nan for s in _slices])
+        # Chỉ xét 5 bars gần nhất để tránh pickup gap cũ không còn relevant
+        for i in range(max(1, n - 5), n):
+            prev_c   = c[i - 1]
+            if prev_c <= 0:
+                continue
+            curr_o   = o[i]
+            gap_pct  = abs(curr_o - prev_c) / prev_c
+            if gap_pct < 0.02:
+                continue
+            # Volume phải đột biến ≥ 1.5× SMA20 ngày gap
+            vol_ref  = vol_ma[i]
+            if vol_ref <= 0 or vol[i] < vol_ref * 1.5:
+                continue
+
+            is_up_gap   = curr_o > prev_c * 1.02
+            is_down_gap = curr_o < prev_c * 0.98
+
+            # Trend 10 bar trước gap (cần rõ hơn: ±10%)
+            trend_win   = c[max(0, i - 11):i - 1]
+            if len(trend_win) < 5:
+                continue
+            prior_trend = (trend_win[-1] - trend_win[0]) / trend_win[0] if trend_win[0] > 0 else 0
+
+            if is_up_gap and prior_trend < -0.10:
+                # Gap Phá Nền tăng: gap lên sau downtrend → đảo chiều — VN 99.64%
+                patterns.append(("Gap Pha Nen tang (breakaway gap)", "bull", 99))
+                break
+            elif is_down_gap and prior_trend > 0.10:
+                # Gap Phá Nền giảm: gap xuống sau uptrend → đảo chiều — VN 99.64%
+                patterns.append(("Gap Pha Nen giam (breakaway gap)", "bear", 99))
+                break
+            elif is_up_gap and prior_trend >= 0.10:
+                # Gap Tiếp Diễn tăng: gap lên trong uptrend → tiếp diễn — VN 99.89%
+                patterns.append(("Gap Tiep Dien tang (runaway gap)", "bull", 99))
+                break
+            elif is_down_gap and prior_trend <= -0.10:
+                # Gap Tiếp Diễn giảm: gap xuống trong downtrend → tiếp diễn — VN 99.89%
+                patterns.append(("Gap Tiep Dien giam (runaway gap)", "bear", 99))
+                break
+
+    # ── 3. Pipe Bottoms — 2 spike đáy liền kề, cùng mức, hồi phục sau — VN 94.28% ──
+    # Fix: spike1 không so sánh l1 vs l2 nữa (tránh mâu thuẫn với same_lvl)
+    for i in range(max(2, n - 15), n - 2):
+        l1, l2 = l[i], l[i + 1]
+        if l1 <= 0 or l2 <= 0:
+            continue
+        # Mỗi bar phải thấp hơn bar trước và bar sau (spike xuống rõ)
+        spike1 = l1 < l[i - 1] * 0.97 and l1 < l[i + 2] * 0.97   # so vs bar i+2, không so vs l2
+        spike2 = l2 < l[i - 1] * 0.97 and (i + 2 >= n or l2 < l[i + 2] * 0.97)
+        # 2 đáy phải ở cùng mức (trong 3%)
+        same_lvl  = abs(l1 - l2) / max(l1, l2) <= 0.03
+        # Cần phục hồi rõ ràng sau spike (close bar thứ 3 sau > đáy + 5%)
+        recovered = i + 3 < n and c[i + 3] > max(l1, l2) * 1.05
+        if spike1 and spike2 and same_lvl and recovered:
+            patterns.append(("Pipe Bottoms (day ong)", "bull", 94))
+            break
+
+    # ── 4. Rectangle Bottom — VN 79.6% ───────────────────────────────────────
+    if len(highs) >= 4 and len(lows) >= 4:
+        rec_h = highs[-4:]
+        rec_l = lows[-4:]
+        h_vals = [h[i] for i in rec_h]
+        l_vals = [l[i] for i in rec_l]
+        h_flat = (max(h_vals) - min(h_vals)) / min(h_vals) <= 0.03 if min(h_vals) > 0 else False
+        l_flat = (max(l_vals) - min(l_vals)) / min(l_vals) <= 0.03 if min(l_vals) > 0 else False
+        band_h = (min(h_vals) - max(l_vals)) / max(l_vals) if max(l_vals) > 0 else 0
+        pre_c  = c[max(0, rec_l[0] - 20):rec_l[0]]
+        prior_down = (pre_c[-1] - pre_c[0]) / pre_c[0] < -0.10 if len(pre_c) >= 5 and pre_c[0] > 0 else False
+        if h_flat and l_flat and band_h >= 0.03 and prior_down:
+            patterns.append(("Rectangle Bottom (day chu nhat)", "bull", 79))
+
+    # ── 5. Triple patterns — dùng 3 đỉnh/đáy mới nhất + neckline check ───────
+    if len(highs) >= 3:
+        top3 = highs[-3:]   # 3 đỉnh cục bộ gần nhất (không bỏ qua 2 đỉnh cuối)
+        t_vals = [h[i] for i in top3]
+        t_max, t_min = max(t_vals), min(t_vals)
+
+        # Neckline = mức thấp nhất giữa 3 đỉnh
+        between_lows = [l[j] for j in range(top3[0], top3[-1] + 1)]
+        neckline = min(between_lows) if between_lows else None
+
+        # Ba Đỉnh Ngang Vùng: 3 highs cùng mức (≤3%), giá hiện tại đã phá neckline — VN 70.91%
+        if t_min > 0 and (t_max - t_min) / t_min <= 0.03:
+            if neckline and c[-1] < neckline * 0.99:
+                patterns.append(("Triple Top flat (ba dinh ngang)", "bear", 70))
+        # Ba Đỉnh Thấp Dần: mỗi đỉnh thấp hơn đỉnh trước ≥1%, giá phá neckline — VN 47.72%
+        elif h[top3[0]] > h[top3[1]] * 1.01 and h[top3[1]] > h[top3[2]] * 1.01:
+            if neckline and c[-1] < neckline * 0.99:
+                patterns.append(("Triple Top Descending (ba dinh thap dan)", "bear", 47))
+
+    if len(lows) >= 3:
+        bot3 = lows[-3:]    # 3 đáy cục bộ gần nhất
+        b_vals = [l[i] for i in bot3]
+
+        # Neckline = mức cao nhất giữa 3 đáy
+        between_highs = [h[j] for j in range(bot3[0], bot3[-1] + 1)]
+        neckline_b = max(between_highs) if between_highs else None
+
+        # Ba Đáy Cao Dần: mỗi đáy cao hơn đáy trước ≥1%, giá phá neckline lên — VN 71.93%
+        if b_vals[0] < b_vals[1] * 0.99 and b_vals[1] < b_vals[2] * 0.99:
+            if neckline_b and c[-1] > neckline_b * 1.01:
+                patterns.append(("Triple Bottom Ascending (ba day cao dan)", "bull", 71))
+
+    # ── Rounding: bỏ — quá nhiễu trên daily, chỉ đáng tin trên weekly ─────────
 
     return patterns
 
@@ -902,14 +1221,18 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan")) -> dict
     close     = float(last["close"])
     log_ret   = _safe_float(last.get("log_return"))
 
-    atr_pct      = _safe_float(last.get("atr_pct"))
-    bb_width_pct = _safe_float(last.get("bb_width_pct"))
-    volume_ratio = _safe_float(last.get("volume_ratio"))
+    atr_pct        = _safe_float(last.get("atr_pct"))
+    bb_width_pct   = _safe_float(last.get("bb_width_pct"))
+    volume_ratio   = _safe_float(last.get("volume_ratio"))
+    ma_aligned     = int(last.get("ma_aligned", 0) or 0)
+    price_trend_20d = _safe_float(last.get("price_trend_20d"))
+    if math.isnan(price_trend_20d):
+        price_trend_20d = 0.0
 
-    tech_score = calculate_tech_score(rsi, macd_hist, dist_ema)
+    tech_score = calculate_tech_score(rsi, macd_hist, dist_ema, ma_aligned, volume_ratio)
     signal     = classify_signal(tech_score)
     risk       = classify_risk(tech_score, dist_ema, atr_pct, bb_width_pct, volume_ratio)
-    phase      = classify_phase(rsi, dist_ema)
+    phase      = classify_phase(rsi, dist_ema, price_trend_20d, ma_aligned)
 
     # Xu hướng 3–5 phiên: MACD histogram tăng liên tiếp (Granville momentum)
     _mh = df.dropna(subset=["macd_hist"])["macd_hist"]
@@ -927,9 +1250,16 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan")) -> dict
     chart_patterns              = detect_chart_patterns(df)
     reversal                    = detect_reversals(df)
 
-    # Format để lưu cache: "Tên [hướng, X%]"
+    # Format để lưu cache: icon + tên ngắn (bỏ phần ASCII trong ngoặc) + tỷ lệ
+    _DIR_ICON = {"bull": "🟢", "bear": "🔴", "neutral": "🟡"}
     def _fmt_patterns(plist):
-        return " | ".join(f"{n} [{d},{r}%]" for n, d, r in plist) if plist else ""
+        if not plist:
+            return ""
+        parts = []
+        for name, d, r in plist:
+            short = name.split("(")[0].strip()   # bỏ phần (ascii transliteration)
+            parts.append(f"{_DIR_ICON.get(d, '')} {short} {r}%")
+        return " | ".join(parts)
 
     reason = build_reason(
         rsi=rsi, macd_hist=macd_hist, dist_ema_pct=dist_ema,
