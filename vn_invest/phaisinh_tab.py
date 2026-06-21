@@ -28,7 +28,7 @@ _POTENTIAL_PATHS = [
 _BASE_DATA_DIR = next((p for p in _POTENTIAL_PATHS if os.path.exists(p)), None)
 
 if _BASE_DATA_DIR:
-    _DATA_FILE_1M = os.path.join(_BASE_DATA_DIR, "data_feed.csv")
+    _DATA_FILE_1M = os.path.join(_BASE_DATA_DIR, "vn30f1m_1min.csv")
     _MODEL_PATH   = os.path.join(_BASE_DATA_DIR, "lstm_brain.keras")
     _SCALER_PATH  = os.path.join(_BASE_DATA_DIR, "lstm_scaler.pkl")
     _JOURNAL_FILE = os.path.join(_BASE_DATA_DIR, "vn30_ai_journal.csv")
@@ -283,6 +283,143 @@ def _calc_session_stats(log: list[dict]) -> dict:
         "total_pnl": total_pnl,
         "win_rate":  (wins / n * 100) if n else 0.0,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LSTM Training
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _run_lstm_training(data_file, model_file, scaler_file,
+                       future_bars=5, profit_target=1.0, epochs=30):
+    """Train LSTM trực tiếp trong UI, hiển thị progress và kết quả."""
+    SEQ_LEN    = 30
+    BATCH_SIZE = 64
+    TEST_RATIO = 0.15
+    FEATURES   = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
+
+    log = st.empty()
+
+    def _log(msg):
+        log.info(msg)
+
+    try:
+        import pandas_ta as ta
+        import joblib
+        from sklearn.preprocessing import MinMaxScaler
+        from sklearn.metrics import classification_report
+        import tensorflow as tf
+        from tensorflow.keras.models import Sequential
+        from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+    except ImportError as e:
+        st.error(f"❌ Thiếu thư viện: {e}. Chạy: `pip install pandas_ta tensorflow scikit-learn joblib`")
+        return
+
+    with st.status("🧠 Đang train model LSTM...", expanded=True) as status:
+
+        # 1. Load data
+        st.write("📂 Đọc dữ liệu...")
+        df = pd.read_csv(data_file)
+        df.index = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
+        for c in ["Open", "High", "Low", "Close", "Volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df.dropna(subset=["Close"], inplace=True)
+        df.sort_index(inplace=True)
+        st.write(f"   ✅ {len(df):,} nến | {df.index[0].date()} → {df.index[-1].date()}")
+
+        # 2. Features
+        st.write("⚙️ Tính features (RSI, MACD, EMA34)...")
+        df["RSI"]        = ta.rsi(df["Close"], 14)
+        macd             = ta.macd(df["Close"])
+        df["MACD"]       = macd.iloc[:, 0] if macd is not None else np.nan
+        df["EMA_34"]     = ta.ema(df["Close"], 34)
+        df["Dist_EMA"]   = (df["Close"] - df["EMA_34"]) / df["Close"]
+        df["Log_Ret"]    = np.log(df["Close"] / df["Close"].shift(1))
+        df["Vol_Change"] = df["Volume"].pct_change()
+
+        # 3. Label
+        st.write(f"🏷️ Tạo nhãn (tăng ≥ {profit_target} điểm sau {future_bars} nến)...")
+        df["future_close"] = df["Close"].shift(-future_bars)
+        df["label"]        = (df["future_close"] - df["Close"] >= profit_target).astype(int)
+        df.dropna(subset=["RSI", "MACD", "EMA_34", "future_close"], inplace=True)
+        df[["Log_Ret", "Vol_Change"]] = df[["Log_Ret", "Vol_Change"]].fillna(0)
+        long_pct = df["label"].mean() * 100
+        st.write(f"   ✅ {len(df):,} nến sau clean | LONG: {long_pct:.1f}% | SHORT: {100-long_pct:.1f}%")
+
+        # 4. Sequences
+        st.write("🔢 Tạo sequences...")
+        X_data = df[FEATURES].values
+        y_data = df["label"].values
+        X_seqs, y_seqs = [], []
+        for i in range(SEQ_LEN, len(X_data)):
+            X_seqs.append(X_data[i - SEQ_LEN:i])
+            y_seqs.append(y_data[i])
+        X_seqs = np.array(X_seqs)
+        y_seqs = np.array(y_seqs)
+
+        # 5. Scale
+        st.write("📐 Scale + train/test split...")
+        split = int(len(X_seqs) * (1 - TEST_RATIO))
+        X_train, X_test = X_seqs[:split], X_seqs[split:]
+        y_train, y_test = y_seqs[:split], y_seqs[split:]
+        scaler = MinMaxScaler()
+        X_train = scaler.fit_transform(X_train.reshape(-1, len(FEATURES))).reshape(-1, SEQ_LEN, len(FEATURES))
+        X_test  = scaler.transform(X_test.reshape(-1, len(FEATURES))).reshape(-1, SEQ_LEN, len(FEATURES))
+        joblib.dump(scaler, scaler_file)
+        st.write(f"   ✅ Train: {len(X_train):,} | Test: {len(X_test):,}")
+
+        # 6. Build model
+        st.write("🏗️ Build model LSTM...")
+        model = Sequential([
+            LSTM(64, input_shape=(SEQ_LEN, len(FEATURES)), return_sequences=True),
+            Dropout(0.2),
+            BatchNormalization(),
+            LSTM(32, return_sequences=False),
+            Dropout(0.2),
+            Dense(16, activation="relu"),
+            Dense(1, activation="sigmoid"),
+        ])
+        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+
+        # 7. Train
+        st.write(f"🚀 Train ({epochs} epochs max)...")
+        progress_bar = st.progress(0)
+
+        class _StreamlitCallback(tf.keras.callbacks.Callback):
+            def on_epoch_end(self, epoch, logs=None):
+                pct = int((epoch + 1) / epochs * 100)
+                progress_bar.progress(pct, text=f"Epoch {epoch+1}/{epochs} | loss={logs.get('loss',0):.4f} | val_acc={logs.get('val_accuracy',0):.3f}")
+
+        history = model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=BATCH_SIZE,
+            validation_data=(X_test, y_test),
+            callbacks=[
+                EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss"),
+                ReduceLROnPlateau(patience=3, factor=0.5, monitor="val_loss"),
+                _StreamlitCallback(),
+            ],
+            verbose=0,
+        )
+
+        # 8. Evaluate
+        st.write("📊 Đánh giá...")
+        _, acc = model.evaluate(X_test, y_test, verbose=0)
+        y_pred = (model.predict(X_test, verbose=0).flatten() >= 0.60).astype(int)
+        report = classification_report(y_test, y_pred, target_names=["SHORT/WAIT", "LONG"], output_dict=True)
+
+        model.save(model_file)
+        status.update(label=f"✅ Train xong! Accuracy: {acc*100:.1f}%", state="complete")
+
+    # Hiển thị kết quả
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Test Accuracy", f"{acc*100:.1f}%")
+    r2.metric("LONG Precision", f"{report['LONG']['precision']*100:.1f}%")
+    r3.metric("LONG Recall",    f"{report['LONG']['recall']*100:.1f}%")
+    r4.metric("LONG F1",        f"{report['LONG']['f1-score']*100:.1f}%")
+    st.success(f"✅ Model lưu: `{model_file}` | Scaler: `{scaler_file}`\nRestart app để load model mới.")
+    st.cache_resource.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -639,6 +776,35 @@ def render_phaisinh_tab():
                 st.dataframe(df_j.tail(50).iloc[::-1], use_container_width=True, hide_index=True)
             except Exception:
                 st.warning("Không đọc được file journal.")
+
+    # ── Train LSTM ───────────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🧠 Train / Retrain Model LSTM", expanded=False):
+        st.caption("Train model trên dữ liệu VN30F1M 1 phút. Chạy offline — không ảnh hưởng bot đang chạy.")
+        t_c1, t_c2, t_c3 = st.columns(3)
+        future_bars   = t_c1.number_input("Nhìn trước (nến)", 3, 30, 5, key="ps_train_future")
+        profit_target = t_c2.number_input("Target lợi nhuận (điểm)", 0.5, 5.0, 1.0, 0.5, key="ps_train_target")
+        epochs        = t_c3.number_input("Epochs tối đa", 10, 100, 30, 5, key="ps_train_epochs")
+
+        data_ok = _DATA_FILE_1M and os.path.exists(_DATA_FILE_1M)
+        if not data_ok:
+            st.warning(f"⚠️ Chưa có file `vn30f1m_1min.csv`. Cần export từ Amibroker trước.")
+        else:
+            try:
+                n_rows = sum(1 for _ in open(_DATA_FILE_1M)) - 1
+                st.info(f"📊 File hiện có: **{n_rows:,} nến** | Model: {'✅ Có' if _MODEL_PATH and os.path.exists(_MODEL_PATH) else '❌ Chưa train'}")
+            except Exception:
+                pass
+
+        if st.button("🚀 Bắt Đầu Train", disabled=not data_ok, key="ps_train_btn"):
+            _run_lstm_training(
+                data_file=_DATA_FILE_1M,
+                model_file=_MODEL_PATH,
+                scaler_file=_SCALER_PATH,
+                future_bars=int(future_bars),
+                profit_target=float(profit_target),
+                epochs=int(epochs),
+            )
 
     # ── Auto-refresh (cuối cùng) ──────────────────────────────────────────────
     if auto_refresh:

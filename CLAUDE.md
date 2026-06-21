@@ -595,6 +595,39 @@ except (RetryError, ValueError) as e:
 
 ## Tab Phái Sinh (phaisinh_tab.py)
 
+### File data — TÁCH BIỆT (cập nhật 21/06/2026)
+| File | Dùng cho | Ghi bởi |
+|------|----------|---------|
+| `C:\AmibrokerData\data_feed.csv` | **Chứng khoán cơ sở** (daily) | AFL cũ — KHÔNG đổi |
+| `C:\AmibrokerData\vn30f1m_1min.csv` | **Bot phái sinh** (1 phút VN30F1M) | AFL Section 16 |
+| `C:\AmibrokerData\lstm_brain.keras` | Model LSTM phái sinh | UI train trong tab Phái Sinh |
+| `C:\AmibrokerData\lstm_scaler.pkl` | Scaler cho model trên | Cùng với model |
+
+⚠️ **KHÔNG bao giờ** ghi đè `data_feed.csv` bằng dữ liệu 1 phút — hai file phải tách biệt.
+
+### AFL Section 16 — Export VN30F1M 1 phút
+Thêm vào cuối Wyckoff VSA AFL (sau Section 15):
+```afl
+_SECTION_BEGIN("Data Feed Export");
+DF_Path = "C:\\AmibrokerData\\vn30f1m_1min.csv";
+if( Status("action") == actionExplore AND Name() == "VN30F1M" )
+{
+    // Ghi header khi stocknum==0, append từng dòng
+    // Format: DD/MM/YYYY,HH:MM,O,H,L,C,V (500 nến gần nhất)
+}
+_SECTION_END();
+```
+- Chạy trên chart **VN30F1M, timeframe 1 phút** trong Amibroker Explorer
+- Dữ liệu lịch sử: 56,382 nến (11/07/2025 → 19/06/2026), lưu tại `E:\AmiBroker\ITD\V\VN30F1M`
+
+### LSTM Train tích hợp trong UI
+- Expander "🧠 Train / Retrain Model LSTM" ở cuối tab Phái Sinh
+- Hàm `_run_lstm_training()` trong `phaisinh_tab.py`
+- Hiển thị progress bar từng epoch qua `_StreamlitCallback`
+- Sau train: `st.cache_resource.clear()` để bot load model mới ngay
+- **Tham số mặc định**: SEQ_LEN=30, future_bars=5, profit_target=1.0đ, epochs=30
+- **Features**: RSI, MACD, Dist_EMA, Log_Ret, Vol_Change (5 features — khớp với inference)
+
 ### Tổng quan
 Bot tín hiệu VN30F1M: đọc data từ Amibroker → tính LSTM + Multi-TF trend → quản lý lệnh Trailing Stop.
 
