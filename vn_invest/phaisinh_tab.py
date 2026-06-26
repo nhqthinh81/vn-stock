@@ -1,15 +1,19 @@
-"""Tab Phái Sinh — VN30F1M Signal Bot (Multi-TF + Trailing Stop).
+"""Tab Phái Sinh — VN30F1M Signal Bot v3 (Rule-based + LSTM Ensemble).
 
-Fixes vs v1:
-- Trend cached by mtime: không recompute 5000-row resample mỗi giây
-- prob lưu session_state: hiển thị đúng khi đang giữ lệnh
-- Lỗi trading logic log ra UI thay vì nuốt im lặng
-- LSTM features: drop warmup rows thay vì fillna(0)
-- Cảnh báo scaler out-of-range khi giá ngoài training range
-- Kiểm tra giờ giao dịch VN30F1M, cảnh báo cuối phiên
-- Option "Chỉ trade khi đa khung đồng pha"
-- Thống kê session: PnL tổng, win rate, số lệnh
-- Trailing stop / SL nhập từ UI
+v3 vs v2:
+- Rule-based engine: không phụ thuộc LSTM (LSTM accuracy 44% quá kém).
+  LONG: RSI<35 + MACD histogram đảo chiều dương + Close > VWAP
+  SHORT: RSI>65 + MACD histogram đảo chiều âm + Close < VWAP + trend==-1
+- Chế độ hoạt động: Rule-only / LSTM-only / Ensemble (cả 2 đồng thuận)
+- Take-Profit target: tự chốt lời khi đạt TP (ngoài trailing stop)
+- Risk/Reward display: TP/SL ratio hiện thị khi vào lệnh
+
+v2 vs v1:
+- Label 3 class (0=SHORT / 1=WAIT / 2=LONG): loại bỏ lỗi "label=0 = SHORT"
+- Trend filter: SHORT chỉ khi trend==-1
+- Daily trend: tail(20000) + loại nến ngày chưa hoàn thành
+- Features: 8 features (thêm VWAP_Dist, Session_Gap, ATR_Norm)
+- Training: class_weight balanced, sparse_categorical_crossentropy
 """
 import os
 import threading
@@ -36,51 +40,52 @@ if _BASE_DATA_DIR:
 else:
     _DATA_FILE_1M = _MODEL_PATH = _SCALER_PATH = _JOURNAL_FILE = _CRED_FILE = None
 
-# ── Hằng số chiến thuật (default — có thể ghi đè qua UI) ────────────────────
-_SEQ_LEN             = 30
-_DEFAULT_THRESHOLD_BUY   = 0.60
-_DEFAULT_THRESHOLD_SELL  = 0.40
+# ── Hằng số ──────────────────────────────────────────────────────────────────
+_SEQ_LEN                 = 30
+_DEFAULT_THRESHOLD_BUY   = 0.55   # prob_long >= 55% → LONG
+_DEFAULT_THRESHOLD_SELL  = 0.55   # prob_short >= 55% → SHORT
 _DEFAULT_TRAILING_PTS    = 3.0
 _DEFAULT_INITIAL_SL_PTS  = 3.0
-_GSHEET_NAME         = "VN30_Trading_Journal"
+_DEFAULT_TP_PTS          = 5.0   # Take-profit mặc định (0 = tắt)
+_GSHEET_NAME             = "VN30_Trading_Journal"
+
+# Features v2 (8 features) — KHÔNG thay đổi thứ tự (scaler phụ thuộc)
+_FEATURES = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change",
+             "VWAP_Dist", "Session_Gap", "ATR_Norm"]
 
 # ── Giờ giao dịch VN30F1M ────────────────────────────────────────────────────
-_SESSION1_START = dtime(9, 0)
-_SESSION1_END   = dtime(11, 30)
-_SESSION2_START = dtime(13, 0)
-_SESSION2_END   = dtime(14, 45)
-_WARN_BEFORE_CLOSE_MIN = 5   # cảnh báo trước khi đóng phiên N phút
+_SESSION1_START        = dtime(9, 0)
+_SESSION1_END          = dtime(11, 30)
+_SESSION2_START        = dtime(13, 0)
+_SESSION2_END          = dtime(14, 45)
+_WARN_BEFORE_CLOSE_MIN = 5
 
 
 def _in_trading_session(now: dtime | None = None) -> tuple[bool, str]:
-    """Trả (đang_trong_phiên, thông_điệp_trạng_thái)."""
     if now is None:
         now = datetime.now().time()
     if _SESSION1_START <= now <= _SESSION1_END:
-        # Kiểm tra sắp hết phiên 1
-        from datetime import timedelta
         dt_now  = datetime.combine(datetime.today(), now)
         dt_end1 = datetime.combine(datetime.today(), _SESSION1_END)
         mins_left = (dt_end1 - dt_now).seconds // 60
         if mins_left <= _WARN_BEFORE_CLOSE_MIN:
-            return True, f"⚠️ Phiên 1 đóng cửa sau {mins_left} phút (11:30)"
-        return True, f"🟢 Phiên 1 ({_SESSION1_START.strftime('%H:%M')}–{_SESSION1_END.strftime('%H:%M')})"
+            return True, f"⚠️ Phiên 1 đóng sau {mins_left} phút"
+        return True, f"🟢 Phiên 1 (09:00–11:30)"
     if _SESSION2_START <= now <= _SESSION2_END:
-        from datetime import timedelta
         dt_now  = datetime.combine(datetime.today(), now)
         dt_end2 = datetime.combine(datetime.today(), _SESSION2_END)
         mins_left = (dt_end2 - dt_now).seconds // 60
         if mins_left <= _WARN_BEFORE_CLOSE_MIN:
-            return True, f"⚠️ Phiên 2 đóng cửa sau {mins_left} phút (14:45)"
-        return True, f"🟢 Phiên 2 ({_SESSION2_START.strftime('%H:%M')}–{_SESSION2_END.strftime('%H:%M')})"
+            return True, f"⚠️ Phiên 2 đóng sau {mins_left} phút"
+        return True, f"🟢 Phiên 2 (13:00–14:45)"
     if now < _SESSION1_START:
-        return False, f"⏳ Chờ mở phiên 1 (09:00)"
+        return False, "⏳ Chờ mở phiên 1 (09:00)"
     if _SESSION1_END < now < _SESSION2_START:
         return False, "⏸ Nghỉ trưa (11:30–13:00)"
     return False, "🔴 Ngoài giờ giao dịch (>14:45)"
 
 
-# ── Load AI model (cached toàn app) ──────────────────────────────────────────
+# ── Load AI model ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def _load_ai_system():
     if not (_SCALER_PATH and _MODEL_PATH and
@@ -93,7 +98,7 @@ def _load_ai_system():
         model  = load_model(_MODEL_PATH)
         return scaler, model
     except Exception as e:
-        return None, str(e)   # trả lỗi để UI hiển thị
+        return None, str(e)
 
 
 # ── Feature helpers ───────────────────────────────────────────────────────────
@@ -115,82 +120,350 @@ def _load_df_1m(path: str):
                 df[c] = df[c].apply(_clean_num)
         if "Date" in df.columns and "Time" in df.columns:
             df.index = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
-        return df.dropna(subset=["Close"]).copy()
-    except Exception as e:
+        df = df.dropna(subset=["Close"]).copy()
+        df.sort_index(inplace=True)
+        return df
+    except Exception:
         return None
 
 
+def _calc_vwap(df: pd.DataFrame) -> pd.Series:
+    """VWAP theo từng ngày giao dịch (reset về 0 mỗi ngày)."""
+    d = df.copy()
+    d["_date"]    = d.index.date
+    d["_typical"] = (d["High"] + d["Low"] + d["Close"]) / 3
+    d["_tpv"]     = d["_typical"] * d["Volume"].clip(lower=0)
+    cum_tpv = d.groupby("_date")["_tpv"].cumsum()
+    cum_vol = d.groupby("_date")["Volume"].cumsum().clip(lower=1)
+    return cum_tpv / cum_vol
+
+
 def _calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Tính features, drop warmup rows thay vì fillna(0)."""
-    import pandas_ta as ta  # type: ignore
+    """Tính 8 features v2. Drop warmup rows — KHÔNG fillna(0) trừ hàng đầu."""
+    try:
+        import pandas_ta as ta  # type: ignore
+    except ImportError:
+        raise ImportError("pip install pandas_ta")
+
     df = df.copy()
-    df["RSI"]        = ta.rsi(df["Close"], 14)
-    macd             = ta.macd(df["Close"])
-    df["MACD"]       = macd.iloc[:, 0] if macd is not None else np.nan
-    df["EMA_34"]     = ta.ema(df["Close"], 34)
-    df["Dist_EMA"]   = (df["Close"] - df["EMA_34"]) / df["Close"]
-    df["Log_Ret"]    = np.log(df["Close"] / df["Close"].shift(1))
-    df["Vol_Change"] = df["Volume"].pct_change()
-    # Drop warmup NaN thay vì fill 0 — MACD cần ~26 rows, EMA34 cần 34 rows
+
+    # --- Core indicators ---
+    df["RSI"]      = ta.rsi(df["Close"], 14)
+    _macd          = ta.macd(df["Close"])
+    df["MACD"]     = _macd.iloc[:, 0] if _macd is not None else np.nan
+    df["EMA_34"]   = ta.ema(df["Close"], 34)
+    df["Dist_EMA"] = (df["Close"] - df["EMA_34"]) / df["Close"].clip(lower=1)
+    df["Log_Ret"]  = np.log(df["Close"] / df["Close"].shift(1))
+    df["Vol_Change"] = df["Volume"].pct_change().clip(-5, 5)
+
+    # --- ATR normalized ---
+    _atr = ta.atr(df["High"], df["Low"], df["Close"], 14)
+    df["ATR_Norm"] = (_atr / df["Close"].clip(lower=1)).fillna(0)
+
+    # --- VWAP distance (per-session, reset daily) ---
+    vwap = _calc_vwap(df)
+    df["VWAP_Dist"] = (df["Close"] - vwap) / df["Close"].clip(lower=1)
+
+    # --- Session gap: % thay đổi từ giá mở cửa phiên hôm nay ---
+    df["_date"]        = df.index.date
+    df["Session_Open"] = df.groupby("_date")["Open"].transform("first")
+    df["Session_Gap"]  = (df["Close"] - df["Session_Open"]) / df["Session_Open"].clip(lower=1)
+
+    # Drop warmup NaN (RSI cần 14 bars, MACD cần 26, EMA34 cần 34)
     df.dropna(subset=["RSI", "MACD", "EMA_34"], inplace=True)
-    # Log_Ret / Vol_Change row đầu vẫn NaN → fill 0 (hàng đầu sau warmup, an toàn)
-    df[["Log_Ret", "Vol_Change"]] = df[["Log_Ret", "Vol_Change"]].fillna(0)
+    # Hàng đầu tiên sau warmup có thể còn NaN ở Log_Ret/Vol_Change
+    df[["Log_Ret", "Vol_Change", "VWAP_Dist", "Session_Gap", "ATR_Norm"]] = (
+        df[["Log_Ret", "Vol_Change", "VWAP_Dist", "Session_Gap", "ATR_Norm"]].fillna(0)
+    )
     return df
 
 
-def _get_ai_prediction(df_1m: pd.DataFrame, scaler, model) -> tuple[float, str | None]:
-    """Trả (prob, warning_msg). warning_msg != None nếu scaler out-of-range."""
-    if scaler is None or model is None or len(df_1m) < _SEQ_LEN + 60:
-        return 0.5, None
-    try:
-        df_f  = _calculate_features(df_1m.tail(200))
-        if len(df_f) < _SEQ_LEN:
-            return 0.5, "Không đủ hàng sau drop warmup"
-        cols  = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
-        seq   = df_f[cols].tail(_SEQ_LEN).values
+def _get_ai_prediction(df_1m: pd.DataFrame, scaler, model) -> tuple[float, float, str | None]:
+    """Trả (prob_long, prob_short, warning).
 
-        # Kiểm tra out-of-range so với data scaler đã fit
+    Model v2 (3-class): output [p_short, p_wait, p_long]
+    Model v1 (binary):  output [p_long] — SHORT bị block hoàn toàn.
+    """
+    if scaler is None or model is None or len(df_1m) < _SEQ_LEN + 60:
+        return 0.5, 0.0, None
+    try:
+        df_f = _calculate_features(df_1m.tail(300))
+        if len(df_f) < _SEQ_LEN:
+            return 0.5, 0.0, "Không đủ hàng sau drop warmup"
+
+        # Dùng features có trong df_f (hỗ trợ cả model v1 với 5 features)
+        is_v2 = hasattr(scaler, "n_features_in_") and scaler.n_features_in_ == len(_FEATURES)
+        feat_cols = _FEATURES if is_v2 else ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
+        available = [c for c in feat_cols if c in df_f.columns]
+        if len(available) < len(feat_cols):
+            return 0.5, 0.0, f"Thiếu features: {set(feat_cols) - set(available)}"
+
+        seq = df_f[available].tail(_SEQ_LEN).values
+
+        # Kiểm tra out-of-range
         warn = None
         if hasattr(scaler, "data_min_") and hasattr(scaler, "data_max_"):
             lo, hi = scaler.data_min_, scaler.data_max_
-            if np.any(seq < lo * 0.8) or np.any(seq > hi * 1.2):
-                warn = "⚠️ Giá trị feature vượt ngoài range lúc train — dự báo có thể sai"
+            if seq.shape[1] == len(lo) and (np.any(seq < lo * 0.7) or np.any(seq > hi * 1.3)):
+                warn = "⚠️ Feature nằm ngoài range lúc train — model có thể không chính xác"
 
-        scaled = scaler.transform(seq).reshape(1, _SEQ_LEN, len(cols))
-        prob   = float(model.predict(scaled, verbose=0)[0][0])
-        return prob, warn
+        scaled = scaler.transform(seq).reshape(1, _SEQ_LEN, len(available))
+        pred   = model.predict(scaled, verbose=0)[0]
+
+        n_out = model.output_shape[-1]
+        if n_out == 3:
+            # v2: [p_short, p_wait, p_long]
+            prob_short = float(pred[0])
+            prob_long  = float(pred[2])
+        else:
+            # v1 binary: p_long only. KHÔNG sinh SHORT từ model cũ (bug label).
+            prob_long  = float(pred[0])
+            prob_short = 0.0
+            if warn is None:
+                warn = "ℹ️ Model v1 (binary) — SHORT bị tắt. Retrain để dùng model v2."
+
+        return prob_long, prob_short, warn
+
     except Exception as e:
-        return 0.5, f"Lỗi AI: {e}"
+        return 0.5, 0.0, f"Lỗi AI: {e}"
+
+
+def _get_rule_signal(df_1m: pd.DataFrame, trend: int) -> tuple[str, str]:
+    """Rule-based signal engine v3 — đa tín hiệu, ngưỡng 2.5/5.0.
+
+    Bảng điểm (LONG / SHORT đối xứng):
+      RSI < 40 / > 60        → +2.0  (oversold/overbought rõ)
+      RSI < 48 / > 52        → +1.0  (lệch khỏi trung tính)
+      MACD zero-cross ↑/↓    → +1.5  (histogram vừa đổi dấu — mạnh nhất)
+      MACD histogram cải thiện→ +1.0  (histogram đang tăng/giảm)
+      EMA5 cross EMA10 ↑/↓   → +1.0  (xác nhận momentum ngắn hạn)
+      Giá trên/dưới VWAP     → +0.5
+      Trend thuận chiều       → +0.5
+    Ngưỡng vào lệnh: ≥ 2.5
+    """
+    try:
+        import pandas_ta as ta  # type: ignore
+    except ImportError:
+        return "WAIT", "Thiếu pandas_ta"
+
+    if df_1m is None or len(df_1m) < 60:
+        return "WAIT", "Chưa đủ dữ liệu"
+
+    try:
+        recent = df_1m.tail(200).copy()
+        recent["RSI"]       = ta.rsi(recent["Close"], 14)
+        _macd               = ta.macd(recent["Close"])
+        recent["MACD_hist"] = _macd.iloc[:, 2] if _macd is not None and _macd.shape[1] >= 3 else np.nan
+        recent["EMA5"]      = ta.ema(recent["Close"], 5)
+        recent["EMA10"]     = ta.ema(recent["Close"], 10)
+        recent["VWAP"]      = _calc_vwap(recent)
+        recent.dropna(subset=["RSI", "MACD_hist", "EMA5", "EMA10"], inplace=True)
+
+        if len(recent) < 3:
+            return "WAIT", "Chưa đủ sau warmup"
+
+        last  = recent.iloc[-1]
+        prev  = recent.iloc[-2]
+        rsi   = float(last["RSI"])
+        close = float(last["Close"])
+        mh    = float(last["MACD_hist"])
+        mh_p  = float(prev["MACD_hist"])
+        e5    = float(last["EMA5"])
+        e10   = float(last["EMA10"])
+        e5_p  = float(prev["EMA5"])
+        e10_p = float(prev["EMA10"])
+        vwap  = float(last["VWAP"]) if not np.isnan(last.get("VWAP", np.nan)) else None
+
+        # ── LONG score ────────────────────────────────────────────────────────
+        ls, lp = 0.0, []
+
+        if rsi < 40:   ls += 2.0; lp.append(f"RSI={rsi:.1f}<40(+2)")
+        elif rsi < 48: ls += 1.0; lp.append(f"RSI={rsi:.1f}<48(+1)")
+
+        if mh > 0 and mh_p <= 0:   ls += 1.5; lp.append(f"MACD zero-cross↑(+1.5)")
+        elif mh > mh_p:             ls += 1.0; lp.append(f"MACD↑{mh:.2f}(+1)")
+
+        if e5 > e10 and e5_p <= e10_p: ls += 1.0; lp.append("EMA5×EMA10↑(+1)")
+
+        if vwap and close > vwap:   ls += 0.5; lp.append("↑VWAP(+0.5)")
+        if trend >= 0:              ls += 0.5; lp.append(f"trend={'↑' if trend==1 else '→'}(+0.5)")
+
+        # ── SHORT score ───────────────────────────────────────────────────────
+        ss, sp = 0.0, []
+
+        if rsi > 60:   ss += 2.0; sp.append(f"RSI={rsi:.1f}>60(+2)")
+        elif rsi > 52: ss += 1.0; sp.append(f"RSI={rsi:.1f}>52(+1)")
+
+        if mh < 0 and mh_p >= 0:   ss += 1.5; sp.append(f"MACD zero-cross↓(+1.5)")
+        elif mh < mh_p:             ss += 1.0; sp.append(f"MACD↓{mh:.2f}(+1)")
+
+        if e5 < e10 and e5_p >= e10_p: ss += 1.0; sp.append("EMA5×EMA10↓(+1)")
+
+        if vwap and close < vwap:   ss += 0.5; sp.append("↓VWAP(+0.5)")
+        if trend <= 0:              ss += 0.5; sp.append(f"trend={'↓' if trend==-1 else '→'}(+0.5)")
+
+        # ── Quyết định (ngưỡng 2.5) ──────────────────────────────────────────
+        _THRESHOLD = 2.5
+        if ls >= _THRESHOLD and ls > ss:
+            return "LONG",  f"Score={ls:.1f} | " + " | ".join(lp)
+        if ss >= _THRESHOLD and ss > ls:
+            return "SHORT", f"Score={ss:.1f} | " + " | ".join(sp)
+        if ls >= _THRESHOLD:
+            return "LONG",  f"Score={ls:.1f} | " + " | ".join(lp)
+        if ss >= _THRESHOLD:
+            return "SHORT", f"Score={ss:.1f} | " + " | ".join(sp)
+
+        best = "LONG" if ls >= ss else "SHORT"
+        best_s = ls if best == "LONG" else ss
+        return "WAIT", (
+            f"Chờ: {best} {best_s:.1f}/{_THRESHOLD} | "
+            f"RSI={rsi:.1f} MACD={'↑' if mh>mh_p else '↓'}{mh:.2f} "
+            f"EMA={'↑' if e5>e10 else '↓'} trend={'↑' if trend==1 else '↓' if trend==-1 else '→'}"
+        )
+
+    except Exception as e:
+        return "WAIT", f"Lỗi rule engine: {e}"
 
 
 def _get_trend_from_1m(df_1m: pd.DataFrame) -> tuple[int, str]:
-    """Multi-TF trend (Daily / 1H / 15m). Nặng — chỉ gọi khi mtime thay đổi."""
-    import pandas_ta as ta  # type: ignore
-    if df_1m is None or len(df_1m) < 80:
+    """Multi-TF trend (Daily / 1H / 15m).
+
+    Fix v2:
+    - tail(20000) thay vì 5000 → đủ ~53 ngày cho EMA20 daily
+    - Loại nến ngày chưa hoàn thành khỏi daily resample
+    - EMA20 daily cần ≥ 25 bars (25 ngày)
+    """
+    try:
+        import pandas_ta as ta  # type: ignore
+    except ImportError:
+        return 0, "Thiếu pandas_ta"
+
+    if df_1m is None or len(df_1m) < 200:
         return 0, "Không đủ dữ liệu"
+
     agg    = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-    recent = df_1m.tail(5000).copy()
-    df_15  = recent.resample("15T").agg(agg).dropna()
-    df_1h  = recent.resample("60T").agg(agg).dropna()
-    df_d   = recent.resample("1D").agg(agg).dropna()
-    if len(df_15) < 10 or len(df_1h) < 10 or len(df_d) < 10:
-        return 0, "Đang gom dữ liệu đa khung..."
+    recent = df_1m.tail(20000).copy()   # ~53 ngày giao dịch
+
+    df_15 = recent.resample("15min").agg(agg).dropna()
+    df_1h = recent.resample("60min").agg(agg).dropna()
+    df_d  = recent.resample("1D").agg(agg).dropna()
+
+    # FIX: loại nến ngày chưa hoàn thành (hôm nay đang trong phiên)
+    today = pd.Timestamp.now().normalize()
+    df_d  = df_d[df_d.index < today]
+
+    if len(df_15) < 20 or len(df_1h) < 10 or len(df_d) < 25:
+        missing = []
+        if len(df_d) < 25: missing.append(f"daily={len(df_d)}<25")
+        if len(df_1h) < 10: missing.append(f"1h={len(df_1h)}<10")
+        if len(df_15) < 20: missing.append(f"15m={len(df_15)}<20")
+        return 0, f"Đang gom dữ liệu đa khung ({', '.join(missing)})"
+
     df_d["EMA20"]  = ta.ema(df_d["Close"], 20)
     df_1h["EMA20"] = ta.ema(df_1h["Close"], 20)
     df_15["EMA10"] = ta.ema(df_15["Close"], 10)
+
     df_d.dropna(subset=["EMA20"], inplace=True)
     df_1h.dropna(subset=["EMA20"], inplace=True)
     df_15.dropna(subset=["EMA10"], inplace=True)
+
     if not (len(df_d) and len(df_1h) and len(df_15)):
-        return 0, "Đang gom dữ liệu đa khung..."
+        return 0, "EMA chưa đủ nến warmup"
+
+    # So sánh giá đóng cửa gần nhất với MA
     t_d  = 1 if df_d.iloc[-1]["Close"]  > df_d.iloc[-1]["EMA20"]  else -1
     t_1h = 1 if df_1h.iloc[-1]["Close"] > df_1h.iloc[-1]["EMA20"] else -1
     t_15 = 1 if df_15.iloc[-1]["Close"] > df_15.iloc[-1]["EMA10"] else -1
-    if t_d == t_1h == t_15 == 1:  return  1, "UPTREND (D/H/15p đồng pha)"
-    if t_d == t_1h == t_15 == -1: return -1, "DOWNTREND (D/H/15p đồng pha)"
-    if t_d == t_1h == 1:          return  1, "UPTREND (D/H đồng pha, 15p nhiễu)"
-    if t_d == t_1h == -1:         return -1, "DOWNTREND (D/H đồng pha, 15p nhiễu)"
-    return 0, "Xu hướng đa khung xung đột"
+
+    score = t_d + t_1h + t_15   # -3 .. +3
+
+    if score == 3:   return  1, "UPTREND mạnh (D/H/15p đồng pha tăng)"
+    if score == 2:   return  1, "UPTREND (D+H tăng, 15p nhiễu)"
+    if score == 1:   return  0, "Trung tính thiên tăng (D tăng, H/15p chưa đồng pha)"
+    if score == -1:  return  0, "Trung tính thiên giảm (D giảm, H/15p chưa đồng pha)"
+    if score == -2:  return -1, "DOWNTREND (D+H giảm, 15p nhiễu)"
+    if score == -3:  return -1, "DOWNTREND mạnh (D/H/15p đồng pha giảm)"
+    return 0, "Xu hướng trung tính"
+
+
+def _get_tf_detail(df_1m: pd.DataFrame) -> dict:
+    """Trả trend riêng cho 3 khung: 1m, 15m, 1h.
+
+    Mỗi khung: {"trend": 1/-1/0, "ema": float, "close": float, "label": str}
+    """
+    empty = {"trend": 0, "ema": None, "close": None, "label": "—"}
+    result = {"1m": empty.copy(), "15m": empty.copy(), "1h": empty.copy()}
+
+    try:
+        import pandas_ta as ta  # type: ignore
+    except ImportError:
+        return result
+
+    if df_1m is None or len(df_1m) < 50:
+        return result
+
+    agg    = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    recent = df_1m.tail(20000).copy()
+
+    def _tf_info(df: pd.DataFrame, ema_period: int, label_up: str, label_dn: str) -> dict:
+        ema_col = f"EMA{ema_period}"
+        df = df.copy()
+        df[ema_col] = ta.ema(df["Close"], ema_period)
+        df.dropna(subset=[ema_col], inplace=True)
+        if df.empty:
+            return {"trend": 0, "ema": None, "close": None, "label": "Chưa đủ data"}
+        last = df.iloc[-1]
+        t = 1 if last["Close"] > last[ema_col] else -1
+        lbl = label_up if t == 1 else label_dn
+        return {"trend": t, "ema": float(last[ema_col]), "close": float(last["Close"]), "label": lbl}
+
+    # 1m — EMA10 trên dữ liệu 1 phút gốc
+    result["1m"]  = _tf_info(recent.tail(200),                       10, "↑ Tăng", "↓ Giảm")
+    # 15m — EMA10 trên resample 15 phút
+    df_15 = recent.resample("15min").agg(agg).dropna()
+    result["15m"] = _tf_info(df_15,                                   10, "↑ Tăng", "↓ Giảm")
+    # 1h — EMA20 trên resample 1 giờ
+    df_1h = recent.resample("60min").agg(agg).dropna()
+    result["1h"]  = _tf_info(df_1h,                                   20, "↑ Tăng", "↓ Giảm")
+
+    return result
+
+
+def _get_stop_levels(df_1m: pd.DataFrame) -> dict:
+    """Tính Buy Stop / Sell Stop từ pivot gần nhất (10 nến) + SL đề xuất.
+
+    - Entry: vượt đỉnh/đáy 10 nến gần nhất + buffer nhỏ (0.2×ATR, tối thiểu 0.5đ)
+    - SL Buy Stop  = đáy thấp nhất 10 nến - buffer  (rủi ro ≈ 0.4×ATR)
+    - SL Sell Stop = đỉnh cao nhất 10 nến + buffer
+    Thiết kế cho scalping 1m — vùng chặt, R/R thường 1:1.5+
+    """
+    empty = {"buy_stop_price": None, "buy_stop_sl": None,
+             "sell_stop_price": None, "sell_stop_sl": None, "atr": None}
+    if df_1m is None or len(df_1m) < 20:
+        return empty
+    try:
+        import pandas_ta as ta  # type: ignore
+        recent = df_1m.tail(500).copy()
+        atr_s = ta.atr(recent["High"], recent["Low"], recent["Close"], length=14)
+        if atr_s is None or atr_s.dropna().empty:
+            return empty
+        atr = float(atr_s.dropna().iloc[-1])
+        buf = max(round(atr * 0.2, 1), 0.5)   # buffer vào lệnh: 0.2×ATR, tối thiểu 0.5đ
+        sl_buf = max(round(atr * 0.2, 1), 0.5) # buffer SL: tương tự
+
+        w = recent.tail(10)
+        pivot_high = float(w["High"].max())
+        pivot_low  = float(w["Low"].min())
+
+        return {
+            "buy_stop_price":  round(pivot_high + buf, 1),
+            "buy_stop_sl":     round(pivot_low  - sl_buf, 1),
+            "sell_stop_price": round(pivot_low  - buf, 1),
+            "sell_stop_sl":    round(pivot_high + sl_buf, 1),
+            "atr":             round(atr, 1),
+        }
+    except Exception:
+        return empty
 
 
 # ── Telegram / journal ────────────────────────────────────────────────────────
@@ -256,15 +529,13 @@ def _sync_gsheet_async(entry: dict):
     threading.Thread(target=_run, daemon=True).start()
 
 
-# ── Thống kê session từ log ───────────────────────────────────────────────────
+# ── Thống kê session ──────────────────────────────────────────────────────────
 
 def _calc_session_stats(log: list[dict]) -> dict:
-    """Tính PnL tổng, win rate, số lệnh từ ps_log_history."""
     closed = [x for x in log if x["act"].startswith("ĐÓNG")]
     if not closed:
         return {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "win_rate": 0.0}
-    total_pnl = 0.0
-    wins = losses = 0
+    total_pnl = wins = losses = 0.0
     for x in closed:
         try:
             pnl = float(str(x["pnl"]).replace("—", "0"))
@@ -277,47 +548,42 @@ def _calc_session_stats(log: list[dict]) -> dict:
             pass
     n = wins + losses
     return {
-        "total":     n,
-        "wins":      wins,
-        "losses":    losses,
+        "total":     int(n),
+        "wins":      int(wins),
+        "losses":    int(losses),
         "total_pnl": total_pnl,
         "win_rate":  (wins / n * 100) if n else 0.0,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LSTM Training
+# LSTM Training v2 — 3-class label + class_weight balanced
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _run_lstm_training(data_file, model_file, scaler_file,
                        future_bars=5, profit_target=1.0, epochs=30):
-    """Train LSTM trực tiếp trong UI, hiển thị progress và kết quả."""
+    """Train LSTM 3-class trong UI. Label: 0=SHORT / 1=WAIT / 2=LONG."""
     SEQ_LEN    = 30
     BATCH_SIZE = 64
     TEST_RATIO = 0.15
-    FEATURES   = ["RSI", "MACD", "Dist_EMA", "Log_Ret", "Vol_Change"]
-
-    log = st.empty()
-
-    def _log(msg):
-        log.info(msg)
 
     try:
         import pandas_ta as ta
         import joblib
         from sklearn.preprocessing import MinMaxScaler
         from sklearn.metrics import classification_report
+        from sklearn.utils.class_weight import compute_class_weight
         import tensorflow as tf
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
     except ImportError as e:
-        st.error(f"❌ Thiếu thư viện: {e}. Chạy: `pip install pandas_ta tensorflow scikit-learn joblib`")
+        st.error(f"❌ Thiếu thư viện: {e}")
         return
 
-    with st.status("🧠 Đang train model LSTM...", expanded=True) as status:
+    with st.status("🧠 Đang train model LSTM v2...", expanded=True) as status:
 
-        # 1. Load data
+        # 1. Load & parse
         st.write("📂 Đọc dữ liệu...")
         df = pd.read_csv(data_file)
         df.index = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
@@ -325,76 +591,113 @@ def _run_lstm_training(data_file, model_file, scaler_file,
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df.dropna(subset=["Close"], inplace=True)
         df.sort_index(inplace=True)
-        st.write(f"   ✅ {len(df):,} nến | {df.index[0].date()} → {df.index[-1].date()}")
+        st.write(f"✅ {len(df):,} nến | {df.index[0].date()} → {df.index[-1].date()}")
 
-        # 2. Features
-        st.write("⚙️ Tính features (RSI, MACD, EMA34)...")
+        # 2. Features v2 (8 features)
+        st.write("⚙️ Tính 8 features (RSI, MACD, EMA34, LogRet, Vol, VWAP, Gap, ATR)...")
         df["RSI"]        = ta.rsi(df["Close"], 14)
-        macd             = ta.macd(df["Close"])
-        df["MACD"]       = macd.iloc[:, 0] if macd is not None else np.nan
+        _macd            = ta.macd(df["Close"])
+        df["MACD"]       = _macd.iloc[:, 0] if _macd is not None else np.nan
         df["EMA_34"]     = ta.ema(df["Close"], 34)
-        df["Dist_EMA"]   = (df["Close"] - df["EMA_34"]) / df["Close"]
+        df["Dist_EMA"]   = (df["Close"] - df["EMA_34"]) / df["Close"].clip(lower=1)
         df["Log_Ret"]    = np.log(df["Close"] / df["Close"].shift(1))
-        df["Vol_Change"] = df["Volume"].pct_change()
+        df["Vol_Change"] = df["Volume"].pct_change().clip(-5, 5)
+        _atr             = ta.atr(df["High"], df["Low"], df["Close"], 14)
+        df["ATR_Norm"]   = (_atr / df["Close"].clip(lower=1))
+        vwap             = _calc_vwap(df)
+        df["VWAP_Dist"]  = (df["Close"] - vwap) / df["Close"].clip(lower=1)
+        df["_date"]      = df.index.date
+        df["Session_Open"] = df.groupby("_date")["Open"].transform("first")
+        df["Session_Gap"]  = (df["Close"] - df["Session_Open"]) / df["Session_Open"].clip(lower=1)
 
-        # 3. Label
-        st.write(f"🏷️ Tạo nhãn (tăng ≥ {profit_target} điểm sau {future_bars} nến)...")
+        # 3. Label 3-class (FIX CHÍNH)
+        st.write(f"🏷️ Tạo nhãn 3 class (target={profit_target} điểm, nhìn trước {future_bars} nến)...")
         df["future_close"] = df["Close"].shift(-future_bars)
-        df["label"]        = (df["future_close"] - df["Close"] >= profit_target).astype(int)
         df.dropna(subset=["RSI", "MACD", "EMA_34", "future_close"], inplace=True)
-        df[["Log_Ret", "Vol_Change"]] = df[["Log_Ret", "Vol_Change"]].fillna(0)
-        long_pct = df["label"].mean() * 100
-        st.write(f"   ✅ {len(df):,} nến sau clean | LONG: {long_pct:.1f}% | SHORT: {100-long_pct:.1f}%")
+        df[["Log_Ret", "Vol_Change", "VWAP_Dist", "Session_Gap", "ATR_Norm"]] = (
+            df[["Log_Ret", "Vol_Change", "VWAP_Dist", "Session_Gap", "ATR_Norm"]].fillna(0)
+        )
+
+        diff = df["future_close"] - df["Close"]
+        df["label"] = 1  # WAIT (default)
+        df.loc[diff >=  profit_target, "label"] = 2   # LONG
+        df.loc[diff <= -profit_target, "label"] = 0   # SHORT
+
+        label_counts = df["label"].value_counts().sort_index()
+        st.write(
+            f"✅ {len(df):,} nến sau clean | "
+            f"SHORT={label_counts.get(0,0):,} ({label_counts.get(0,0)/len(df)*100:.1f}%) | "
+            f"WAIT={label_counts.get(1,0):,} ({label_counts.get(1,0)/len(df)*100:.1f}%) | "
+            f"LONG={label_counts.get(2,0):,} ({label_counts.get(2,0)/len(df)*100:.1f}%)"
+        )
 
         # 4. Sequences
         st.write("🔢 Tạo sequences...")
-        X_data = df[FEATURES].values
+        X_data = df[_FEATURES].values
         y_data = df["label"].values
         X_seqs, y_seqs = [], []
         for i in range(SEQ_LEN, len(X_data)):
             X_seqs.append(X_data[i - SEQ_LEN:i])
             y_seqs.append(y_data[i])
-        X_seqs = np.array(X_seqs)
-        y_seqs = np.array(y_seqs)
+        X_seqs = np.array(X_seqs, dtype=np.float32)
+        y_seqs = np.array(y_seqs, dtype=np.int32)
 
-        # 5. Scale
+        # 5. Scale + split
         st.write("📐 Scale + train/test split...")
-        split = int(len(X_seqs) * (1 - TEST_RATIO))
+        split   = int(len(X_seqs) * (1 - TEST_RATIO))
         X_train, X_test = X_seqs[:split], X_seqs[split:]
         y_train, y_test = y_seqs[:split], y_seqs[split:]
-        scaler = MinMaxScaler()
-        X_train = scaler.fit_transform(X_train.reshape(-1, len(FEATURES))).reshape(-1, SEQ_LEN, len(FEATURES))
-        X_test  = scaler.transform(X_test.reshape(-1, len(FEATURES))).reshape(-1, SEQ_LEN, len(FEATURES))
-        joblib.dump(scaler, scaler_file)
-        st.write(f"   ✅ Train: {len(X_train):,} | Test: {len(X_test):,}")
 
-        # 6. Build model
-        st.write("🏗️ Build model LSTM...")
+        scaler = MinMaxScaler()
+        X_flat_train = X_train.reshape(-1, len(_FEATURES))
+        X_flat_test  = X_test.reshape(-1, len(_FEATURES))
+        X_train = scaler.fit_transform(X_flat_train).reshape(-1, SEQ_LEN, len(_FEATURES))
+        X_test  = scaler.transform(X_flat_test).reshape(-1, SEQ_LEN, len(_FEATURES))
+        joblib.dump(scaler, scaler_file)
+        st.write(f"✅ Train: {len(X_train):,} | Test: {len(X_test):,}")
+
+        # 6. Class weights balanced (FIX: chống bias về WAIT)
+        st.write("⚖️ Tính class weights (balanced)...")
+        cw_arr = compute_class_weight("balanced", classes=np.array([0, 1, 2]), y=y_train)
+        class_weight = {0: float(cw_arr[0]), 1: float(cw_arr[1]), 2: float(cw_arr[2])}
+        st.write(f"   SHORT={class_weight[0]:.2f} | WAIT={class_weight[1]:.2f} | LONG={class_weight[2]:.2f}")
+
+        # 7. Build model v2 (softmax 3 outputs)
+        st.write("🏗️ Build model LSTM v2 (3-class softmax)...")
         model = Sequential([
-            LSTM(64, input_shape=(SEQ_LEN, len(FEATURES)), return_sequences=True),
+            LSTM(64, input_shape=(SEQ_LEN, len(_FEATURES)), return_sequences=True),
             Dropout(0.2),
             BatchNormalization(),
             LSTM(32, return_sequences=False),
             Dropout(0.2),
             Dense(16, activation="relu"),
-            Dense(1, activation="sigmoid"),
+            Dense(3, activation="softmax"),   # 3 outputs: SHORT / WAIT / LONG
         ])
-        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+        model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
 
-        # 7. Train
-        st.write(f"🚀 Train ({epochs} epochs max)...")
+        # 8. Train
+        st.write(f"🚀 Train ({epochs} epochs max, early stopping patience=5)...")
         progress_bar = st.progress(0)
 
         class _StreamlitCallback(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
                 pct = int((epoch + 1) / epochs * 100)
-                progress_bar.progress(pct, text=f"Epoch {epoch+1}/{epochs} | loss={logs.get('loss',0):.4f} | val_acc={logs.get('val_accuracy',0):.3f}")
+                progress_bar.progress(
+                    pct,
+                    text=f"Epoch {epoch+1}/{epochs} | loss={logs.get('loss',0):.4f} | "
+                         f"val_acc={logs.get('val_accuracy',0):.3f}"
+                )
 
-        history = model.fit(
+        model.fit(
             X_train, y_train,
             epochs=epochs,
             batch_size=BATCH_SIZE,
             validation_data=(X_test, y_test),
+            class_weight=class_weight,
             callbacks=[
                 EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss"),
                 ReduceLROnPlateau(patience=3, factor=0.5, monitor="val_loss"),
@@ -403,23 +706,37 @@ def _run_lstm_training(data_file, model_file, scaler_file,
             verbose=0,
         )
 
-        # 8. Evaluate
+        # 9. Evaluate
         st.write("📊 Đánh giá...")
         _, acc = model.evaluate(X_test, y_test, verbose=0)
-        y_pred = (model.predict(X_test, verbose=0).flatten() >= 0.60).astype(int)
-        report = classification_report(y_test, y_pred, target_names=["SHORT/WAIT", "LONG"], output_dict=True)
+        y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
+        report = classification_report(y_test, y_pred,
+                                       target_names=["SHORT", "WAIT", "LONG"],
+                                       output_dict=True)
 
         model.save(model_file)
         status.update(label=f"✅ Train xong! Accuracy: {acc*100:.1f}%", state="complete")
 
-    # Hiển thị kết quả
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Test Accuracy", f"{acc*100:.1f}%")
-    r2.metric("LONG Precision", f"{report['LONG']['precision']*100:.1f}%")
-    r3.metric("LONG Recall",    f"{report['LONG']['recall']*100:.1f}%")
-    r4.metric("LONG F1",        f"{report['LONG']['f1-score']*100:.1f}%")
-    st.success(f"✅ Model lưu: `{model_file}` | Scaler: `{scaler_file}`\nRestart app để load model mới.")
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Test Accuracy",    f"{acc*100:.1f}%")
+    r2.metric("LONG Precision",   f"{report['LONG']['precision']*100:.1f}%")
+    r3.metric("LONG Recall",      f"{report['LONG']['recall']*100:.1f}%")
+    r4.metric("SHORT Precision",  f"{report['SHORT']['precision']*100:.1f}%")
+    r5.metric("SHORT Recall",     f"{report['SHORT']['recall']*100:.1f}%")
+    st.success(f"✅ Model v2 lưu: `{model_file}` | Scaler: `{scaler_file}`\nRestart app để load model mới.")
     st.cache_resource.clear()
+
+
+# ── 2 fragment: run_every phải cố định lúc khai báo nên cần 2 hàm riêng ──────
+
+@st.fragment(run_every=1)
+def _live_panel_auto():
+    _live_panel_body()
+
+
+@st.fragment
+def _live_panel_manual():
+    _live_panel_body()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -427,10 +744,6 @@ def _run_lstm_training(data_file, model_file, scaler_file,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_phaisinh_tab():
-    """Render toàn bộ tab Phái Sinh. Gọi từ app.py."""
-    import time
-
-    # ── CSS ──────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
         .ps-box    { background:#1E2129;padding:16px;border-radius:10px;
@@ -442,84 +755,117 @@ def render_phaisinh_tab():
         .ps-log td { border-bottom:1px solid #2a2a2a;padding:9px;text-align:center;font-size:.93rem; }
         .c-long  { color:#00E676;font-weight:bold }
         .c-short { color:#FF5252;font-weight:bold }
+        .c-wait  { color:#9CA3AF;font-weight:bold }
         .c-pos   { color:#00B0FF;font-weight:bold }
         .c-neg   { color:#FFD600;font-weight:bold }
+        .prob-bar { height:10px;border-radius:5px;margin:3px 0; }
     </style>
     """, unsafe_allow_html=True)
 
     # ── Session state defaults ────────────────────────────────────────────────
     _defaults = {
-        "ps_active_trade":  None,
-        "ps_log_history":   [],
-        "ps_last_time":     "",
-        "ps_last_mtime":    0,
-        "ps_df_1m":         None,
-        "ps_last_prob":     0.5,        # FIX: lưu prob liên tục
-        "ps_last_trend":    (0, "—"),   # FIX: cache trend theo mtime
-        "ps_trend_mtime":   -1,         # mtime lần tính trend gần nhất
-        "ps_errors":        [],         # FIX: log lỗi trading ra UI
-        "ps_ai_warn":       None,       # cảnh báo scaler out-of-range
+        "ps_log_history":     [],
+        "ps_last_time":       "",
+        "ps_last_mtime":      0,
+        "ps_df_1m":           None,
+        "ps_last_prob_long":  0.33,
+        "ps_last_prob_short": 0.33,
+        "ps_last_trend":      (0, "—"),
+        "ps_tf_detail":       {"1m": {}, "15m": {}, "1h": {}},
+        "ps_trend_mtime":     -1,
+        "ps_signal_audit":    [],
+        "ps_errors":          [],
+        "ps_ai_warn":         None,
+        "ps_rule_signal":     "WAIT",
+        "ps_rule_reason":     "—",
+        "ps_rule_mtime":      -1,
+        "ps_stop_levels":     {},   # Buy Stop / Sell Stop gợi ý
     }
     for k, v in _defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    st.header("⚡ VN30F1M — Signal Bot (Multi-TF + Trailing Stop)")
+    st.header("⚡ VN30F1M — Signal Bot v3 (Rule-based + Ensemble)")
 
     if not _BASE_DATA_DIR:
         st.error(
             "❌ Không tìm thấy thư mục AmibrokerData tại D:\\ hoặc C:\\. "
-            "Đảm bảo Amibroker đang xuất **data_feed.csv** vào đúng đường dẫn."
+            "Đảm bảo Amibroker đang xuất vn30f1m_1min.csv vào đúng đường dẫn."
         )
         return
 
     # ── Controls ──────────────────────────────────────────────────────────────
     with st.expander("⚙️ Cấu hình chiến thuật", expanded=False):
-        cfg_c1, cfg_c2, cfg_c3, cfg_c4 = st.columns(4)
-        trailing_pts   = cfg_c1.number_input("Trailing Stop (điểm)", 0.5, 20.0, _DEFAULT_TRAILING_PTS,   0.5, key="ps_trailing")
-        initial_sl_pts = cfg_c2.number_input("SL ban đầu (điểm)",   0.5, 20.0, _DEFAULT_INITIAL_SL_PTS, 0.5, key="ps_sl")
-        thr_buy        = cfg_c3.slider("Ngưỡng LONG (%)", 50, 90, int(_DEFAULT_THRESHOLD_BUY * 100), key="ps_thr_buy")  / 100
-        thr_sell       = cfg_c4.slider("Ngưỡng SHORT (%)", 10, 50, int(_DEFAULT_THRESHOLD_SELL * 100), key="ps_thr_sell") / 100
-        strict_trend   = st.checkbox(
-            "Chỉ trade khi đa khung đồng pha (D+H+15p cùng chiều)",
-            value=False, key="ps_strict_trend",
-            help="Bật: chỉ vào lệnh khi cả 3 khung D/H/15p đồng pha. Tắt: cho phép khi D+H đồng pha dù 15p khác."
+        cfg_c1, cfg_c2 = st.columns(2)
+        thr_long  = cfg_c1.slider("Ngưỡng LONG LSTM (%)",  50, 90, int(_DEFAULT_THRESHOLD_BUY  * 100), key="ps_thr_buy")  / 100
+
+        mode_col, strict_col = st.columns([2, 1])
+        signal_mode = mode_col.radio(
+            "Chế độ tín hiệu",
+            options=["Rule-based", "LSTM", "Ensemble (cả 2 đồng thuận)"],
+            index=0, horizontal=True, key="ps_signal_mode",
+            help="Rule-based: RSI+MACD+VWAP. LSTM: model AI. Ensemble: cần cả 2 cùng chiều.",
         )
+        strict_trend = strict_col.checkbox(
+            "Strict trend (3 khung)",
+            value=False, key="ps_strict_trend",
+            help="Yêu cầu cả D/H/15p đồng pha mới vào lệnh",
+        )
+        thr_short = _DEFAULT_THRESHOLD_SELL   # short threshold (LSTM mode)
 
     top_c1, top_c2, top_c3 = st.columns([1, 1, 2])
-    auto_refresh = top_c1.toggle("🔄 Auto Refresh (1s)", value=False, key="ps_auto_toggle")
-    if top_c2.button("🚨 Reset Khẩn Cấp", use_container_width=True):
-        st.session_state["ps_active_trade"] = None
-        st.session_state["ps_errors"]       = []
-        st.success("Đã reset về trạng thái Quan sát!")
+    top_c1.toggle("🔄 Auto Refresh (1s)", value=False, key="ps_auto_toggle")
+    if top_c2.button("🔄 Xóa log lỗi", use_container_width=True):
+        st.session_state["ps_errors"] = []
+        st.rerun()
 
-    # ── Giờ giao dịch ─────────────────────────────────────────────────────────
-    in_session, session_msg = _in_trading_session()
+    _, session_msg = _in_trading_session()
     top_c3.caption(session_msg)
-    if not in_session and st.session_state["ps_active_trade"] is not None:
-        st.warning(
-            "⚠️ Đang ngoài giờ giao dịch nhưng còn lệnh mở trong session. "
-            "Kiểm tra lại trạng thái lệnh thực tế trên sàn."
-        )
 
     st.divider()
 
+    # ── Chọn fragment đúng theo trạng thái toggle ─────────────────────────────
+    # run_every phải cố định lúc khai báo decorator nên cần 2 hàm riêng.
+    # Fragment chỉ rerun vùng bên trong — app.py và các tab khác không bị block.
+    if st.session_state.get("ps_auto_toggle", False):
+        _live_panel_auto()
+    else:
+        _live_panel_manual()
+
+
+# ── Nội dung live panel (dùng chung cho cả 2 fragment) ───────────────────────
+def _live_panel_body():
+    """Logic signal + hiển thị UI — được gọi từ cả 2 fragment (auto/manual)."""
+    # Đọc config từ session_state (widgets đã khai báo key= trong render_phaisinh_tab)
+    thr_long    = st.session_state.get("ps_thr_buy",      _DEFAULT_THRESHOLD_BUY)
+    thr_short   = _DEFAULT_THRESHOLD_SELL
+    signal_mode = st.session_state.get("ps_signal_mode",  "Rule-based")
+    strict_trend = st.session_state.get("ps_strict_trend", False)
+    in_session, _ = _in_trading_session()
+
     # ── Load AI ───────────────────────────────────────────────────────────────
     ai_result = _load_ai_system()
-    # _load_ai_system trả (scaler, model) hoặc (None, error_str) nếu lỗi load
     if isinstance(ai_result[1], str) and ai_result[0] is None:
-        st.error(f"❌ Lỗi load model LSTM: {ai_result[1]}")
+        st.error(f"❌ Lỗi load model: {ai_result[1]}")
         ai_scaler, ai_model = None, None
     else:
         ai_scaler, ai_model = ai_result
 
-    if ai_model is None and not isinstance(ai_result[1], str):
-        st.warning(f"⚠️ Chưa có model LSTM (`{_MODEL_PATH}`). Bot chạy chế độ đa khung.")
+    if ai_model is None:
+        st.warning(f"⚠️ Chưa có model (`{_MODEL_PATH}`). Train model mới bên dưới.")
+    else:
+        n_out = ai_model.output_shape[-1]
+        ver   = "v2 (3-class)" if n_out == 3 else "v1 (binary — SHORT bị tắt, cần retrain)"
+        col_mv, _ = st.columns([3, 1])
+        col_mv.caption(f"🧠 Model: **{ver}** | Features: {ai_scaler.n_features_in_ if hasattr(ai_scaler,'n_features_in_') else '?'}")
 
-    # ── Đọc CSV khi Amibroker ghi file mới ───────────────────────────────────
+    # ── Đọc CSV khi mtime thay đổi ───────────────────────────────────────────
     current_price = 0.0
     last_time     = st.session_state["ps_last_time"]
     ai_signal     = "WAIT"
+    rule_sig      = st.session_state.get("ps_rule_signal", "WAIT")
+    prob_long     = st.session_state["ps_last_prob_long"]
+    prob_short    = st.session_state["ps_last_prob_short"]
 
     try:
         cur_mtime = os.path.getmtime(_DATA_FILE_1M)
@@ -531,137 +877,138 @@ def render_phaisinh_tab():
 
     df_1m = st.session_state["ps_df_1m"]
 
-    # ── FIX: Cache trend — chỉ tính lại khi mtime đổi ───────────────────────
+    # ── Cache trend (tính lại khi mtime đổi) ─────────────────────────────────
     cur_mtime_val = st.session_state["ps_last_mtime"]
     if cur_mtime_val != st.session_state["ps_trend_mtime"] and df_1m is not None:
         trend, trend_text = _get_trend_from_1m(df_1m)
         st.session_state["ps_last_trend"]  = (trend, trend_text)
+        st.session_state["ps_tf_detail"]   = _get_tf_detail(df_1m)
         st.session_state["ps_trend_mtime"] = cur_mtime_val
     else:
         trend, trend_text = st.session_state["ps_last_trend"]
 
-    # ── FIX: Lấy prob từ session (không reset về 0.5 mỗi rerun) ─────────────
-    prob = st.session_state["ps_last_prob"]
-
-    # ── Logic trading (có error logging) ─────────────────────────────────────
+    # ── Logic trading ─────────────────────────────────────────────────────────
     if df_1m is not None and len(df_1m) > 0:
-        _trade_error = None
         try:
             current_price = float(df_1m.iloc[-1]["Close"])
             last_time     = df_1m.index[-1].strftime("%Y-%m-%d %H:%M")
 
-            # A. Quản lý lệnh đang mở
-            trade = st.session_state["ps_active_trade"]
-            if trade is not None:
-                exit_triggered, exit_reason = False, ""
-                if last_time != trade["entry_time"]:
-                    if trade["type"] == "LONG":
-                        if current_price > trade["peak"]:
-                            trade["peak"] = current_price
-                            trade["sl"]   = max(trade["sl"], trade["peak"] - trailing_pts)
-                        if current_price <= trade["sl"]:
-                            exit_triggered, exit_reason = True, "Chạm Trailing Stop / SL"
-                    elif trade["type"] == "SHORT":
-                        if current_price < trade["peak"]:
-                            trade["peak"] = current_price
-                            trade["sl"]   = min(trade["sl"], trade["peak"] + trailing_pts)
-                        if current_price >= trade["sl"]:
-                            exit_triggered, exit_reason = True, "Chạm Trailing Stop / SL"
+            # Tính rule signal khi mtime đổi (cache như trend, tránh block UI mỗi render)
+            if cur_mtime_val != st.session_state["ps_rule_mtime"]:
+                _rule_sig_now, _rule_reason_now = _get_rule_signal(df_1m, trend)
+                st.session_state["ps_rule_signal"] = _rule_sig_now
+                st.session_state["ps_rule_reason"] = _rule_reason_now
+                st.session_state["ps_rule_mtime"]  = cur_mtime_val
 
-                if exit_triggered:
-                    pnl  = (current_price - trade["entry"]) if trade["type"] == "LONG" else (trade["entry"] - current_price)
-                    icon = "✅" if pnl > 0 else "❌"
-                    _send_telegram_async(
-                        f"🏁 <b>ĐÓNG LỆNH {trade['type']}</b>\n"
-                        f"💰 <b>Giá chốt:</b> {current_price}\n"
-                        f"🎯 <b>PnL:</b> {pnl:+.1f} điểm {icon}\n"
-                        f"📌 <b>Lý do:</b> {exit_reason}"
-                    )
-                    log_entry = {
-                        "time": last_time, "ticker": "VN30F1M",
-                        "act":  f"ĐÓNG {trade['type']}", "price": current_price,
-                        "pnl":  f"{pnl:+.1f}", "reason": exit_reason,
-                    }
-                    st.session_state["ps_log_history"].insert(0, log_entry)
-                    _append_journal(log_entry)
-                    _sync_gsheet_async(log_entry)
-                    st.session_state["ps_active_trade"] = None
+            # ── Tính tín hiệu mỗi candle mới ────────────────────────────────
+            if last_time != st.session_state["ps_last_time"]:
+                # Rule-based signal
+                rule_sig, rule_reason = _get_rule_signal(df_1m, trend)
+                st.session_state["ps_rule_signal"] = rule_sig
+                st.session_state["ps_rule_reason"] = rule_reason
 
-            # B. Phát tín hiệu mới (candle mới chưa xử lý)
-            elif last_time != st.session_state["ps_last_time"]:
+                # Buy Stop / Sell Stop levels
+                st.session_state["ps_stop_levels"] = _get_stop_levels(df_1m)
+
+                # Audit log
+                audit = st.session_state.setdefault("ps_signal_audit", [])
+                audit.insert(0, {
+                    "time": last_time, "price": current_price,
+                    "signal": rule_sig, "reason": rule_reason, "trend": trend,
+                })
+                st.session_state["ps_signal_audit"] = audit[:50]
+
+                # LSTM (nếu có model)
+                lstm_sig = "WAIT"
                 if ai_model is not None:
-                    prob_new, ai_warn = _get_ai_prediction(df_1m, ai_scaler, ai_model)
-                    prob = prob_new
-                    st.session_state["ps_last_prob"] = prob
-                    st.session_state["ps_ai_warn"]   = ai_warn
-                conf = prob * 100 if prob >= 0.5 else (1 - prob) * 100
+                    prob_long_new, prob_short_new, ai_warn = _get_ai_prediction(df_1m, ai_scaler, ai_model)
+                    prob_long  = prob_long_new
+                    prob_short = prob_short_new
+                    st.session_state["ps_last_prob_long"]  = prob_long
+                    st.session_state["ps_last_prob_short"] = prob_short
+                    st.session_state["ps_ai_warn"]         = ai_warn
+                    if prob_long >= thr_long:   lstm_sig = "LONG"
+                    elif prob_short >= thr_short: lstm_sig = "SHORT"
+                    if strict_trend:
+                        if lstm_sig == "LONG"  and trend != 1:  lstm_sig = "WAIT"
+                        if lstm_sig == "SHORT" and trend != -1: lstm_sig = "WAIT"
+                    else:
+                        if lstm_sig == "SHORT" and trend != -1: lstm_sig = "WAIT"
+                        if lstm_sig == "LONG"  and trend == -1: lstm_sig = "WAIT"
 
-                if prob >= thr_buy:
-                    ai_signal = "LONG"
-                elif prob <= thr_sell:
-                    ai_signal = "SHORT"
-
-                # FIX: Filter "strict trend" option
-                if strict_trend:
-                    # Chỉ cho vào khi 3 khung đồng pha hoàn toàn
-                    cho_vao = (
-                        (ai_signal == "LONG"  and trend == 1)
-                        or (ai_signal == "SHORT" and trend == -1)
-                    )
-                    if ai_signal != "WAIT" and not cho_vao:
-                        ai_signal = "WAIT"  # block signal khi không đồng pha
+                # Tổng hợp
+                if signal_mode == "Rule-based":
+                    ai_signal   = rule_sig
+                    signal_desc = rule_reason
+                elif signal_mode == "LSTM":
+                    ai_signal   = lstm_sig
+                    signal_desc = f"LSTM L={prob_long*100:.0f}% S={prob_short*100:.0f}%"
                 else:
-                    # Chỉ cấm ngược trend rõ ràng (D+H đồng pha)
-                    if (trend == 1  and ai_signal == "SHORT") or (trend == -1 and ai_signal == "LONG"):
-                        ai_signal = "WAIT"
-                    cho_vao = ai_signal != "WAIT"
+                    if rule_sig != "WAIT" and rule_sig == lstm_sig:
+                        ai_signal   = rule_sig
+                        signal_desc = f"Ensemble✓ {rule_reason}"
+                    else:
+                        ai_signal   = "WAIT"
+                        signal_desc = f"Ensemble: Rule={rule_sig} LSTM={lstm_sig}"
 
-                # Không vào lệnh ngoài giờ giao dịch
                 if not in_session:
-                    cho_vao = False
+                    ai_signal = "WAIT"
 
-                if ai_signal != "WAIT" and cho_vao:
-                    sl = (current_price - initial_sl_pts if ai_signal == "LONG"
-                          else current_price + initial_sl_pts)
-                    st.session_state["ps_active_trade"] = {
-                        "type": ai_signal, "entry": current_price,
-                        "peak": current_price, "sl": sl, "entry_time": last_time,
-                    }
+                # Gửi Telegram khi có tín hiệu (chỉ thông báo, không tự vào lệnh)
+                if ai_signal != "WAIT":
+                    sl_ref = st.session_state["ps_stop_levels"]
                     icon = "🚀" if ai_signal == "LONG" else "🔻"
+                    if ai_signal == "LONG":
+                        sl_price = sl_ref.get("buy_stop_sl")
+                        stop_price = sl_ref.get("buy_stop_price")
+                    else:
+                        sl_price = sl_ref.get("sell_stop_sl")
+                        stop_price = sl_ref.get("sell_stop_price")
+                    stop_line = f"📌 Stop lệnh: {stop_price:.1f}\n" if stop_price else ""
+                    sl_line   = f"🛡️ SL: {sl_price:.1f}\n" if sl_price else ""
                     _send_telegram_async(
-                        f"{icon} <b>#VN30F1M BÁO {ai_signal} MỚI</b>\n\n"
-                        f"🎯 <b>Vùng vào lệnh:</b> {current_price}\n"
-                        f"🛡️ <b>Cắt lỗ (SL):</b> {sl:.1f}\n"
-                        f"⚡ <b>AI:</b> {conf:.1f}%\n"
-                        f"🧭 <b>Đa khung:</b> {trend_text}\n"
-                        f"<i>(Bot tự kéo SL theo giá)</i>"
+                        f"{icon} <b>#VN30F1M TÍN HIỆU {ai_signal}</b>\n"
+                        f"💰 Giá hiện tại: {current_price:.1f}\n"
+                        f"{stop_line}{sl_line}"
+                        f"⚡ {signal_desc}\n"
+                        f"🧭 {trend_text}\n"
+                        f"⚠️ Chỉ tham khảo — tự quyết định vào lệnh"
                     )
                     log_entry = {
                         "time": last_time, "ticker": "VN30F1M",
-                        "act":  f"BÁO {ai_signal}", "price": current_price,
-                        "pnl":  "—", "reason": f"AI={conf:.1f}% | {trend_text}",
+                        "act": f"TÍN HIỆU {ai_signal}", "price": current_price,
+                        "pnl": "—", "reason": signal_desc,
                     }
                     st.session_state["ps_log_history"].insert(0, log_entry)
                     _append_journal(log_entry)
-                    _sync_gsheet_async(log_entry)
 
             st.session_state["ps_last_time"] = last_time
 
         except Exception as e:
-            # FIX: Log lỗi ra session thay vì nuốt im lặng
             err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {type(e).__name__}: {e}"
             errs = st.session_state["ps_errors"]
             errs.insert(0, err_msg)
-            st.session_state["ps_errors"] = errs[:10]  # giữ 10 lỗi gần nhất
+            st.session_state["ps_errors"] = errs[:10]
 
     elif _DATA_FILE_1M and not os.path.exists(_DATA_FILE_1M):
         st.info(f"📂 Đang chờ file `{_DATA_FILE_1M}` từ Amibroker...")
 
-    # Hiện cảnh báo scaler out-of-range
+    # ── Cảnh báo data stale (AFL không cập nhật) ─────────────────────────────
+    if df_1m is not None and in_session:
+        try:
+            last_candle_dt = df_1m.index[-1]
+            stale_mins = (pd.Timestamp.now() - last_candle_dt).total_seconds() / 60
+            if stale_mins > 3:
+                st.warning(
+                    f"⚠️ **Dữ liệu cũ {stale_mins:.0f} phút** — AFL có thể chưa chạy Explorer. "
+                    f"Candle gần nhất: `{last_candle_dt.strftime('%H:%M')}`"
+                )
+        except Exception:
+            pass
+
     if st.session_state.get("ps_ai_warn"):
         st.warning(st.session_state["ps_ai_warn"])
 
-    # ── Hiển thị lỗi trading (nếu có) ────────────────────────────────────────
     if st.session_state["ps_errors"]:
         with st.expander(f"🐛 Lỗi hệ thống ({len(st.session_state['ps_errors'])})", expanded=True):
             for err in st.session_state["ps_errors"]:
@@ -670,56 +1017,173 @@ def render_phaisinh_tab():
                 st.session_state["ps_errors"] = []
                 st.rerun()
 
-    # ── Tín hiệu hành động ───────────────────────────────────────────────────
-    st.subheader("🎯 Tín Hiệu Hành Động Hiện Tại")
+    # ── Panel chẩn đoán tín hiệu — 20 candle gần nhất ───────────────────────
+    audit_log = st.session_state.get("ps_signal_audit", [])
+    if audit_log:
+        with st.expander(f"🔍 Chẩn đoán tín hiệu — {len(audit_log)} candle gần nhất", expanded=False):
+            _sig_colors = {"LONG": "#00E676", "SHORT": "#FF5252", "WAIT": "#555"}
+            rows_html = ""
+            for a in audit_log[:20]:
+                clr  = _sig_colors.get(a["signal"], "#555")
+                tdot = "↑" if a["trend"] == 1 else "↓" if a["trend"] == -1 else "→"
+                rows_html += (
+                    f"<tr>"
+                    f"<td style='color:#888;font-size:11px;padding:2px 6px'>{a['time'][-5:]}</td>"
+                    f"<td style='color:#ccc;font-size:11px;padding:2px 6px'>{a['price']:,.1f}</td>"
+                    f"<td style='color:{clr};font-weight:700;font-size:11px;padding:2px 6px'>{a['signal']}</td>"
+                    f"<td style='color:#888;font-size:10px;padding:2px 6px'>{tdot} {a['reason'][:80]}</td>"
+                    f"</tr>"
+                )
+            st.markdown(
+                f"<table style='width:100%;border-collapse:collapse'>"
+                f"<thead><tr>"
+                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Giờ</th>"
+                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Giá</th>"
+                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Signal</th>"
+                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Lý do / Score</th>"
+                f"</tr></thead><tbody>{rows_html}</tbody></table>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Hiển thị tín hiệu ────────────────────────────────────────────────────
+    st.subheader("🎯 Tín Hiệu Hành Động")
     col1, col2, col3 = st.columns([1, 1.5, 1])
 
     col1.markdown(
-        f"<div class='ps-box'>Giá Thị Trường<br>"
+        f"<div class='ps-box'>Giá thị trường<br>"
         f"<b style='font-size:28px'>{current_price:,.1f}</b><br>"
-        f"<span style='font-size:12px;color:#9CA3AF'>{last_time or '—'}</span></div>",
+        f"<span style='font-size:11px;color:#9CA3AF'>{last_time or '—'}</span><br>"
+        f"<span style='font-size:11px;color:#9CA3AF'>{trend_text}</span></div>",
         unsafe_allow_html=True,
     )
 
-    active = st.session_state["ps_active_trade"]
-    if active:
-        cur_pnl = (
-            (current_price - active["entry"]) if active["type"] == "LONG"
-            else (active["entry"] - current_price)
-        )
-        clr     = "#00E676" if cur_pnl >= 0 else "#FF5252"
-        box_cls = "ps-active" if cur_pnl >= 0 else "ps-warn"
-        dir_cls = "c-long"   if active["type"] == "LONG" else "c-short"
-        col2.markdown(
-            f"<div class='ps-box {box_cls}'>TRẠNG THÁI<br>"
-            f"<span class='{dir_cls}' style='font-size:20px'>ĐANG GIỮ {active['type']}</span><br>"
-            f"Vào lệnh: <b>{active['entry']:,.1f}</b> &nbsp;|&nbsp; "
-            f"Lãi/Lỗ: <b style='font-size:22px;color:{clr}'>{cur_pnl:+.1f} đ</b></div>",
-            unsafe_allow_html=True,
-        )
-        col3.markdown(
-            f"<div class='ps-box'>Trailing SL<br>"
-            f"<b style='font-size:28px;color:#FFD600'>{active['sl']:.1f}</b><br>"
-            f"<span style='font-size:12px;color:#9CA3AF'>AI {prob*100:.0f}% | {trend_text}</span></div>",
-            unsafe_allow_html=True,
-        )
+    # Trạng thái tín hiệu hiện tại
+    if rule_sig == "LONG":
+        sig_color, sig_label = "#00E676", "🚀 LONG"
+    elif rule_sig == "SHORT":
+        sig_color, sig_label = "#FF5252", "🔻 SHORT"
     else:
-        if ai_signal == "LONG":
-            sig_color, sig_label = "#00E676", "🚀 LONG"
-        elif ai_signal == "SHORT":
-            sig_color, sig_label = "#FF5252", "🔻 SHORT"
-        else:
-            sig_color, sig_label = "#9CA3AF", "QUAN SÁT"
-        col2.markdown(
-            "<div class='ps-box'>TRẠNG THÁI<br>"
-            "<b style='font-size:22px;color:#AAA'>ĐỨNG NGOÀI</b></div>",
-            unsafe_allow_html=True,
+        sig_color, sig_label = "#9CA3AF", "⏸ QUAN SÁT"
+
+    trend_color = "#00E676" if trend == 1 else ("#FF5252" if trend == -1 else "#888")
+    trend_badge = f'<span style="color:{trend_color};font-size:11px">{trend_text}</span>'
+
+    col2.markdown(
+        f"<div class='ps-box'>TÍN HIỆU<br>"
+        f"<b style='font-size:22px;color:{sig_color}'>{sig_label}</b><br>"
+        f"{trend_badge}</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Prob bar AI (nếu có model)
+    prob_wait = max(0.0, 1.0 - prob_long - prob_short)
+    bar_short = f"{prob_short*100:.1f}"
+    bar_wait  = f"{prob_wait*100:.1f}"
+    bar_long  = f"{prob_long*100:.1f}"
+    col3.markdown(
+        f"<div class='ps-box'>Dự báo AI<br>"
+        f"<div style='display:flex;height:10px;border-radius:5px;overflow:hidden;margin:4px 0'>"
+        f"<div style='width:{bar_short}%;background:#FF5252'></div>"
+        f"<div style='width:{bar_wait}%;background:#444'></div>"
+        f"<div style='width:{bar_long}%;background:#00E676'></div>"
+        f"</div>"
+        f"<span style='color:#FF5252;font-size:11px'>S={bar_short}%</span>&nbsp;"
+        f"<span style='color:#888;font-size:11px'>W={bar_wait}%</span>&nbsp;"
+        f"<span style='color:#00E676;font-size:11px'>L={bar_long}%</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Trend 3 khung timeframe ───────────────────────────────────────────────
+    tf_detail = st.session_state.get("ps_tf_detail", {})
+    if tf_detail:
+        tf_c1, tf_c2, tf_c3 = st.columns(3)
+        for col_ui, tf_key, tf_label in [
+            (tf_c1, "1m",  "🕐 1 Phút"),
+            (tf_c2, "15m", "🕒 15 Phút"),
+            (tf_c3, "1h",  "🕐 1 Giờ"),
+        ]:
+            info = tf_detail.get(tf_key, {})
+            t    = info.get("trend", 0)
+            lbl  = info.get("label", "—")
+            ema  = info.get("ema")
+            cls  = info.get("close")
+            clr  = "#00E676" if t == 1 else ("#FF5252" if t == -1 else "#888")
+            ema_str = f"<br><span style='font-size:10px;color:#666'>EMA={ema:,.1f} | C={cls:,.1f}</span>" if ema else ""
+            col_ui.markdown(
+                f"<div style='background:#111;border:1px solid #2a2a2a;border-left:3px solid {clr};"
+                f"border-radius:6px;padding:7px 10px;text-align:center'>"
+                f"<div style='font-size:10px;color:#666;margin-bottom:2px'>{tf_label}</div>"
+                f"<div style='font-size:14px;font-weight:700;color:{clr}'>{lbl}</div>"
+                f"{ema_str}</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── 4 card tín hiệu: LONG | SHORT | BUY STOP | SELL STOP ───────────────────
+    rule_sig    = st.session_state.get("ps_rule_signal", "WAIT")
+    rule_reason = st.session_state.get("ps_rule_reason", "—")
+    stop_lvl    = st.session_state.get("ps_stop_levels", {})
+
+    buy_stop_px  = stop_lvl.get("buy_stop_price")
+    buy_stop_sl  = stop_lvl.get("buy_stop_sl")
+    sell_stop_px = stop_lvl.get("sell_stop_price")
+    sell_stop_sl = stop_lvl.get("sell_stop_sl")
+    atr_val      = stop_lvl.get("atr")
+
+    def _sig_card(icon, label, value_html, bg, border):
+        return (
+            f"<div style='background:{bg};border:2px solid {border};border-radius:10px;"
+            f"padding:10px 12px;text-align:center'>"
+            f"<div style='font-size:15px;font-weight:bold;color:{border}'>{icon} {label}</div>"
+            f"<div style='font-size:13px;color:#ddd;margin-top:4px'>{value_html}</div>"
+            f"</div>"
         )
-        col3.markdown(
-            f"<div class='ps-box'>Dự báo AI<br>"
-            f"<b style='font-size:20px;color:{sig_color}'>{sig_label}</b><br>"
-            f"<span style='color:#9CA3AF;font-size:13px'>{prob*100:.1f}% Tăng</span><br>"
-            f"<span style='color:#9CA3AF;font-size:12px'>{trend_text}</span></div>",
+
+    def _stop_card(icon, label, entry_px, sl_px, atr, bg, border):
+        if entry_px is None:
+            body = "<span style='color:#666'>Đang tính...</span>"
+        else:
+            rr_pts = abs(entry_px - sl_px) if sl_px else 0
+            body = (
+                f"<span style='font-size:13px;color:#aaa'>Vào lệnh</span><br>"
+                f"<b style='font-size:20px;color:{border}'>{entry_px:.1f}</b><br>"
+                f"<span style='font-size:12px;color:#FF6B6B'>SL: {sl_px:.1f}</span>"
+                f"<span style='font-size:11px;color:#666'> ({rr_pts:.1f}đ)</span>"
+                + (f"<br><span style='font-size:10px;color:#555'>ATR={atr}</span>" if atr else "")
+            )
+        return (
+            f"<div style='background:{bg};border:2px solid {border};border-radius:10px;"
+            f"padding:10px 12px;text-align:center'>"
+            f"<div style='font-size:15px;font-weight:bold;color:{border}'>{icon} {label}</div>"
+            f"<div style='margin-top:4px'>{body}</div>"
+            f"</div>"
+        )
+
+    long_active  = rule_sig == "LONG"
+    short_active = rule_sig == "SHORT"
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(_sig_card(
+            "🚀", "LONG (MP)",
+            rule_reason if long_active else "<span style='color:#555'>Chưa có tín hiệu</span>",
+            "#0d2b1a" if long_active else "#111", "#00E676" if long_active else "#444",
+        ), unsafe_allow_html=True)
+    with c2:
+        st.markdown(_sig_card(
+            "🔻", "SHORT (MP)",
+            rule_reason if short_active else "<span style='color:#555'>Chưa có tín hiệu</span>",
+            "#2b0d0d" if short_active else "#111", "#FF5252" if short_active else "#444",
+        ), unsafe_allow_html=True)
+    with c3:
+        st.markdown(_stop_card("⬆️", "BUY STOP", buy_stop_px, buy_stop_sl, atr_val, "#0d1a2b", "#29B6F6"), unsafe_allow_html=True)
+    with c4:
+        st.markdown(_stop_card("⬇️", "SELL STOP", sell_stop_px, sell_stop_sl, atr_val, "#1a0d2b", "#CE93D8"), unsafe_allow_html=True)
+
+    if ai_model is not None:
+        lstm_color = "#00E676" if prob_long > prob_short and prob_long > 0.4 else ("#FF5252" if prob_short > prob_long and prob_short > 0.4 else "#9CA3AF")
+        st.markdown(
+            f"<div style='font-size:11px;color:#888;margin-top:4px'>LSTM: "
+            f"<span style='color:{lstm_color}'>L={prob_long*100:.0f}% S={prob_short*100:.0f}%</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -731,44 +1195,39 @@ def render_phaisinh_tab():
     s1.metric("Số lệnh đóng",  stats["total"])
     s2.metric("Thắng / Thua",  f"{stats['wins']} / {stats['losses']}")
     s3.metric("Win Rate",       f"{stats['win_rate']:.0f}%")
-    pnl_color = "normal" if stats["total_pnl"] >= 0 else "inverse"
-    s4.metric("PnL session",    f"{stats['total_pnl']:+.1f} đ",
-              delta_color=pnl_color)
+    s4.metric("PnL session",    f"{stats['total_pnl']:+.1f}đ",
+              delta_color="normal" if stats["total_pnl"] >= 0 else "inverse")
 
     st.divider()
 
-    # ── Nhật ký tín hiệu ─────────────────────────────────────────────────────
+    # ── Nhật ký ──────────────────────────────────────────────────────────────
     st.subheader("📜 Nhật Ký Tín Hiệu (Session)")
     log = st.session_state["ps_log_history"]
     if log:
         rows = ""
         for item in log[:25]:
             act   = item["act"]
-            a_cls = "c-long" if "LONG" in act else ("c-short" if "SHORT" in act else "")
+            a_cls = "c-long" if "LONG" in act else ("c-short" if "SHORT" in act else "c-wait")
             pnl   = str(item["pnl"])
-            p_cls = "c-pos" if pnl.startswith("+") else ("c-neg" if pnl.startswith("-") and pnl != "—" else "")
-            price = item["price"]
-            p_str = f"{price:,.1f}" if isinstance(price, (int, float)) else str(price)
+            p_cls = "c-pos" if pnl.startswith("+") else ("c-neg" if (pnl.startswith("-") and pnl != "—") else "")
+            p_str = f"{item['price']:,.1f}" if isinstance(item["price"], (int, float)) else str(item["price"])
             rows += (
-                f"<tr>"
-                f"<td>{item['time']}</td>"
+                f"<tr><td>{item['time']}</td>"
                 f"<td class='{a_cls}'>{act}</td>"
                 f"<td><b>{p_str}</b></td>"
                 f"<td class='{p_cls}'>{pnl}</td>"
-                f"<td>{item['reason']}</td>"
-                f"</tr>"
+                f"<td>{item['reason']}</td></tr>"
             )
         st.markdown(
             f"<table class='ps-log'>"
-            f"<tr><th>Thời gian</th><th>Tín hiệu</th>"
-            f"<th>Giá</th><th>PnL (đ)</th><th>Ghi chú</th></tr>"
+            f"<tr><th>Thời gian</th><th>Tín hiệu</th><th>Giá</th><th>PnL (đ)</th><th>Ghi chú</th></tr>"
             f"{rows}</table>",
             unsafe_allow_html=True,
         )
     else:
-        st.info("Hệ thống đang quan sát đồ thị. Chờ AI xuất tín hiệu đầu tiên...")
+        st.info("Hệ thống đang quan sát. Chờ AI xuất tín hiệu đầu tiên...")
 
-    # ── Journal từ file ───────────────────────────────────────────────────────
+    # ── Journal CSV ───────────────────────────────────────────────────────────
     if _JOURNAL_FILE and os.path.exists(_JOURNAL_FILE):
         with st.expander("📂 Lịch sử Journal (file CSV)", expanded=False):
             try:
@@ -777,26 +1236,40 @@ def render_phaisinh_tab():
             except Exception:
                 st.warning("Không đọc được file journal.")
 
-    # ── Train LSTM ───────────────────────────────────────────────────────────
+    # ── Train LSTM v2 ─────────────────────────────────────────────────────────
     st.divider()
-    with st.expander("🧠 Train / Retrain Model LSTM", expanded=False):
-        st.caption("Train model trên dữ liệu VN30F1M 1 phút. Chạy offline — không ảnh hưởng bot đang chạy.")
+    with st.expander("🧠 Train / Retrain Model LSTM v2 (3-class)", expanded=False):
+        st.caption(
+            "**v2**: Label 3 class (SHORT/WAIT/LONG), class_weight balanced, 8 features. "
+            "Model cũ (v1 binary) vẫn dùng được nhưng bị block SHORT — nên retrain."
+        )
+        st.info(
+            "💡 **Khuyến nghị:** `Nhìn trước=10, Target=0.5` → nhiều label LONG/SHORT hơn "
+            "(v1 default: 5/1.0 → chỉ 15% label không phải WAIT → LSTM bias về WAIT). "
+            "Nếu kết quả LONG Recall < 30% → tăng `Nhìn trước` hoặc giảm `Target`."
+        )
         t_c1, t_c2, t_c3 = st.columns(3)
-        future_bars   = t_c1.number_input("Nhìn trước (nến)", 3, 30, 5, key="ps_train_future")
-        profit_target = t_c2.number_input("Target lợi nhuận (điểm)", 0.5, 5.0, 1.0, 0.5, key="ps_train_target")
+        future_bars   = t_c1.number_input("Nhìn trước (nến 1min)", 3, 30, 10, key="ps_train_future")
+        profit_target = t_c2.number_input("Target (điểm)", 0.3, 5.0, 0.5, 0.1, key="ps_train_target")
         epochs        = t_c3.number_input("Epochs tối đa", 10, 100, 30, 5, key="ps_train_epochs")
 
         data_ok = _DATA_FILE_1M and os.path.exists(_DATA_FILE_1M)
         if not data_ok:
-            st.warning(f"⚠️ Chưa có file `vn30f1m_1min.csv`. Cần export từ Amibroker trước.")
+            st.warning(f"⚠️ Chưa có file `vn30f1m_1min.csv`. Export từ Amibroker trước.")
         else:
             try:
                 n_rows = sum(1 for _ in open(_DATA_FILE_1M)) - 1
-                st.info(f"📊 File hiện có: **{n_rows:,} nến** | Model: {'✅ Có' if _MODEL_PATH and os.path.exists(_MODEL_PATH) else '❌ Chưa train'}")
+                model_info = "❌ Chưa train"
+                if _MODEL_PATH and os.path.exists(_MODEL_PATH):
+                    _sc, _mdl = ai_scaler, ai_model
+                    if _mdl is not None:
+                        n_out = _mdl.output_shape[-1]
+                        model_info = f"✅ v2 (3-class)" if n_out == 3 else "⚠️ v1 binary (SHORT bị block)"
+                st.info(f"📊 Data: **{n_rows:,} nến** | Model: {model_info}")
             except Exception:
                 pass
 
-        if st.button("🚀 Bắt Đầu Train", disabled=not data_ok, key="ps_train_btn"):
+        if st.button("🚀 Bắt Đầu Train v2", disabled=not data_ok, key="ps_train_btn", type="primary"):
             _run_lstm_training(
                 data_file=_DATA_FILE_1M,
                 model_file=_MODEL_PATH,
@@ -806,7 +1279,4 @@ def render_phaisinh_tab():
                 epochs=int(epochs),
             )
 
-    # ── Auto-refresh (cuối cùng) ──────────────────────────────────────────────
-    if auto_refresh:
-        time.sleep(1)
-        st.rerun()
+    # Auto-refresh được xử lý bởi @st.fragment(run_every=1) — không cần sleep/rerun ở đây

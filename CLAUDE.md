@@ -93,32 +93,125 @@ C:\AmibrokerData\
 
 ## Signal Classification
 
-### Tech Score (indicators.py)
+### Tech Score (indicators.py) — Signatures chuẩn
 ```python
-tech_score = calculate_tech_score(rsi, macd_hist, dist_ema34_pct)  # 0-100
-signal     = classify_signal(tech_score)   # BUY-A/BUY-B/HOLD/SELL-B/SELL-A
-risk       = classify_risk(tech_score, dist_ema34_pct, atr_pct, bb_width_pct, volume_ratio)
-phase      = classify_phase(rsi, dist_ema34_pct)
-# Phases: Accumulation / Markup / Distribution / Markdown / Neutral
+# Phase phải tính TRƯỚC tech_score (phase là INPUT của tech_score)
+phase      = classify_phase(rsi, dist_ema34_pct, price_trend_20d, ma_aligned)
+tech_score = calculate_tech_score(
+    rsi, macd_hist, dist_ema34_pct,
+    ma_aligned=0, volume_ratio=nan, macd_bars_since_cross=999,
+    phase="Neutral", weekly_macd_trend=0, rs_pct=nan
+)
+signal = classify_signal(tech_score, volume_ratio, rsi)  # rsi param quan trọng!
+risk   = classify_risk(tech_score, dist_ema34_pct, atr_pct, bb_width_pct, volume_ratio)
 ```
 
-### Tech Score — Công thức chuẩn (indicators.py `calculate_tech_score`)
+### Tech Score — Công thức v2 (rebalanced cho VN market, session 8)
 ```
 score = 50 (baseline)
-  RSI:      ≤30 → +25 | ≥70 → -25 | else → +(50-rsi)
-  MACD:     >0  → +15 | <0  → -15  (dùng DẤU, không dùng magnitude — magnitude phụ thuộc giá mã)
-  Dist EMA: -5% đến -15% → +10 (pullback vừa)
-            < -15%       → -10 (downtrend mạnh, không phải cơ hội)
-            > +10%       → -10 (overbought)
+  RSI Wilder:     ≤30 → +15 | ≥70 → -15 | else → (50-rsi)*15/20
+  MACD freshness: hist>0: fresh≤3 → +15 | ≤10 → +10 | >10 → +5  (đổi dấu khi âm)
+  MA Alignment:   ma_al * 8.0  → ±16  ← TRỌNG SỐ CAO NHẤT (dự báo tốt nhất VN)
+  Dist EMA34:     -15%→-5% → +8 | -5%→+5% → +2 | cực → ±8
+  Volume:         ≥1.5x → +5 | <0.6x → -5
+  Wyckoff Phase:  Accum +6 | Markup +4 | Neutral 0 | Distrib -8 | Markdown -6
+  Weekly MACD:    wmt * 8   → ±8  ← tăng từ ±6
+  RS vs VNI 14d:  >5% → +8 | >0 → +4 | >-5% → -4 | ≤-5% → -8  ← tăng từ ±6
 ```
-⚠️ **MACD dùng dấu**: KHÔNG nhân `macd_hist * 100` — mã giá thấp có histogram ~0.001, mã giá cao ~5, không so được giữa các mã.
+⚠️ **MACD dùng dấu + freshness**: freshness = `macd_bars_since_cross` column từ `add_all_indicators()`
 
-### Indicators mới trong add_all_indicators()
+### Ngưỡng signal (config.py)
 ```python
-# ATR (Wilder 1978): df["atr_pct"] = atr / close * 100   (% giá — đo volatility)
-# Bollinger (1983):  df["bb_upper/mid/lower/bb_width_pct"]
-# Volume Ratio:      df["volume_ratio"] = volume / SMA20(volume)
+SCORE_BUY_A  = 70   # BUY-A: >= 70  (giảm từ 75 — đủ sample để thống kê)
+SCORE_BUY_B  = 55   # BUY-B: 55-69
+SCORE_SELL_B = 35   # SELL-B: 25-34
+SCORE_SELL_A = 25   # SELL-A: <25
+# HOLD: 35-54
 ```
+
+### classify_signal() — Volume Gate VN + RSI Gate SELL-A
+```python
+def classify_signal(tech_score, volume_ratio=nan, rsi=nan):
+    if tech_score >= SCORE_BUY_A:
+        if volume_ratio > 4.0: return "BUY-B"   # FOMO >4x; 2-4x vẫn là breakout thật
+        return "BUY-A"
+    ...
+    else:  # SELL-A zone
+        if not isnan(rsi) and rsi < 40: return "SELL-B"  # oversold → VN bounce → không SELL-A
+        return "SELL-A"
+```
+⚠️ **Volume gate VN ngược Mỹ**: hạ BUY-A khi volume >4x (FOMO), KHÔNG hạ khi volume thấp (tích lũy lặng lẽ).
+⚠️ **RSI gate SELL-A**: SELL-A chỉ đáng tin khi RSI ≥40. RSI <40 + bad tech ở VN = oversold bounce, không phải downtrend.
+
+### Indicators trong add_all_indicators()
+```python
+# Các cột chuẩn (session 6-8):
+df["atr_pct"]              # ATR Wilder / close * 100
+df["bb_upper/mid/lower/bb_width_pct"]  # Bollinger (1983)
+df["volume_ratio"]         # volume / SMA20(volume)
+df["ma_aligned"]           # -2/-1/0/+1/+2 (SMA20 vs SMA50 vs close)
+df["price_trend_20d"]      # close.pct_change(20) * 100
+df["macd_bars_since_cross"] # freshness: số bar kể từ MACD đổi dấu
+df["weekly_macd_trend"]    # +1/-1/0 từ Elder Triple Screen (resample daily→weekly)
+df["rs_14d"]               # stock return 14d - vni_ret_14d (inject từ ngoài trước khi gọi)
+```
+⚠️ `rs_14d` cần inject `vni_ret_14d` column TRƯỚC khi gọi `add_all_indicators(df)`:
+```python
+df["vni_ret_14d"] = df["Date"].map(vni_ret_series)
+df = add_all_indicators(df)
+```
+
+## Backtest — vn_invest/backtester.py
+
+### Chạy nhanh (không cần Streamlit)
+```python
+# run_backtest_quick.py tại root project
+import sys; sys.path.insert(0, ".")
+from vn_invest.backtester import run_backtest
+r = run_backtest(forward_days=20, max_symbols=200)
+print(r["buy_a_alpha"], r["market_avg_return"], r["signal_edge"])
+```
+
+### Metric đúng cho VN market
+```python
+"buy_a_alpha"      # BUY-A avg − market_avg  ← METRIC CHÍNH (>2% ở T+20 = tốt)
+"signal_edge"      # BUY-A avg − SELL-A avg  ← reference (thường âm T+10, dương T+20)
+"market_avg_return"  # avg return khi "mua bừa" bất kỳ mã
+```
+**Lý do:** SELL signals trong VN không dự báo giá xuống ngắn hạn. Cần Alpha vs market, không phải vs SELL-A.
+
+### Kết quả đã đạt (session 8) — T+20, 200 mã
+```
+BUY-A Alpha: +2.43%  |  BUY-A win: 66.3%  |  BUY-A avg: +10.57%  |  n=798
+BUY-B avg: +8.91%    |  Market avg: +8.14%
+SELL-A avg: +3.39% (vẫn dương vì VN upward bias)  |  Signal Edge: +7.18%
+```
+
+### Filters đang hoạt động (backtester.py)
+1. **signal_persistence_2d**: signal phải giữ ≥2 ngày liên tiếp mới tính
+2. **macd_freshness**: fresh cross ≤3 bars = ±15; cũ >10 bars = ±5
+3. **volume_gate_vn_adjusted(>4x)**: BUY-A → BUY-B khi volume >4x FOMO
+4. **atr_filter(<5%)**: bỏ qua cổ phiếu atr_pct >5% (penny/thao túng)
+5. **buya_hard_gate(MA+Weekly+Phase)**:
+   - `ma_al < 1` → BUY-B (cần MA uptrend thật, không chỉ sideways)
+   - `wmt == -1` → BUY-B (chỉ gate khi weekly âm RÕ RÀNG — wmt=0 no data vẫn cho qua)
+   - phase Distribution/Markdown → BUY-B
+   - `rs < -2` và có data → BUY-B
+6. **market_regime**: skip BUY khi VNI bear; skip SELL khi VNI bull
+
+⚠️ **wmt gate dùng `== -1` không phải `<= 0`**: wmt=0 (no weekly data) vẫn cho BUY-A; dùng `<= 0` sẽ block toàn bộ BUY-A trong Streamlit vì nhiều mã thiếu weekly data.
+
+### HOLD win threshold (scale theo forward_days)
+```python
+hold_threshold = max(2.0, 2.0 * forward_days / 5)
+# T+5: ±2% | T+10: ±4% | T+20: ±8%
+```
+
+### market_regime.py — 3 nguồn fallback
+1. Amibroker local (5 tên file: VNI.csv, VNINDEX.csv, ^VNINDEX.csv, VNIDX.csv, VN-INDEX.csv)
+2. Cache `data/vni_cache.csv` (TTL 24h)
+3. vnstock API: `from vnstock import Quote` → `Quote("VNINDEX","VCI").history(...)`
+⚠️ Dùng `Quote`, KHÔNG dùng `Stock` hay `Vnstock()` (UnicodeEncodeError banner)
 
 ### Classify Risk — đa chiều (indicators.py)
 ```

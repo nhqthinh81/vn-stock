@@ -83,6 +83,14 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["dist_ema34_pct"] = (close - df["ema34"]) / df["ema34"] * 100
     df["log_return"] = np.log(close / close.shift(1))
 
+    # MACD cross freshness — số bars kể từ khi histogram đổi dấu lần gần nhất
+    # Bar 1 = ngay sau cross, bar 999 = chưa có cross hoặc đã rất lâu
+    _sign = np.sign(df["macd_hist"].fillna(0))
+    _changed = (_sign != _sign.shift(1)).astype(int)
+    _changed.iloc[0] = 1   # bar đầu tiên luôn coi là "cross mới" (không có prev)
+    _group = _changed.cumsum()
+    df["macd_bars_since_cross"] = _group.groupby(_group).cumcount() + 1
+
     # ATR-based volatility (Wilder 1978) — yêu cầu cột high/low
     if {"high", "low"}.issubset(df.columns):
         df["atr"] = calc_atr(df)
@@ -133,7 +141,42 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Price trend 20d: % thay đổi close so với 20 phiên trước
     df["price_trend_20d"] = close.pct_change(20) * 100
 
+    # RS 14d vs VNI — tính trong add_all_indicators nếu có cột vni_ret_14d được inject từ ngoài
+    # (screener/backtester inject cột này trước khi gọi add_all_indicators)
+    if "vni_ret_14d" in df.columns:
+        stock_ret_14d  = close.pct_change(14) * 100
+        df["rs_14d"] = stock_ret_14d - df["vni_ret_14d"]
+    else:
+        df["rs_14d"] = np.nan
+
+    # Multi-timeframe: weekly MACD trend (Elder Triple Screen)
+    df["weekly_macd_trend"] = _calc_weekly_macd_trend(df)
+
     return df
+
+
+def _calc_weekly_macd_trend(df: pd.DataFrame) -> pd.Series:
+    """Resample daily → weekly, tính MACD histogram, map ngược về daily.
+
+    Returns Series index=df.index, values: +1 (weekly uptrend) / -1 (downtrend) / 0 (unknown).
+    Elder Triple Screen: chỉ mua khi weekly MACD histogram > 0.
+    """
+    if "Date" not in df.columns or len(df) < 40:
+        return pd.Series(0, index=df.index, dtype=int)
+    try:
+        tmp = df.set_index("Date")[["close"]].copy()
+        weekly_close = tmp["close"].resample("W").last().dropna()
+        if len(weekly_close) < 35:
+            return pd.Series(0, index=df.index, dtype=int)
+        _, _, w_hist = calc_macd(weekly_close)
+        # Map weekly signal về daily index bằng forward-fill (mỗi tuần đổi tín hiệu 1 lần)
+        w_daily = w_hist.reindex(tmp.index, method="ffill").fillna(0)
+        result = pd.Series(0, index=df.index, dtype=int)
+        # Align theo positional index (df có thể đã reset_index)
+        result.values[:] = np.where(w_daily.values > 0, 1, np.where(w_daily.values < 0, -1, 0))
+        return result
+    except Exception:
+        return pd.Series(0, index=df.index, dtype=int)
 
 
 # ── Phân loại tín hiệu ───────────────────────────────────────────────────────
@@ -142,16 +185,23 @@ def calculate_tech_score(
     rsi: float,
     macd_hist: float,
     dist_ema_pct: float,
-    ma_aligned: int = 0,        # -2/-1/0/+1/+2 từ MA alignment (xem add_all_indicators)
+    ma_aligned: int = 0,
     volume_ratio: float = float("nan"),
+    macd_bars_since_cross: int = 999,
+    phase: str = "Neutral",          # Wyckoff phase → bonus/penalty
+    weekly_macd_trend: int = 0,      # Elder Triple Screen: +1/-1/0
+    rs_pct: float = float("nan"),    # Relative Strength vs VNI 14d (O'Neil CANSLIM)
 ) -> float:
-    """Tính tech_score 0–100 từ 4 chiều độc lập.
+    """Tính tech_score 0–100 từ 7 chiều độc lập (rebalanced v2 cho VN market).
 
     Chiều 1 — Momentum/overbought (RSI Wilder): ±15 điểm
-    Chiều 2 — Trend direction (MACD sign): ±12 điểm
-    Chiều 3 — Trend structure (MA alignment): ±13 điểm  ← mới
-    Chiều 4 — Mean reversion position (Dist EMA34): ±10 điểm
-    Bonus    — Volume confirmation: ±5 điểm            ← mới
+    Chiều 2 — MACD freshness-adjusted: ±15/10/5 tùy cross mới/cũ
+    Chiều 3 — Trend structure (MA alignment): ±16 điểm  ← tăng từ ±13 (dự báo tốt nhất VN)
+    Chiều 4 — Mean reversion position (Dist EMA34): ±8 điểm  ← giảm từ ±10
+    Bonus 1  — Volume confirmation (Granville): ±5 điểm
+    Bonus 2  — Wyckoff Phase: Accumulation/Markup +6/+4, Distribution/Markdown -8/-6
+    Bonus 3  — Elder Weekly MACD (Triple Screen): ±8 điểm  ← tăng từ ±6
+    Bonus 4  — Relative Strength vs VNI 14d (O'Neil): ±8 điểm  ← tăng từ ±6
     """
     score = 50.0
 
@@ -164,56 +214,101 @@ def calculate_tech_score(
         # Tuyến tính trong vùng 30–70; trung tính tại RSI=50
         score += (50 - rsi) * 15 / 20
 
-    # ── Chiều 2: MACD — momentum direction (±12) ─────────────────────────────
-    # Chỉ dùng dấu, không dùng magnitude (histogram unit không chuẩn hóa)
+    # ── Chiều 2: MACD freshness-adjusted (±15/10/5) ──────────────────────────
+    # Cross mới (1-3 bars) = signal khởi đầu mạnh nhất
+    # Cross cũ (>10 bars)  = momentum đã tích hợp nhiều, predictive power giảm
     if macd_hist > 0:
-        score += 12
+        if macd_bars_since_cross <= 3:    score += 15   # fresh cross
+        elif macd_bars_since_cross <= 10: score += 10   # còn tươi
+        else:                             score += 5    # cũ — giảm weight
     elif macd_hist < 0:
-        score -= 12
+        if macd_bars_since_cross <= 3:    score -= 15
+        elif macd_bars_since_cross <= 10: score -= 10
+        else:                             score -= 5
 
-    # ── Chiều 3: MA Alignment — trend structure (±13) ─────────────────────────
-    # ma_aligned được tính bên ngoài từ SMA20 vs SMA50 vs close:
+    # ── Chiều 3: MA Alignment — trend structure (±16) ─────────────────────────
+    # Tăng từ ±13 → ±16: VN backtest cho thấy MA structure là yếu tố dự báo mạnh nhất
+    # cho medium-term return; stocks in bull structure consistently outperform
     #  +2: close>SMA20>SMA50 (bull aligned, uptrend rõ)
     #  +1: SMA20>SMA50 nhưng close<SMA20 (uptrend nhưng pullback)
     #   0: SMA20 ≈ SMA50 (sideways)
     #  -1: SMA20<SMA50 nhưng close>SMA20 (downtrend, bounce nhỏ)
     #  -2: close<SMA20<SMA50 (bear aligned, downtrend rõ)
-    score += ma_aligned * 6.5   # ±2 × 6.5 = ±13
+    score += ma_aligned * 8.0   # ±2 × 8.0 = ±16
 
-    # ── Chiều 4: Dist EMA34 — mean reversion position (±10) ──────────────────
-    # Pullback vào EMA34 (−5% đến −15%) là cơ hội tốt nhất
-    # Quá xa EMA34 theo cả 2 chiều đều rủi ro hơn
+    # ── Chiều 4: Dist EMA34 — mean reversion position (±8) ───────────────────
+    # Giảm từ ±10 → ±8: pullback EMA34 ít dự báo hơn MA structure trong VN
     if -15 <= dist_ema_pct < -5:
-        score += 10   # pullback lý tưởng
+        score += 8    # pullback lý tưởng
     elif -5 <= dist_ema_pct <= 5:
-        score += 3    # sát EMA34, trung tính
+        score += 2    # sát EMA34, trung tính
     elif dist_ema_pct < -15:
-        score -= 10   # downtrend sâu
+        score -= 8    # downtrend sâu
     elif dist_ema_pct > 15:
-        score -= 10   # overextended cao
+        score -= 8    # overextended cao
     elif dist_ema_pct > 5:
-        score -= 3    # xa EMA34 nhẹ
+        score -= 2    # xa EMA34 nhẹ
 
-    # ── Bonus: Volume confirmation (±5) ───────────────────────────────────────
+    # ── Bonus 1: Volume confirmation (±5) ─────────────────────────────────────
     if not math.isnan(volume_ratio):
         if volume_ratio >= 1.5:
-            score += 5    # volume đột biến xác nhận move
+            score += 5
         elif volume_ratio < 0.6:
-            score -= 5    # volume cạn — move thiếu lực
+            score -= 5
+
+    # ── Bonus 2: Wyckoff Phase (±6/±8) ────────────────────────────────────────
+    _PHASE_BONUS = {
+        "Accumulation": 6,
+        "Markup":        4,
+        "Neutral":       0,
+        "Distribution": -8,
+        "Markdown":     -6,
+    }
+    score += _PHASE_BONUS.get(phase, 0)
+
+    # ── Bonus 3: Elder Triple Screen — Weekly MACD (±8) ───────────────────────
+    # Tăng từ ±6 → ±8: weekly trend alignment là bộ lọc quan trọng trong VN
+    score += weekly_macd_trend * 8
+
+    # ── Bonus 4: Relative Strength vs VNI 14d (O'Neil CANSLIM) (±8) ──────────
+    # Tăng từ ±6 → ±8: RS outperformance trong VN là leading indicator đáng tin
+    if not math.isnan(rs_pct):
+        if rs_pct > 5:     score += 8    # outperform mạnh
+        elif rs_pct > 0:   score += 4    # outperform nhẹ
+        elif rs_pct > -5:  score -= 4    # underperform nhẹ
+        else:              score -= 8    # underperform mạnh
 
     return max(0.0, min(100.0, score))
 
 
-def classify_signal(tech_score: float) -> str:
+def classify_signal(
+    tech_score: float,
+    volume_ratio: float = float("nan"),
+    rsi: float = float("nan"),
+) -> str:
+    """Volume Gate VN-adjusted + RSI Gate cho SELL:
+    - BUY-A bị hạ khi volume_ratio > 4.0 (FOMO cực đoan); 2-4x là breakout thật trong VN
+    - Không hạ khi volume thấp — tích lũy lặng lẽ trong VN là dấu hiệu tốt
+    - SELL-A bị hạ khi volume_ratio < 0.5 (thiếu lực bán — SELL tín hiệu yếu)
+    - SELL-A bị hạ khi RSI < 40 — cổ phiếu gần oversold ở VN thường bounce mạnh,
+      không nên SELL-A (risk bắt đáy sai chiều); chỉ SELL-A khi RSI ≥ 40 (phân phối thật)
+    """
     if tech_score >= SCORE_BUY_A:
+        if not math.isnan(volume_ratio) and volume_ratio > 4.0:
+            return "BUY-B"   # volume >4x trong VN = FOMO retail cuối đợt; 2-4x vẫn là breakout
         return "BUY-A"
     elif tech_score >= SCORE_BUY_B:
         return "BUY-B"
     elif tech_score >= SCORE_SELL_B:
         return "HOLD"
     elif tech_score >= SCORE_SELL_A:
+        if not math.isnan(volume_ratio) and volume_ratio < 0.5:
+            return "HOLD"    # SELL signal thiếu volume = chưa có lực bán thực sự
         return "SELL-B"
     else:
+        # SELL-A: chỉ khi RSI không quá thấp (tránh nhầm oversold bounce với downtrend thật)
+        if not math.isnan(rsi) and rsi < 40:
+            return "SELL-B"  # RSI gần oversold → VN market bounce → không SELL-A
         return "SELL-A"
 
 
@@ -1212,7 +1307,7 @@ def _safe_float(val) -> float:
         return float("nan")
 
 
-def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan")) -> dict:
+def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan"), rs_pct: float = float("nan")) -> dict:
     """Trả dict tín hiệu mới nhất từ DataFrame đã có indicators."""
     last = df.dropna(subset=["rsi", "macd_hist", "dist_ema34_pct"]).iloc[-1]
     rsi       = float(last["rsi"])
@@ -1228,11 +1323,39 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan")) -> dict
     price_trend_20d = _safe_float(last.get("price_trend_20d"))
     if math.isnan(price_trend_20d):
         price_trend_20d = 0.0
+    macd_bsc          = int(last.get("macd_bars_since_cross", 999) or 999)
+    weekly_macd_trend = int(last.get("weekly_macd_trend", 0) or 0)
+    rs_14d            = _safe_float(last.get("rs_14d"))
+    # rs_pct: ưu tiên giá trị inject từ ngoài (scan_ami_symbol tính so VNI thực),
+    # fallback về rs_14d từ cột trong df (nếu đã inject vni_ret_14d trước add_all_indicators)
+    _rs = rs_pct if not math.isnan(rs_pct) else rs_14d
 
-    tech_score = calculate_tech_score(rsi, macd_hist, dist_ema, ma_aligned, volume_ratio)
-    signal     = classify_signal(tech_score)
-    risk       = classify_risk(tech_score, dist_ema, atr_pct, bb_width_pct, volume_ratio)
-    phase      = classify_phase(rsi, dist_ema, price_trend_20d, ma_aligned)
+    # Phase phải tính TRƯỚC tech_score vì là input của nó
+    phase = classify_phase(rsi, dist_ema, price_trend_20d, ma_aligned)
+
+    tech_score = calculate_tech_score(
+        rsi, macd_hist, dist_ema, ma_aligned, volume_ratio,
+        macd_bsc, phase, weekly_macd_trend, _rs,
+    )
+    signal = classify_signal(tech_score, volume_ratio, rsi)
+
+    # BUY-A gate — nhất quán với backtester (v4):
+    # ma_al==2: full bull structure (close>SMA20>SMA50)
+    # RSI<65: chưa overbought
+    # weekly_macd_trend>=0: không weekly bearish
+    # price_trend_20d>0: momentum dương
+    # phase not Distribution/Markdown: Wyckoff phase tốt
+    # macd_hist>0: daily MACD xác nhận
+    if signal == "BUY-A":
+        rsi_ok   = rsi < 65
+        wmt_ok   = weekly_macd_trend >= 0
+        t20_ok   = price_trend_20d > 0
+        phase_ok = phase not in ("Distribution", "Markdown")
+        macd_ok  = macd_hist > 0
+        if ma_aligned < 2 or not rsi_ok or not wmt_ok or not t20_ok or not phase_ok or not macd_ok:
+            signal = "BUY-B"
+
+    risk   = classify_risk(tech_score, dist_ema, atr_pct, bb_width_pct, volume_ratio)
 
     # Xu hướng 3–5 phiên: MACD histogram tăng liên tiếp (Granville momentum)
     _mh = df.dropna(subset=["macd_hist"])["macd_hist"]
@@ -1287,8 +1410,10 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan")) -> dict
         "candle_timeframe":  candle_tf,   # 'daily' | 'weekly' | 'none'
         "chart_patterns":    _fmt_patterns(chart_patterns),
         "reason":            reason,
-        "macd_rising":       macd_rising,
+        "macd_rising":         macd_rising,
         "price_above_sma5_3d": price_above_sma5_3d,
+        "weekly_macd_trend":   weekly_macd_trend,   # +1 weekly up / -1 down / 0 unknown
+        "rs_14d":              round(_rs, 2) if not math.isnan(_rs) else None,
         "reversal_type":     reversal["reversal_type"],
         "reversal_strength": reversal["reversal_strength"],
         "reversal_signals":  reversal["reversal_signals"],

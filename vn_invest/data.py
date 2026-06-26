@@ -250,6 +250,92 @@ def get_price_board(symbols: list[str], source: str = DEFAULT_SOURCE) -> pd.Data
     return t.price_board(symbols_list=symbols)
 
 
+def get_market_breadth(symbols: list[str]) -> dict:
+    """Tính độ rộng thị trường: advance/decline/unchanged/ceiling/floor per exchange.
+
+    Dùng price_board (KBS) — 1 API call cho toàn bộ symbols.
+    Returns:
+      {
+        "HOSE": {"advance": N, "decline": N, "unchanged": N, "ceiling": N, "floor": N, "total": N,
+                 "net_foreign": N},
+        "HNX":  {...},
+        "UPCOM": {...},
+        "ALL":  {...},
+        "signal_dist": {"BUY-A": N, "BUY-B": N, "HOLD": N, "SELL-B": N, "SELL-A": N},
+      }
+    """
+    import math as _math
+    try:
+        from vnstock import Trading
+        t = Trading(source="KBS", symbol=symbols[0])
+        board = t.price_board(symbols_list=symbols)
+    except Exception:
+        return {}
+
+    if board is None or board.empty:
+        return {}
+
+    board.columns = [c.lower() for c in board.columns]
+
+    _EX_MAP = {"HOSE": "HOSE", "HNX": "HNX", "UPCOM": "UPCOM",
+               "HSX": "HOSE", "hnx": "HNX", "upcom": "UPCOM"}
+
+    def _f(v):
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return None if _math.isnan(f) else f
+        except Exception:
+            return None
+
+    result: dict[str, dict] = {}
+
+    for _, row in board.iterrows():
+        ex_raw = str(row.get("exchange", "")).strip().upper()
+        ex = _EX_MAP.get(ex_raw, ex_raw) or "OTHER"
+        if ex not in ("HOSE", "HNX", "UPCOM"):
+            ex = "OTHER"
+
+        close = _f(row.get("close_price"))
+        ref   = _f(row.get("reference_price"))
+        ceil_ = _f(row.get("ceiling_price"))
+        floor_= _f(row.get("floor_price"))
+        fb    = _f(row.get("foreign_buy_volume")) or 0.0
+        fs    = _f(row.get("foreign_sell_volume")) or 0.0
+
+        if ex not in result:
+            result[ex] = {"advance": 0, "decline": 0, "unchanged": 0,
+                          "ceiling": 0, "floor": 0, "total": 0, "net_foreign": 0.0}
+        b = result[ex]
+        b["total"] += 1
+        b["net_foreign"] += fb - fs
+
+        if close is not None and ref is not None and ref > 0:
+            if ceil_ is not None and abs(close - ceil_) < 0.001:
+                b["ceiling"] += 1
+                b["advance"] += 1
+            elif floor_ is not None and abs(close - floor_) < 0.001:
+                b["floor"] += 1
+                b["decline"] += 1
+            elif close > ref:
+                b["advance"] += 1
+            elif close < ref:
+                b["decline"] += 1
+            else:
+                b["unchanged"] += 1
+
+    # ALL aggregation
+    all_b: dict = {"advance": 0, "decline": 0, "unchanged": 0,
+                   "ceiling": 0, "floor": 0, "total": 0, "net_foreign": 0.0}
+    for ex_data in result.values():
+        for k in all_b:
+            all_b[k] += ex_data[k]
+    result["ALL"] = all_b
+
+    return result
+
+
 def get_company_overview(symbol: str, source: str = DEFAULT_SOURCE) -> dict:
     """Lấy thông tin tổng quan công ty."""
     try:
@@ -852,3 +938,67 @@ def get_capital_history(symbol: str, source: str = "VCI") -> list[dict]:
         return results[:20]
     except Exception:
         return []
+
+
+def get_foreign_net_buy(symbol: str, days: int = 30, source: str = "VCI") -> dict:
+    """
+    Lấy dữ liệu mua/bán khối ngoại phiên hiện tại từ price_board (KBS).
+
+    vnstock 4.x không implement foreign_trade cho VCI/KBS.
+    Dùng price_board trả foreign_buy_volume, foreign_sell_volume, foreign_room.
+
+    Returns:
+        {
+            "net_buy_vol": float,
+            "buy_vol":     float,
+            "sell_vol":    float,
+            "foreign_room": float,   # room còn lại (CP)
+            "net_buy_val": float,    # ước tính = net_vol * close_price
+        }
+    Trả dict rỗng nếu không lấy được dữ liệu.
+    """
+    try:
+        from vnstock import Trading
+        t   = Trading(source="KBS", symbol="VNI")
+        board = t.price_board(symbols_list=[symbol])
+
+        if board is None or board.empty:
+            return {}
+
+        board.columns = [c.lower() for c in board.columns]
+        row = board[board["symbol"].str.upper() == symbol.upper()]
+        if row.empty:
+            return {}
+        row = row.iloc[0]
+
+        def _f(col):
+            v = row.get(col)
+            if v is None:
+                return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        buy_vol  = _f("foreign_buy_volume")
+        sell_vol = _f("foreign_sell_volume")
+        room     = _f("foreign_room")
+        close    = _f("close_price")
+        net_vol  = buy_vol - sell_vol
+        net_val  = net_vol * close if close else 0.0
+
+        if buy_vol == 0 and sell_vol == 0:
+            return {}
+
+        return {
+            "net_buy_vol":  round(net_vol, 0),
+            "net_buy_val":  round(net_val, 0),
+            "buy_vol":      round(buy_vol, 0),
+            "sell_vol":     round(sell_vol, 0),
+            "foreign_room": round(room, 0),
+            "session_only": True,   # đánh dấu chỉ có data phiên hiện tại
+        }
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).warning(f"get_foreign_net_buy({symbol}): {_e}")
+        return {}

@@ -1,0 +1,50 @@
+[
+  {
+    "symbol": "TNG",
+    "quantity": 1000,
+    "avg_price": 19100.0,
+    "sector": "SX Hàng gia dụng"
+  },
+  {
+    "symbol": "VCS",
+    "quantity": 1000,
+    "avg_price": 38500.0,
+    "sector": "Vật liệu xây dựng"
+  },
+  {
+    "symbol": "HPG",
+    "quantity": 1000,
+    "avg_price": 25000.0,
+    "sector": "Vật liệu xây dựng"
+  },
+  {
+    "symbol": "PTB",
+    "quantity": 1000,
+    "avg_price": 36500.0,
+    "sector": "SX Phụ trợ"
+  },
+  {
+    "symbol": "CTD",
+    "quantity": 1000,
+    "avg_price": 73500.0,
+    "sector": "Xây dựng"
+  },
+  {
+    "symbol": "HBC",
+    "quantity": 1000,
+    "avg_price": 5000.0,
+    "sector": "Chưa phân loại"
+  },
+  {
+    "symbol": "DBC",
+    "quantity": 1000,
+    "avg_price": 18900.0,
+    "sector": "Thực phẩm - Đồ uống"
+  },
+  {
+    "symbol": "HCM",
+    "quantity": 1000,
+    "avg_price": 28000.0,
+    "sector": "Chứng khoán"
+  }
+]

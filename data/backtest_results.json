@@ -1,0 +1,57 @@
+{
+  "summary": {
+    "BUY-A": {
+      "count": 198,
+      "win_rate": 69.2,
+      "avg_return": 9.87,
+      "median_return": 6.06,
+      "std_return": 21.46
+    },
+    "BUY-B": {
+      "count": 2307,
+      "win_rate": 61.2,
+      "avg_return": 7.92,
+      "median_return": 4.52,
+      "std_return": 24.31
+    },
+    "HOLD": {
+      "count": 2949,
+      "win_rate": 40.2,
+      "avg_return": 7.88,
+      "median_return": 3.4,
+      "std_return": 25.36
+    },
+    "SELL-B": {
+      "count": 104,
+      "win_rate": 50.0,
+      "avg_return": 5.93,
+      "median_return": -0.04,
+      "std_return": 30.58
+    },
+    "SELL-A": {
+      "count": 10,
+      "win_rate": 20.0,
+      "avg_return": 16.41,
+      "median_return": 17.76,
+      "std_return": 20.79
+    }
+  },
+  "forward_days": 20,
+  "symbols_scanned": 200,
+  "total_signals": 5568,
+  "market_avg_return": 7.95,
+  "buy_a_alpha": 1.92,
+  "signal_edge": -6.54,
+  "computed_at": "2026-06-21 20:31:44",
+  "filters_applied": [
+    "signal_persistence_2d",
+    "macd_freshness",
+    "volume_gate_vn_adjusted(>4x)",
+    "atr_filter(<5%)",
+    "buya_gate(ma_al==2+rsi<65+wmt>=0+t20>0+phase)",
+    "phase_bonus",
+    "weekly_macd(w=±8)",
+    "rs_vs_vni(w=±8)",
+    "market_regime"
+  ]
+}
