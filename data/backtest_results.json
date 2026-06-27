@@ -1,48 +1,49 @@
 {
   "summary": {
     "BUY-A": {
-      "count": 198,
-      "win_rate": 69.2,
-      "avg_return": 9.87,
-      "median_return": 6.06,
-      "std_return": 21.46
+      "count": 52,
+      "win_rate": 57.7,
+      "avg_return": 3.7,
+      "median_return": 1.36,
+      "std_return": 9.72
     },
     "BUY-B": {
-      "count": 2307,
-      "win_rate": 61.2,
-      "avg_return": 7.92,
-      "median_return": 4.52,
-      "std_return": 24.31
+      "count": 272,
+      "win_rate": 63.2,
+      "avg_return": 4.87,
+      "median_return": 3.96,
+      "std_return": 13.64
     },
     "HOLD": {
-      "count": 2949,
-      "win_rate": 40.2,
-      "avg_return": 7.88,
-      "median_return": 3.4,
-      "std_return": 25.36
+      "count": 268,
+      "win_rate": 47.0,
+      "avg_return": 4.55,
+      "median_return": 1.97,
+      "std_return": 13.1
     },
     "SELL-B": {
-      "count": 104,
-      "win_rate": 50.0,
-      "avg_return": 5.93,
-      "median_return": -0.04,
-      "std_return": 30.58
+      "count": 25,
+      "win_rate": 68.0,
+      "avg_return": -1.21,
+      "median_return": -1.98,
+      "std_return": 13.85
     },
     "SELL-A": {
-      "count": 10,
-      "win_rate": 20.0,
-      "avg_return": 16.41,
-      "median_return": 17.76,
-      "std_return": 20.79
+      "count": 2,
+      "win_rate": 100.0,
+      "avg_return": -8.35,
+      "median_return": -8.35,
+      "std_return": 4.99
     }
   },
-  "forward_days": 20,
-  "symbols_scanned": 200,
-  "total_signals": 5568,
-  "market_avg_return": 7.95,
-  "buy_a_alpha": 1.92,
-  "signal_edge": -6.54,
-  "computed_at": "2026-06-21 20:31:44",
+  "forward_days": 10,
+  "symbols_scanned": 30,
+  "total_signals": 619,
+  "market_avg_return": 4.34,
+  "buy_a_alpha": -0.64,
+  "signal_edge": 12.05,
+  "exit_strategy": "hold_fixed",
+  "computed_at": "2026-06-27 07:55:27",
   "filters_applied": [
     "signal_persistence_2d",
     "macd_freshness",

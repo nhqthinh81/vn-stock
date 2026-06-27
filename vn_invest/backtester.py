@@ -34,12 +34,36 @@ def _parse_ami_date(date_val) -> str:
     return f"20{s[2:4]}-{s[4:6]}-{s[6:8]}"
 
 
+def simulate_exit(
+    close_arr: "np.ndarray",
+    entry_idx: int,
+    max_bars: int,
+    trail_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
+) -> float:
+    """Simulate exit với trailing stop và/hoặc take-profit. Trả forward return %."""
+    n = len(close_arr)
+    entry = close_arr[entry_idx]
+    peak  = entry
+    for j in range(entry_idx + 1, min(entry_idx + max_bars + 1, n)):
+        cur = close_arr[j]
+        if cur > peak:
+            peak = cur
+        if tp_pct is not None and (cur - entry) / entry >= tp_pct:
+            return (cur - entry) / entry * 100
+        if trail_pct is not None and peak > entry and (peak - cur) / peak >= trail_pct:
+            return (cur - entry) / entry * 100
+    return (close_arr[min(entry_idx + max_bars, n - 1)] - entry) / entry * 100
+
+
 def backtest_symbol(
     symbol: str,
     forward_days: int = 10,
     min_history: int = 80,
     regime_series: "pd.Series | None" = None,
     vni_ret_series: "pd.Series | None" = None,
+    trail_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
 ) -> list[dict]:
     """
     Trả list records: [{"signal": "BUY-A", "fwd_return": 3.5}, ...]
@@ -160,10 +184,14 @@ def backtest_symbol(
                 signal = "BUY-B"
 
         c0 = close_arr[i]
-        cf = close_arr[i + forward_days]
         if c0 <= 0:
             continue
-        fwd = (cf - c0) / c0 * 100
+        # Dùng simulate_exit nếu có trailing stop hoặc TP, ngược lại hold cứng
+        if trail_pct is not None or tp_pct is not None:
+            fwd = simulate_exit(close_arr, i, forward_days, trail_pct=trail_pct, tp_pct=tp_pct)
+        else:
+            cf  = close_arr[i + forward_days]
+            fwd = (cf - c0) / c0 * 100
         records.append({"signal": signal, "fwd_return": round(fwd, 3)})
 
     return records
@@ -174,6 +202,8 @@ def run_backtest(
     forward_days: int = 10,
     max_symbols: int = 200,
     progress_callback=None,
+    trail_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
 ) -> dict:
     """
     Chạy backtest trên danh sách mã (mặc định: toàn bộ history_by_ticker).
@@ -206,6 +236,8 @@ def run_backtest(
             sym, forward_days=forward_days,
             regime_series=regime_series,
             vni_ret_series=vni_ret_series,
+            trail_pct=trail_pct,
+            tp_pct=tp_pct,
         )
         all_records.extend(recs)
 
@@ -258,6 +290,8 @@ def run_backtest(
         "market_avg_return": market_avg,   # avg return khi mua bừa bất kỳ mã
         "buy_a_alpha":     alpha,          # BUY-A avg - market_avg: alpha thực sự (metric chính VN)
         "signal_edge":     edge,           # BUY-A - SELL-A: reference (thường âm trong VN)
+        "exit_strategy":   (f"trail{int(trail_pct*100)}pct" if trail_pct else "") +
+                           (f"+tp{int(tp_pct*100)}pct" if tp_pct else "") or "hold_fixed",
         "computed_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "filters_applied": [
             "signal_persistence_2d",
