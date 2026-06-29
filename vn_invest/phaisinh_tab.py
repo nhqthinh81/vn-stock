@@ -458,6 +458,73 @@ def _get_stop_levels(df_1m: pd.DataFrame) -> dict:
         return empty
 
 
+def _calc_tp(df_1m: pd.DataFrame, signal: str, entry: float, sl: float | None,
+             lookback: int = 80, swing_n: int = 3,
+             rr_fallback: float = 1.5) -> tuple[float | None, str]:
+    """Tính TP từ swing high/low gần nhất; fallback R:R nếu không tìm được.
+
+    Thuật toán:
+    1. Lấy `lookback` nến gần nhất (không tính nến cuối đang hình thành).
+    2. Xác định swing high/low: bar i là swing high khi High[i] > High[i±k]
+       với k = 1..swing_n (ít nhất swing_n nến mỗi bên phải thấp hơn).
+    3. LONG → lấy swing high nhỏ nhất *trên* entry (gần nhất, dễ đạt nhất).
+       SHORT → lấy swing low lớn nhất *dưới* entry.
+    4. Nếu không tìm thấy swing rõ → fallback R:R 1.5×SL_distance.
+
+    Trả về: (tp_price, method_label)
+    """
+    if df_1m is None or len(df_1m) < lookback + swing_n + 2:
+        return None, "—"
+
+    # Lấy nến lịch sử, bỏ nến cuối (đang chạy)
+    bars = df_1m.tail(lookback + swing_n + 2).iloc[:-1]
+    highs = bars["High"].values
+    lows  = bars["Low"].values
+    n     = len(highs)
+
+    # Phát hiện swing points
+    swing_highs = []
+    swing_lows  = []
+    for i in range(swing_n, n - swing_n):
+        # swing high: high[i] cao hơn swing_n nến hai bên
+        if all(highs[i] > highs[i - k] for k in range(1, swing_n + 1)) and \
+           all(highs[i] > highs[i + k] for k in range(1, swing_n + 1)):
+            swing_highs.append(float(highs[i]))
+        # swing low: low[i] thấp hơn swing_n nến hai bên
+        if all(lows[i] < lows[i - k] for k in range(1, swing_n + 1)) and \
+           all(lows[i] < lows[i + k] for k in range(1, swing_n + 1)):
+            swing_lows.append(float(lows[i]))
+
+    tp: float | None = None
+    method = ""
+
+    if signal == "LONG":
+        # Lấy swing high nhỏ nhất phía trên entry (gần nhất, dễ đạt nhất)
+        candidates = [h for h in swing_highs if h > entry + 0.5]
+        if candidates:
+            tp = round(min(candidates), 1)
+            method = f"Swing High {tp:.1f}"
+    else:  # SHORT
+        # Lấy swing low lớn nhất phía dưới entry (gần nhất)
+        candidates = [l for l in swing_lows if l < entry - 0.5]
+        if candidates:
+            tp = round(max(candidates), 1)
+            method = f"Swing Low {tp:.1f}"
+
+    # Fallback R:R nếu không tìm được swing
+    if tp is None:
+        if sl is not None:
+            risk = abs(entry - sl)
+            if risk > 0:
+                tp = round(entry + risk * rr_fallback if signal == "LONG"
+                           else entry - risk * rr_fallback, 1)
+                method = f"R:R {rr_fallback}×"
+        if tp is None:
+            return None, "—"
+
+    return tp, method
+
+
 # ── Telegram / journal ────────────────────────────────────────────────────────
 
 def _send_telegram(msg: str):
@@ -943,19 +1010,17 @@ def _live_panel_body():
                 # Gửi Telegram khi có tín hiệu (chỉ thông báo, không tự vào lệnh)
                 if ai_signal != "WAIT":
                     sl_ref  = st.session_state["ps_stop_levels"]
-                    tp_pts  = st.session_state.get("ps_tp_pts", _DEFAULT_TP_PTS)
                     icon    = "🚀" if ai_signal == "LONG" else "🔻"
                     if ai_signal == "LONG":
                         sl_price   = sl_ref.get("buy_stop_sl")
                         stop_price = sl_ref.get("buy_stop_price")
-                        tp_price   = round(current_price + tp_pts, 1) if tp_pts else None
                     else:
                         sl_price   = sl_ref.get("sell_stop_sl")
                         stop_price = sl_ref.get("sell_stop_price")
-                        tp_price   = round(current_price - tp_pts, 1) if tp_pts else None
+                    tp_price, tp_method = _calc_tp(df_1m, ai_signal, current_price, sl_price)
                     stop_line = f"📌 Stop lệnh: {stop_price:.1f}\n" if stop_price else ""
                     sl_line   = f"🛡️ SL: {sl_price:.1f}\n"  if sl_price else ""
-                    tp_line   = f"🎯 TP: {tp_price:.1f}\n"  if tp_price else ""
+                    tp_line   = f"🎯 TP: {tp_price:.1f} ({tp_method})\n" if tp_price else ""
                     _send_telegram_async(
                         f"{icon} <b>#VN30F1M TÍN HIỆU {ai_signal}</b>\n"
                         f"💰 Giá hiện tại: {current_price:.1f}\n"
@@ -965,10 +1030,10 @@ def _live_panel_body():
                         f"⚠️ Chỉ tham khảo — tự quyết định vào lệnh"
                     )
                     log_entry = {
-                        "time":   last_time, "ticker": "VN30F1M",
-                        "act":    f"TÍN HIỆU {ai_signal}", "price": current_price,
-                        "sl":     sl_price,   "tp": tp_price,
-                        "pnl":    "—",        "reason": signal_desc,
+                        "time":      last_time, "ticker": "VN30F1M",
+                        "act":       f"TÍN HIỆU {ai_signal}", "price": current_price,
+                        "sl":        sl_price, "tp": tp_price, "tp_method": tp_method,
+                        "pnl":       "—",      "reason": signal_desc,
                     }
                     st.session_state["ps_log_history"].insert(0, log_entry)
                     _append_journal(log_entry)
@@ -1202,10 +1267,12 @@ def _live_panel_body():
             pnl   = str(item["pnl"])
             p_cls = "c-pos" if pnl.startswith("+") else ("c-neg" if (pnl.startswith("-") and pnl != "—") else "")
             p_str = f"{item['price']:,.1f}" if isinstance(item["price"], (int, float)) else str(item["price"])
-            sl_v  = item.get("sl")
-            tp_v  = item.get("tp")
+            sl_v      = item.get("sl")
+            tp_v      = item.get("tp")
+            tp_method = item.get("tp_method", "")
             sl_str = f"<span style='color:#FF5252'>{sl_v:.1f}</span>" if sl_v else "—"
-            tp_str = f"<span style='color:#00E676'>{tp_v:.1f}</span>" if tp_v else "—"
+            tp_lbl = f"{tp_v:.1f}<br><span style='font-size:.75rem;color:#888'>{tp_method}</span>" if tp_v else "—"
+            tp_str = f"<span style='color:#00E676'>{tp_lbl}</span>" if tp_v else "—"
             rows += (
                 f"<tr><td>{item['time']}</td>"
                 f"<td class='{a_cls}'>{act}</td>"
