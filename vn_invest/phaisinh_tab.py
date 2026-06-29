@@ -556,6 +556,9 @@ def _append_journal(entry: dict):
         "ticker": entry["ticker"],
         "action": entry["act"],
         "price":  entry["price"],
+        "sl":     entry.get("sl", ""),
+        "tp":     entry.get("tp", ""),
+        "tp_method": entry.get("tp_method", ""),
         "pnl":    entry.get("pnl", ""),
         "reason": entry["reason"],
     }])
@@ -1320,10 +1323,43 @@ def _live_panel_body():
     if _JOURNAL_FILE and os.path.exists(_JOURNAL_FILE):
         with st.expander("📂 Lịch sử Journal (file CSV)", expanded=False):
             try:
-                df_j = pd.read_csv(_JOURNAL_FILE)
-                st.dataframe(df_j.tail(50).iloc[::-1], use_container_width=True, hide_index=True)
-            except Exception:
-                st.warning("Không đọc được file journal.")
+                df_j = pd.read_csv(_JOURNAL_FILE).tail(50).iloc[::-1].reset_index(drop=True)
+                # Render HTML để tô màu cột SL/TP/action
+                rows_j = ""
+                for _, r in df_j.iterrows():
+                    act    = str(r.get("action", ""))
+                    a_cls  = "c-long" if "LONG" in act else ("c-short" if "SHORT" in act else "c-wait")
+                    sl_v   = r.get("sl", "")
+                    tp_v   = r.get("tp", "")
+                    tp_m   = r.get("tp_method", "")
+                    pnl_v  = str(r.get("pnl", "—"))
+                    p_cls  = "c-pos" if str(pnl_v).startswith("+") else ("c-neg" if str(pnl_v).startswith("-") and pnl_v != "—" else "")
+                    try:    sl_str = f"<span style='color:#FF5252'>{float(sl_v):.1f}</span>"
+                    except: sl_str = "—"
+                    try:    tp_str = (f"<span style='color:#00E676'>{float(tp_v):.1f}"
+                                      f"<br><span style='font-size:9px;color:#666'>{tp_m}</span></span>")
+                    except: tp_str = "—"
+                    rows_j += (
+                        f"<tr>"
+                        f"<td style='font-size:11px;padding:3px 8px;color:#888'>{r.get('time','')}</td>"
+                        f"<td style='font-size:11px;padding:3px 8px' class='{a_cls}'>{act}</td>"
+                        f"<td style='font-size:11px;padding:3px 8px;color:#ccc'>{r.get('price','')}</td>"
+                        f"<td style='font-size:11px;padding:3px 8px'>{sl_str}</td>"
+                        f"<td style='font-size:11px;padding:3px 8px'>{tp_str}</td>"
+                        f"<td style='font-size:11px;padding:3px 8px' class='{p_cls}'>{pnl_v}</td>"
+                        f"<td style='font-size:10px;padding:3px 8px;color:#666'>{str(r.get('reason',''))[:70]}</td>"
+                        f"</tr>"
+                    )
+                st.markdown(
+                    f"<table class='ps-log'>"
+                    f"<tr><th>Thời gian</th><th>Tín hiệu</th><th>Giá</th>"
+                    f"<th style='color:#FF5252'>SL</th><th style='color:#00E676'>TP</th>"
+                    f"<th>PnL</th><th>Lý do</th></tr>"
+                    f"{rows_j}</table>",
+                    unsafe_allow_html=True,
+                )
+            except Exception as e:
+                st.warning(f"Không đọc được file journal: {e}")
 
     # ── Train LSTM v2 ─────────────────────────────────────────────────────────
     st.divider()
