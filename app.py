@@ -391,8 +391,8 @@ with st.sidebar:
     )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_basic, tab_tech, tab_scan, tab_port, tab_model, tab_phaisinh, tab_news = st.tabs([
-    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan",
+tab_basic, tab_tech, tab_scan, tab_fund, tab_port, tab_model, tab_phaisinh, tab_news = st.tabs([
+    "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "🏦 Lọc Cơ Bản",
     "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh", "📰 Tin Tức",
 ])
 
@@ -424,6 +424,7 @@ ctx = {
 # ── Tab routing ───────────────────────────────────────────────────────────────
 from tabs import tab_basic as _tb, tab_tech as _tt, tab_scan as _ts
 from tabs import tab_port as _tp, tab_model as _tm, tab_phaisinh as _tps, tab_news as _tn
+from tabs import tab_fundamental as _tf
 
 with tab_basic:
     _tb.render(ctx)
@@ -433,6 +434,9 @@ with tab_tech:
 
 with tab_scan:
     _ts.render(ctx)
+
+with tab_fund:
+    _tf.render(ctx)
 
 with tab_port:
     _tp.render(ctx)
