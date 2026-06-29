@@ -963,11 +963,23 @@ def _live_panel_body():
                 # Buy Stop / Sell Stop levels
                 st.session_state["ps_stop_levels"] = _get_stop_levels(df_1m)
 
-                # Audit log
+                # Audit log — tính SL/TP tại thời điểm nến để hiển thị context
+                _sl_ref = st.session_state.get("ps_stop_levels", {})
+                if rule_sig == "LONG":
+                    _audit_sl = _sl_ref.get("buy_stop_sl")
+                    _audit_tp, _audit_tp_m = _calc_tp(df_1m, "LONG", current_price, _audit_sl)
+                elif rule_sig == "SHORT":
+                    _audit_sl = _sl_ref.get("sell_stop_sl")
+                    _audit_tp, _audit_tp_m = _calc_tp(df_1m, "SHORT", current_price, _audit_sl)
+                else:
+                    _audit_sl = None
+                    _audit_tp, _audit_tp_m = None, ""
                 audit = st.session_state.setdefault("ps_signal_audit", [])
                 audit.insert(0, {
-                    "time": last_time, "price": current_price,
-                    "signal": rule_sig, "reason": rule_reason, "trend": trend,
+                    "time":      last_time,    "price":     current_price,
+                    "signal":    rule_sig,     "reason":    rule_reason,
+                    "trend":     trend,        "sl":        _audit_sl,
+                    "tp":        _audit_tp,    "tp_method": _audit_tp_m,
                 })
                 st.session_state["ps_signal_audit"] = audit[:50]
 
@@ -1080,23 +1092,34 @@ def _live_panel_body():
             _sig_colors = {"LONG": "#00E676", "SHORT": "#FF5252", "WAIT": "#555"}
             rows_html = ""
             for a in audit_log[:20]:
-                clr  = _sig_colors.get(a["signal"], "#555")
-                tdot = "↑" if a["trend"] == 1 else "↓" if a["trend"] == -1 else "→"
+                clr   = _sig_colors.get(a["signal"], "#555")
+                tdot  = "↑" if a["trend"] == 1 else "↓" if a["trend"] == -1 else "→"
+                sl_v  = a.get("sl")
+                tp_v  = a.get("tp")
+                tp_m  = a.get("tp_method", "")
+                sl_td = (f"<td style='color:#FF5252;font-size:11px;padding:2px 6px'>{sl_v:.1f}</td>"
+                         if sl_v else "<td style='color:#555;font-size:11px;padding:2px 6px'>—</td>")
+                tp_td = (f"<td style='color:#00E676;font-size:11px;padding:2px 6px'>"
+                         f"{tp_v:.1f}<br><span style='color:#666;font-size:9px'>{tp_m}</span></td>"
+                         if tp_v else "<td style='color:#555;font-size:11px;padding:2px 6px'>—</td>")
                 rows_html += (
                     f"<tr>"
                     f"<td style='color:#888;font-size:11px;padding:2px 6px'>{a['time'][-5:]}</td>"
                     f"<td style='color:#ccc;font-size:11px;padding:2px 6px'>{a['price']:,.1f}</td>"
                     f"<td style='color:{clr};font-weight:700;font-size:11px;padding:2px 6px'>{a['signal']}</td>"
-                    f"<td style='color:#888;font-size:10px;padding:2px 6px'>{tdot} {a['reason'][:80]}</td>"
+                    f"{sl_td}{tp_td}"
+                    f"<td style='color:#888;font-size:10px;padding:2px 6px'>{tdot} {a['reason'][:60]}</td>"
                     f"</tr>"
                 )
             st.markdown(
                 f"<table style='width:100%;border-collapse:collapse'>"
                 f"<thead><tr>"
-                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Giờ</th>"
-                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Giá</th>"
-                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Signal</th>"
-                f"<th style='color:#666;font-size:10px;text-align:left;padding:2px 6px'>Lý do / Score</th>"
+                f"<th style='color:#666;font-size:10px;padding:2px 6px'>Giờ</th>"
+                f"<th style='color:#666;font-size:10px;padding:2px 6px'>Giá</th>"
+                f"<th style='color:#666;font-size:10px;padding:2px 6px'>Signal</th>"
+                f"<th style='color:#FF5252;font-size:10px;padding:2px 6px'>SL</th>"
+                f"<th style='color:#00E676;font-size:10px;padding:2px 6px'>TP</th>"
+                f"<th style='color:#666;font-size:10px;padding:2px 6px'>Lý do</th>"
                 f"</tr></thead><tbody>{rows_html}</tbody></table>",
                 unsafe_allow_html=True,
             )
