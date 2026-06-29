@@ -942,28 +942,33 @@ def _live_panel_body():
 
                 # Gửi Telegram khi có tín hiệu (chỉ thông báo, không tự vào lệnh)
                 if ai_signal != "WAIT":
-                    sl_ref = st.session_state["ps_stop_levels"]
-                    icon = "🚀" if ai_signal == "LONG" else "🔻"
+                    sl_ref  = st.session_state["ps_stop_levels"]
+                    tp_pts  = st.session_state.get("ps_tp_pts", _DEFAULT_TP_PTS)
+                    icon    = "🚀" if ai_signal == "LONG" else "🔻"
                     if ai_signal == "LONG":
-                        sl_price = sl_ref.get("buy_stop_sl")
+                        sl_price   = sl_ref.get("buy_stop_sl")
                         stop_price = sl_ref.get("buy_stop_price")
+                        tp_price   = round(current_price + tp_pts, 1) if tp_pts else None
                     else:
-                        sl_price = sl_ref.get("sell_stop_sl")
+                        sl_price   = sl_ref.get("sell_stop_sl")
                         stop_price = sl_ref.get("sell_stop_price")
+                        tp_price   = round(current_price - tp_pts, 1) if tp_pts else None
                     stop_line = f"📌 Stop lệnh: {stop_price:.1f}\n" if stop_price else ""
-                    sl_line   = f"🛡️ SL: {sl_price:.1f}\n" if sl_price else ""
+                    sl_line   = f"🛡️ SL: {sl_price:.1f}\n"  if sl_price else ""
+                    tp_line   = f"🎯 TP: {tp_price:.1f}\n"  if tp_price else ""
                     _send_telegram_async(
                         f"{icon} <b>#VN30F1M TÍN HIỆU {ai_signal}</b>\n"
                         f"💰 Giá hiện tại: {current_price:.1f}\n"
-                        f"{stop_line}{sl_line}"
+                        f"{stop_line}{sl_line}{tp_line}"
                         f"⚡ {signal_desc}\n"
                         f"🧭 {trend_text}\n"
                         f"⚠️ Chỉ tham khảo — tự quyết định vào lệnh"
                     )
                     log_entry = {
-                        "time": last_time, "ticker": "VN30F1M",
-                        "act": f"TÍN HIỆU {ai_signal}", "price": current_price,
-                        "pnl": "—", "reason": signal_desc,
+                        "time":   last_time, "ticker": "VN30F1M",
+                        "act":    f"TÍN HIỆU {ai_signal}", "price": current_price,
+                        "sl":     sl_price,   "tp": tp_price,
+                        "pnl":    "—",        "reason": signal_desc,
                     }
                     st.session_state["ps_log_history"].insert(0, log_entry)
                     _append_journal(log_entry)
@@ -1197,16 +1202,24 @@ def _live_panel_body():
             pnl   = str(item["pnl"])
             p_cls = "c-pos" if pnl.startswith("+") else ("c-neg" if (pnl.startswith("-") and pnl != "—") else "")
             p_str = f"{item['price']:,.1f}" if isinstance(item["price"], (int, float)) else str(item["price"])
+            sl_v  = item.get("sl")
+            tp_v  = item.get("tp")
+            sl_str = f"<span style='color:#FF5252'>{sl_v:.1f}</span>" if sl_v else "—"
+            tp_str = f"<span style='color:#00E676'>{tp_v:.1f}</span>" if tp_v else "—"
             rows += (
                 f"<tr><td>{item['time']}</td>"
                 f"<td class='{a_cls}'>{act}</td>"
                 f"<td><b>{p_str}</b></td>"
+                f"<td>{sl_str}</td>"
+                f"<td>{tp_str}</td>"
                 f"<td class='{p_cls}'>{pnl}</td>"
-                f"<td>{item['reason']}</td></tr>"
+                f"<td style='font-size:.82rem;color:#888'>{item['reason']}</td></tr>"
             )
         st.markdown(
             f"<table class='ps-log'>"
-            f"<tr><th>Thời gian</th><th>Tín hiệu</th><th>Giá</th><th>PnL (đ)</th><th>Ghi chú</th></tr>"
+            f"<tr><th>Thời gian</th><th>Tín hiệu</th><th>Giá vào</th>"
+            f"<th style='color:#FF5252'>SL</th><th style='color:#00E676'>TP</th>"
+            f"<th>PnL (đ)</th><th>Lý do</th></tr>"
             f"{rows}</table>",
             unsafe_allow_html=True,
         )
