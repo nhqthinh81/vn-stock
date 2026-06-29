@@ -120,9 +120,10 @@ def _load_df_1m(path: str):
                 df[c] = df[c].apply(_clean_num)
         if "Date" in df.columns and "Time" in df.columns:
             df.index = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
-        df = df.dropna(subset=["Close"]).copy()
+        df = df.dropna(subset=["Close"])
         df.sort_index(inplace=True)
-        return df
+        # Chỉ giữ 25000 nến gần nhất — đủ ~66 ngày, giảm memory + tốc độ downstream
+        return df.tail(25000).copy()
     except Exception:
         return None
 
@@ -325,108 +326,99 @@ def _get_rule_signal(df_1m: pd.DataFrame, trend: int) -> tuple[str, str]:
         return "WAIT", f"Lỗi rule engine: {e}"
 
 
-def _get_trend_from_1m(df_1m: pd.DataFrame) -> tuple[int, str]:
-    """Multi-TF trend (Daily / 1H / 15m).
+def _get_trend_full(df_1m: pd.DataFrame) -> tuple[int, str, dict]:
+    """Multi-TF trend + chi tiết từng khung — một lần resample duy nhất.
 
-    Fix v2:
-    - tail(20000) thay vì 5000 → đủ ~53 ngày cho EMA20 daily
-    - Loại nến ngày chưa hoàn thành khỏi daily resample
-    - EMA20 daily cần ≥ 25 bars (25 ngày)
+    Trả về: (trend: int, trend_text: str, tf_detail: dict)
+    - trend: -1/0/1
+    - tf_detail: {"1m": {...}, "15m": {...}, "1h": {...}}
     """
+    empty_tf = {"trend": 0, "ema": None, "close": None, "label": "—"}
+    tf_detail = {"1m": empty_tf.copy(), "15m": empty_tf.copy(), "1h": empty_tf.copy()}
+
     try:
         import pandas_ta as ta  # type: ignore
     except ImportError:
-        return 0, "Thiếu pandas_ta"
+        return 0, "Thiếu pandas_ta", tf_detail
 
     if df_1m is None or len(df_1m) < 200:
-        return 0, "Không đủ dữ liệu"
+        return 0, "Không đủ dữ liệu", tf_detail
 
     agg    = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-    recent = df_1m.tail(20000).copy()   # ~53 ngày giao dịch
+    # df_1m đã bị giới hạn tail(25000) khi load → không cần tail() lại
+    recent = df_1m
 
+    # Resample một lần, dùng chung cho trend + tf_detail
     df_15 = recent.resample("15min").agg(agg).dropna()
     df_1h = recent.resample("60min").agg(agg).dropna()
     df_d  = recent.resample("1D").agg(agg).dropna()
 
-    # FIX: loại nến ngày chưa hoàn thành (hôm nay đang trong phiên)
+    # Loại nến ngày chưa hoàn thành
     today = pd.Timestamp.now().normalize()
     df_d  = df_d[df_d.index < today]
 
+    # ── tf_detail: 1m ─────────────────────────────────────────────────────────
+    _1m_df = recent.tail(200).copy()
+    _1m_df["EMA10"] = ta.ema(_1m_df["Close"], 10)
+    _1m_df.dropna(subset=["EMA10"], inplace=True)
+    if not _1m_df.empty:
+        last = _1m_df.iloc[-1]
+        t1m  = 1 if last["Close"] > last["EMA10"] else -1
+        tf_detail["1m"] = {"trend": t1m, "ema": float(last["EMA10"]),
+                            "close": float(last["Close"]),
+                            "label": "↑ Tăng" if t1m == 1 else "↓ Giảm"}
+
+    # ── tf_detail: 15m ────────────────────────────────────────────────────────
+    if not df_15.empty:
+        _15m = df_15.copy()
+        _15m["EMA10"] = ta.ema(_15m["Close"], 10)
+        _15m.dropna(subset=["EMA10"], inplace=True)
+        if not _15m.empty:
+            last = _15m.iloc[-1]
+            t15  = 1 if last["Close"] > last["EMA10"] else -1
+            tf_detail["15m"] = {"trend": t15, "ema": float(last["EMA10"]),
+                                 "close": float(last["Close"]),
+                                 "label": "↑ Tăng" if t15 == 1 else "↓ Giảm"}
+
+    # ── tf_detail: 1h ─────────────────────────────────────────────────────────
+    if not df_1h.empty:
+        _1h = df_1h.copy()
+        _1h["EMA20"] = ta.ema(_1h["Close"], 20)
+        _1h.dropna(subset=["EMA20"], inplace=True)
+        if not _1h.empty:
+            last = _1h.iloc[-1]
+            t1h  = 1 if last["Close"] > last["EMA20"] else -1
+            tf_detail["1h"] = {"trend": t1h, "ema": float(last["EMA20"]),
+                                "close": float(last["Close"]),
+                                "label": "↑ Tăng" if t1h == 1 else "↓ Giảm"}
+
+    # ── Multi-TF trend score ──────────────────────────────────────────────────
     if len(df_15) < 20 or len(df_1h) < 10 or len(df_d) < 25:
         missing = []
-        if len(df_d) < 25: missing.append(f"daily={len(df_d)}<25")
+        if len(df_d)  < 25: missing.append(f"daily={len(df_d)}<25")
         if len(df_1h) < 10: missing.append(f"1h={len(df_1h)}<10")
         if len(df_15) < 20: missing.append(f"15m={len(df_15)}<20")
-        return 0, f"Đang gom dữ liệu đa khung ({', '.join(missing)})"
+        return 0, f"Đang gom dữ liệu đa khung ({', '.join(missing)})", tf_detail
 
-    df_d["EMA20"]  = ta.ema(df_d["Close"], 20)
-    df_1h["EMA20"] = ta.ema(df_1h["Close"], 20)
-    df_15["EMA10"] = ta.ema(df_15["Close"], 10)
+    _d  = df_d.copy();  _d["EMA20"]  = ta.ema(_d["Close"], 20);  _d.dropna(subset=["EMA20"],  inplace=True)
+    _1h = df_1h.copy(); _1h["EMA20"] = ta.ema(_1h["Close"], 20); _1h.dropna(subset=["EMA20"], inplace=True)
+    _15 = df_15.copy(); _15["EMA10"] = ta.ema(_15["Close"], 10); _15.dropna(subset=["EMA10"], inplace=True)
 
-    df_d.dropna(subset=["EMA20"], inplace=True)
-    df_1h.dropna(subset=["EMA20"], inplace=True)
-    df_15.dropna(subset=["EMA10"], inplace=True)
+    if not (_d.shape[0] and _1h.shape[0] and _15.shape[0]):
+        return 0, "EMA chưa đủ nến warmup", tf_detail
 
-    if not (len(df_d) and len(df_1h) and len(df_15)):
-        return 0, "EMA chưa đủ nến warmup"
+    t_d  = 1 if _d.iloc[-1]["Close"]  > _d.iloc[-1]["EMA20"]  else -1
+    t_1h = 1 if _1h.iloc[-1]["Close"] > _1h.iloc[-1]["EMA20"] else -1
+    t_15 = 1 if _15.iloc[-1]["Close"] > _15.iloc[-1]["EMA10"] else -1
+    score = t_d + t_1h + t_15
 
-    # So sánh giá đóng cửa gần nhất với MA
-    t_d  = 1 if df_d.iloc[-1]["Close"]  > df_d.iloc[-1]["EMA20"]  else -1
-    t_1h = 1 if df_1h.iloc[-1]["Close"] > df_1h.iloc[-1]["EMA20"] else -1
-    t_15 = 1 if df_15.iloc[-1]["Close"] > df_15.iloc[-1]["EMA10"] else -1
-
-    score = t_d + t_1h + t_15   # -3 .. +3
-
-    if score == 3:   return  1, "UPTREND mạnh (D/H/15p đồng pha tăng)"
-    if score == 2:   return  1, "UPTREND (D+H tăng, 15p nhiễu)"
-    if score == 1:   return  0, "Trung tính thiên tăng (D tăng, H/15p chưa đồng pha)"
-    if score == -1:  return  0, "Trung tính thiên giảm (D giảm, H/15p chưa đồng pha)"
-    if score == -2:  return -1, "DOWNTREND (D+H giảm, 15p nhiễu)"
-    if score == -3:  return -1, "DOWNTREND mạnh (D/H/15p đồng pha giảm)"
-    return 0, "Xu hướng trung tính"
-
-
-def _get_tf_detail(df_1m: pd.DataFrame) -> dict:
-    """Trả trend riêng cho 3 khung: 1m, 15m, 1h.
-
-    Mỗi khung: {"trend": 1/-1/0, "ema": float, "close": float, "label": str}
-    """
-    empty = {"trend": 0, "ema": None, "close": None, "label": "—"}
-    result = {"1m": empty.copy(), "15m": empty.copy(), "1h": empty.copy()}
-
-    try:
-        import pandas_ta as ta  # type: ignore
-    except ImportError:
-        return result
-
-    if df_1m is None or len(df_1m) < 50:
-        return result
-
-    agg    = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
-    recent = df_1m.tail(20000).copy()
-
-    def _tf_info(df: pd.DataFrame, ema_period: int, label_up: str, label_dn: str) -> dict:
-        ema_col = f"EMA{ema_period}"
-        df = df.copy()
-        df[ema_col] = ta.ema(df["Close"], ema_period)
-        df.dropna(subset=[ema_col], inplace=True)
-        if df.empty:
-            return {"trend": 0, "ema": None, "close": None, "label": "Chưa đủ data"}
-        last = df.iloc[-1]
-        t = 1 if last["Close"] > last[ema_col] else -1
-        lbl = label_up if t == 1 else label_dn
-        return {"trend": t, "ema": float(last[ema_col]), "close": float(last["Close"]), "label": lbl}
-
-    # 1m — EMA10 trên dữ liệu 1 phút gốc
-    result["1m"]  = _tf_info(recent.tail(200),                       10, "↑ Tăng", "↓ Giảm")
-    # 15m — EMA10 trên resample 15 phút
-    df_15 = recent.resample("15min").agg(agg).dropna()
-    result["15m"] = _tf_info(df_15,                                   10, "↑ Tăng", "↓ Giảm")
-    # 1h — EMA20 trên resample 1 giờ
-    df_1h = recent.resample("60min").agg(agg).dropna()
-    result["1h"]  = _tf_info(df_1h,                                   20, "↑ Tăng", "↓ Giảm")
-
-    return result
+    if score ==  3: return  1, "UPTREND mạnh (D/H/15p đồng pha tăng)", tf_detail
+    if score ==  2: return  1, "UPTREND (D+H tăng, 15p nhiễu)",        tf_detail
+    if score ==  1: return  0, "Trung tính thiên tăng",                 tf_detail
+    if score == -1: return  0, "Trung tính thiên giảm",                 tf_detail
+    if score == -2: return -1, "DOWNTREND (D+H giảm, 15p nhiễu)",      tf_detail
+    if score == -3: return -1, "DOWNTREND mạnh (D/H/15p đồng pha giảm)", tf_detail
+    return 0, "Xu hướng trung tính", tf_detail
 
 
 def _get_stop_levels(df_1m: pd.DataFrame) -> dict:
@@ -880,9 +872,9 @@ def _live_panel_body():
     # ── Cache trend (tính lại khi mtime đổi) ─────────────────────────────────
     cur_mtime_val = st.session_state["ps_last_mtime"]
     if cur_mtime_val != st.session_state["ps_trend_mtime"] and df_1m is not None:
-        trend, trend_text = _get_trend_from_1m(df_1m)
+        trend, trend_text, tf_detail = _get_trend_full(df_1m)
         st.session_state["ps_last_trend"]  = (trend, trend_text)
-        st.session_state["ps_tf_detail"]   = _get_tf_detail(df_1m)
+        st.session_state["ps_tf_detail"]   = tf_detail
         st.session_state["ps_trend_mtime"] = cur_mtime_val
     else:
         trend, trend_text = st.session_state["ps_last_trend"]
@@ -893,19 +885,13 @@ def _live_panel_body():
             current_price = float(df_1m.iloc[-1]["Close"])
             last_time     = df_1m.index[-1].strftime("%Y-%m-%d %H:%M")
 
-            # Tính rule signal khi mtime đổi (cache như trend, tránh block UI mỗi render)
-            if cur_mtime_val != st.session_state["ps_rule_mtime"]:
-                _rule_sig_now, _rule_reason_now = _get_rule_signal(df_1m, trend)
-                st.session_state["ps_rule_signal"] = _rule_sig_now
-                st.session_state["ps_rule_reason"] = _rule_reason_now
-                st.session_state["ps_rule_mtime"]  = cur_mtime_val
-
             # ── Tính tín hiệu mỗi candle mới ────────────────────────────────
             if last_time != st.session_state["ps_last_time"]:
-                # Rule-based signal
+                # Rule-based signal (chỉ tính 1 lần khi có nến mới)
                 rule_sig, rule_reason = _get_rule_signal(df_1m, trend)
                 st.session_state["ps_rule_signal"] = rule_sig
                 st.session_state["ps_rule_reason"] = rule_reason
+                st.session_state["ps_rule_mtime"]  = cur_mtime_val
 
                 # Buy Stop / Sell Stop levels
                 st.session_state["ps_stop_levels"] = _get_stop_levels(df_1m)
