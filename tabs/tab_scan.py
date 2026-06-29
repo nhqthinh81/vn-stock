@@ -744,3 +744,105 @@ def render(ctx: dict) -> None:
                 st.session_state.scan_cache = refresh_prices(source=source)
             st.session_state.scan_last_auto_refresh = _time.time()
             st.rerun()
+
+    # ── Lọc cơ bản toàn thị trường ──────────────────────────────────────
+    st.divider()
+    st.subheader("📊 Lọc cơ bản toàn thị trường")
+
+    from vn_invest.fundamental_scanner import (
+        load_fundamental_cache, load_checkpoint_meta,
+        scan_all_fundamentals, filter_checklist,
+    )
+
+    _fund_data, _fund_updated = load_fundamental_cache()
+    _fund_running = st.session_state.get("fund_scan_running", False)
+
+    _fi_meta_col, _fi_btn_col = st.columns([3, 1])
+    with _fi_meta_col:
+        if _fund_updated:
+            st.caption(f"📅 Cập nhật lần cuối: **{_fund_updated}** — {len(_fund_data):,} mã có dữ liệu")
+        else:
+            _ckpt_meta = load_checkpoint_meta()
+            if _ckpt_meta:
+                st.caption(f"🔄 Đang quét dở (checkpoint): {_ckpt_meta['done']}/{_ckpt_meta['total']} mã "
+                           f"— lưu lúc {_ckpt_meta['saved_at']}")
+            else:
+                st.caption("⚠️ Chưa có dữ liệu cơ bản. Nhấn **Cập nhật** để quét toàn thị trường (~15 phút, hỗ trợ resume).")
+    with _fi_btn_col:
+        if st.button("🔄 Cập nhật dữ liệu cơ bản",
+                     disabled=_fund_running, key="btn_fund_scan",
+                     help="Quét ~1,500 mã từ vnstock KBS, tự động resume nếu bị ngắt."):
+            st.session_state["fund_scan_running"]  = True
+            st.session_state["fund_scan_progress"] = (0, 1, "Đang khởi động...")
+
+            def _run_fund_scan():
+                def _cb(i, total, sym):
+                    st.session_state["fund_scan_progress"] = (i, total, sym)
+                scan_all_fundamentals(progress_callback=_cb, resume=True)
+                st.session_state["fund_scan_running"]  = False
+                st.session_state["fund_scan_progress"] = None
+
+            threading.Thread(target=_run_fund_scan, daemon=True).start()
+            st.rerun()
+
+    if _fund_running:
+        _prog = st.session_state.get("fund_scan_progress") or (0, 1, "...")
+        _pi, _pt, _ps = _prog
+        _pct = _pi / max(_pt, 1)
+        st.progress(_pct, text=f"Đang quét **{_ps}** ({_pi:,}/{_pt:,}) — "
+                               f"ước tính còn {int((_pt-_pi)*0.6//60)} phút {int((_pt-_pi)*0.6%60)} giây")
+        st.button("↻ Làm mới tiến độ", key="btn_fund_refresh")
+        # Tải lại dữ liệu mới nhất từ checkpoint nếu có
+        _ckpt_meta2 = load_checkpoint_meta()
+        if _ckpt_meta2.get("done", 0) > 0:
+            st.caption(f"Checkpoint: {_ckpt_meta2['done']:,}/{_ckpt_meta2['total']:,} mã đã xử lý")
+
+    if _fund_data:
+        st.divider()
+        st.markdown("**Điều chỉnh ngưỡng lọc:**")
+        _fc1, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns(6)
+        _fi_pe    = _fc1.number_input("P/E tối đa",      0.0, 200.0, 25.0, 1.0,  key="fi_pe")
+        _fi_pb    = _fc2.number_input("P/B tối đa",      0.0,  20.0,  3.0, 0.5,  key="fi_pb")
+        _fi_roe   = _fc3.number_input("ROE tối thiểu %", 0.0,  50.0, 15.0, 1.0,  key="fi_roe")
+        _fi_de    = _fc4.number_input("Nợ/VCSH tối đa",  0.0,  20.0,  1.5, 0.5,  key="fi_de")
+        _fi_nm    = _fc5.number_input("Biên ròng tối thiểu %", -100.0, 100.0, 0.0, 1.0, key="fi_nm")
+        _fi_nmin  = _fc6.number_input("Tiêu chí tối thiểu", 1, 5, 4, key="fi_nmin")
+
+        _filtered = filter_checklist(
+            _fund_data,
+            pe_max=float(_fi_pe), pb_max=float(_fi_pb),
+            roe_min=float(_fi_roe), de_max=float(_fi_de),
+            net_margin_min=float(_fi_nm), min_pass=int(_fi_nmin),
+        )
+
+        st.markdown(f"**{len(_filtered):,} mã** đạt ≥{int(_fi_nmin)}/5 tiêu chí cơ bản "
+                    f"(từ tổng {len(_fund_data):,} mã có dữ liệu)")
+
+        if _filtered:
+            _fund_rows = []
+            for _r in _filtered:
+                _chk = _r.get("checks", {})
+                _fund_rows.append({
+                    "Mã":             _r["symbol"],
+                    "Kỳ":             _r.get("period", "—"),
+                    "P/E":            f"{_r['pe']:.1f}"         if _r.get("pe")  is not None else "—",
+                    "P/B":            f"{_r['pb']:.1f}"         if _r.get("pb")  is not None else "—",
+                    "ROE %":          f"{_r['roe']:.1f}"        if _r.get("roe") is not None else "—",
+                    "Nợ/VCSH":        f"{_r['de']:.2f}x"       if _r.get("de")  is not None else "—",
+                    "Biên ròng %":    f"{_r['net_margin']:.1f}" if _r.get("net_margin") is not None else "—",
+                    "Tăng trưởng LN": (f"{_r['pat_growth']:+.1f}%"
+                                       if _r.get("pat_growth") is not None else "—"),
+                    "Tiêu chí":       f"{_r.get('n_pass',0)}/5",
+                })
+            _df_fund = pd.DataFrame(_fund_rows)
+            st.dataframe(
+                _df_fund,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Mã":             st.column_config.TextColumn(width="small"),
+                    "Kỳ":             st.column_config.TextColumn(width="small"),
+                    "Tiêu chí":       st.column_config.TextColumn(width="small"),
+                    "Tăng trưởng LN": st.column_config.TextColumn(width="medium"),
+                },
+            )
