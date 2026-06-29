@@ -717,6 +717,83 @@ def render(ctx: dict) -> None:
                     )
                     st.plotly_chart(fig_trend, use_container_width=True)
 
+                # ── 1. Định giá 3 kịch bản ───────────────────────────────
+                st.divider()
+                st.markdown("#### 🎯 Định giá 3 kịch bản")
+                pe_now  = latest.get("p_e")
+                eps_now = latest.get("trailing_eps")
+                if pe_now is not None and eps_now is not None and eps_now > 0:
+                    g_base = pat_g / 100 if pat_g is not None else 0.08
+                    g_base = max(min(g_base, 0.40), -0.30)
+                    scenarios = [
+                        ("🔴 Bi quan",  max(pe_now * 0.7, 3), min(g_base, 0.0) - 0.05),
+                        ("🟡 Trung bình", pe_now,                g_base),
+                        ("🟢 Lạc quan",  pe_now * 1.2,           max(g_base, 0.0) + 0.10),
+                    ]
+                    sc_cols = st.columns(3)
+                    for col, (label, pe_s, g_s) in zip(sc_cols, scenarios):
+                        eps_fwd = eps_now * (1 + g_s)
+                        fair_value = pe_s * eps_fwd
+                        col.metric(label, f"{fair_value:,.0f} VNĐ",
+                                   help=f"P/E giả định {pe_s:.1f}x, tăng trưởng LNST giả định {g_s*100:+.1f}%")
+                    st.caption("Cơ sở: P/E hiện tại điều chỉnh ±20-30% theo kịch bản, "
+                               "EPS dự phóng = EPS hiện tại × (1 + tăng trưởng LNST kỳ gần nhất, giới hạn -30%→+40%). "
+                               "Chỉ mang tính tham khảo, không phải khuyến nghị đầu tư.")
+                else:
+                    st.info("Không đủ dữ liệu P/E hoặc EPS để định giá 3 kịch bản.")
+
+                # ── 2. Dấu hiệu cảnh báo (red-flags) ─────────────────────
+                st.divider()
+                st.markdown("#### 🚩 Dấu hiệu cảnh báo")
+                flags = []
+                if rev_g is not None and pat_g is not None and rev_g > 0 and pat_g < 0:
+                    flags.append("Doanh thu tăng nhưng LNST giảm — biên lợi nhuận đang xói mòn.")
+                if cfo_q is not None and cfo_q < 0:
+                    flags.append("Dòng tiền kinh doanh (CFO) âm trong khi vẫn báo lãi — chất lượng lợi nhuận đáng ngờ.")
+                if cfo_q is not None and 0 <= cfo_q < 0.3 and pat0 is not None and pat0 > 0:
+                    flags.append("LNST dương nhưng CFO/PAT rất thấp (<0.3x) — lãi chủ yếu trên sổ sách.")
+                if de_fs is not None and de_fs > 3:
+                    flags.append("Nợ/VCSH > 3x — đòn bẩy tài chính rất cao, rủi ro mất khả năng thanh toán.")
+                if icr is not None and icr < 1:
+                    flags.append("EBIT không đủ trả lãi vay (Khả năng trả lãi < 1x) — nguy cơ mất khả năng chi trả.")
+                if pat_g is not None and pat_g < -50:
+                    flags.append(f"LNST giảm mạnh {pat_g:.1f}% so với kỳ trước.")
+                if rev_g is not None and rev_g < -30:
+                    flags.append(f"Doanh thu sụt giảm mạnh {rev_g:.1f}% — dấu hiệu suy yếu hoạt động kinh doanh.")
+                if gpm is not None and gpm * 100 < 5:
+                    flags.append(f"Biên lợi nhuận gộp cực thấp ({gpm*100:.1f}%) — gần như không có lợi thế cạnh tranh về giá vốn.")
+
+                if flags:
+                    for f in flags:
+                        st.error(f"🔴 {f}")
+                    st.caption(f"Phát hiện {len(flags)}/8 dấu hiệu cảnh báo dựa trên dữ liệu BCTC kỳ gần nhất.")
+                else:
+                    st.success("✅ Không phát hiện dấu hiệu cảnh báo bất thường nào trong 8 tiêu chí kiểm tra từ BCTC.")
+
+                # ── 3. Checklist đầu tư 6 bước ───────────────────────────
+                st.divider()
+                st.markdown("#### ✅ Checklist đầu tư")
+                checklist = [
+                    ("Định giá hợp lý (P/E < 25 hoặc P/B < 2.5)",
+                     (pe_now is not None and pe_now < 25) or (latest.get("p_b") is not None and latest.get("p_b") < 2.5)),
+                    ("ROE > 15%", (latest.get("roe") or 0) > 15),
+                    ("Nợ/VCSH < 1.5x", de_fs is not None and de_fs < 1.5),
+                    ("Dòng tiền kinh doanh dương (CFO > 0)", cfo0 is not None and cfo0 > 0),
+                    ("LNST tăng trưởng dương so với kỳ trước", pat_g is not None and pat_g > 0),
+                    ("Không có dấu hiệu cảnh báo nào ở trên", len(flags) == 0),
+                ]
+                n_pass = sum(1 for _, ok in checklist if ok)
+                for label, ok in checklist:
+                    st.checkbox(label, value=bool(ok), disabled=True, key=f"chk_{symbol_input}_{label[:10]}")
+                st.progress(n_pass / len(checklist),
+                            text=f"Đạt {n_pass}/{len(checklist)} tiêu chí")
+                if n_pass >= 5:
+                    st.success("✅ Đạt phần lớn tiêu chí — đáng để nghiên cứu sâu hơn.")
+                elif n_pass >= 3:
+                    st.warning("⚠️ Đạt một phần tiêu chí — cần cân nhắc thêm trước khi đầu tư.")
+                else:
+                    st.error("🔴 Đạt ít tiêu chí — rủi ro cao, cần thận trọng.")
+
             with ai_tab:
                 st.markdown("#### 🤖 Phân tích AI chuyên sâu")
                 st.caption("Claude Haiku phân tích BCTC + bối cảnh ngành, mảng kinh doanh, rủi ro, nhận định đầu tư.")
