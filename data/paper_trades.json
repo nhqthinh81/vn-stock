@@ -14,8 +14,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 7.37,
-    "unrealized_pct": 0.0
+    "current_price": 7.33,
+    "unrealized_pct": -0.54
   },
   {
     "id": "APG_2026-06-27",
@@ -32,8 +32,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 5.03,
-    "unrealized_pct": 0.0
+    "current_price": 4.75,
+    "unrealized_pct": -5.57
   },
   {
     "id": "BSI_2026-06-27",
@@ -50,8 +50,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 34.25,
-    "unrealized_pct": 0.0
+    "current_price": 34.9,
+    "unrealized_pct": 1.9
   },
   {
     "id": "BWE_2026-06-27",
@@ -68,8 +68,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 44.7,
-    "unrealized_pct": 0.0
+    "current_price": 45.0,
+    "unrealized_pct": 0.67
   },
   {
     "id": "CSM_2026-06-27",
@@ -86,8 +86,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 12.65,
-    "unrealized_pct": 0.0
+    "current_price": 12.55,
+    "unrealized_pct": -0.79
   },
   {
     "id": "CTS_2026-06-27",
@@ -104,8 +104,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 24.9,
-    "unrealized_pct": 0.0
+    "current_price": 25.15,
+    "unrealized_pct": 1.0
   },
   {
     "id": "FTS_2026-06-27",
@@ -122,8 +122,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 26.4,
-    "unrealized_pct": 0.0
+    "current_price": 26.35,
+    "unrealized_pct": -0.19
   },
   {
     "id": "HSL_2026-06-27",
@@ -140,8 +140,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 7.02,
-    "unrealized_pct": 0.0
+    "current_price": 7.17,
+    "unrealized_pct": 2.14
   },
   {
     "id": "HVN_2026-06-27",
@@ -158,8 +158,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 23.0,
-    "unrealized_pct": 0.0
+    "current_price": 23.6,
+    "unrealized_pct": 2.61
   },
   {
     "id": "NDN_2026-06-27",
@@ -176,8 +176,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 10.9,
-    "unrealized_pct": 0.0
+    "current_price": 10.7,
+    "unrealized_pct": -1.83
   },
   {
     "id": "NTP_2026-06-27",
@@ -194,8 +194,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 50.8,
-    "unrealized_pct": 0.0
+    "current_price": 50.3,
+    "unrealized_pct": -0.98
   },
   {
     "id": "PHP_2026-06-27",
@@ -212,8 +212,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 39.0,
-    "unrealized_pct": 0.0
+    "current_price": 38.8,
+    "unrealized_pct": -0.51
   },
   {
     "id": "QNS_2026-06-27",
@@ -230,8 +230,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 49.2,
-    "unrealized_pct": 0.0
+    "current_price": 49.0,
+    "unrealized_pct": -0.41
   },
   {
     "id": "STB_2026-06-27",
@@ -248,8 +248,8 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 73.7,
-    "unrealized_pct": 0.0
+    "current_price": 74.9,
+    "unrealized_pct": 1.63
   },
   {
     "id": "VC3_2026-06-27",
@@ -266,7 +266,43 @@
     "result": null,
     "t5_target": "2026-08-01",
     "note": "",
-    "current_price": 26.5,
-    "unrealized_pct": 0.0
+    "current_price": 26.6,
+    "unrealized_pct": 0.38
+  },
+  {
+    "id": "TVS_2026-06-29",
+    "symbol": "TVS",
+    "entry_date": "2026-06-29",
+    "entry_price": 14.35,
+    "tech_score": 78.1,
+    "rsi": 60.5,
+    "signal": "BUY-A",
+    "status": "open",
+    "exit_date": null,
+    "exit_price": null,
+    "return_pct": null,
+    "result": null,
+    "t5_target": "2026-08-03",
+    "note": "",
+    "current_price": 14.55,
+    "unrealized_pct": 1.39
+  },
+  {
+    "id": "VC3_2026-06-29",
+    "symbol": "VC3",
+    "entry_date": "2026-06-29",
+    "entry_price": 26.4,
+    "tech_score": 85.6,
+    "rsi": 51.8,
+    "signal": "BUY-A",
+    "status": "open",
+    "exit_date": null,
+    "exit_price": null,
+    "return_pct": null,
+    "result": null,
+    "t5_target": "2026-08-03",
+    "note": "",
+    "current_price": 26.6,
+    "unrealized_pct": 0.76
   }
 ]

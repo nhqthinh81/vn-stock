@@ -46,5 +46,11 @@
     "quantity": 1000,
     "avg_price": 28000.0,
     "sector": "Chứng khoán"
+  },
+  {
+    "symbol": "HHP",
+    "quantity": 5000,
+    "avg_price": 14620.0,
+    "sector": "SX Phụ trợ"
   }
 ]
