@@ -72,10 +72,15 @@ def render(ctx: dict) -> None:  # noqa: ARG001
             # Xoá file progress cũ để tránh nhầm trạng thái
             if _PROG_PATH.exists():
                 _PROG_PATH.unlink()
+            import os as _os
+            _env = _os.environ.copy()
+            _env["PYTHONIOENCODING"] = "utf-8"
+            _env["PYTHONUTF8"]       = "1"
             proc = subprocess.Popen(
                 [sys.executable, str(_SCRIPT)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=_env,
                 creationflags=(subprocess.CREATE_NO_WINDOW
                                if sys.platform == "win32" else 0),
             )

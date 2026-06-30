@@ -2,17 +2,15 @@
 Chạy: python update_fundamental.py
 Hỗ trợ resume từ checkpoint nếu bị ngắt giữa chừng.
 """
-import io
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-# Fix Windows stdout encoding (cp1252 -> utf-8) khi chạy qua subprocess
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "buffer"):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+# Ép utf-8 toàn bộ I/O — phòng trường hợp chạy trực tiếp không qua launcher
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
 
 _DATA_DIR    = Path(__file__).parent / "data"
 _PROG_PATH   = _DATA_DIR / "fundamental_progress.json"
