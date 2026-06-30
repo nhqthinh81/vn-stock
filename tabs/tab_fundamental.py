@@ -107,7 +107,14 @@ def render(ctx: dict) -> None:  # noqa: ARG001
         )
 
     elif prog.get("status") == "error":
-        st.error(f"❌ Lỗi trong quá trình quét: {prog.get('error', 'Không rõ')}")
+        st.error(f"❌ Lỗi: {prog.get('error', 'Không rõ')}")
+        if prog.get("traceback"):
+            with st.expander("🔍 Chi tiết lỗi (traceback)"):
+                st.code(prog["traceback"], language="text")
+        _log_path = _DATA_DIR / "fundamental_scan.log"
+        if _log_path.exists():
+            with st.expander("📋 Log quét"):
+                st.code(_log_path.read_text(encoding="utf-8", errors="replace"), language="text")
 
     elif prog.get("status") == "done" and not fund_data:
         st.success("✅ Quét xong! Tải lại trang để xem kết quả.")
