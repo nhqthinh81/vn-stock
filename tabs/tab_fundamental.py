@@ -1,24 +1,47 @@
 """TAB — LỌC CƠ BẢN: Lọc cổ phiếu theo checklist đầu tư toàn thị trường."""
-import threading
+import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from vn_invest.fundamental_scanner import (
     load_fundamental_cache,
-    load_checkpoint_meta,
-    scan_all_fundamentals,
     filter_checklist,
 )
+
+_DATA_DIR  = Path(__file__).parent.parent / "data"
+_PROG_PATH = _DATA_DIR / "fundamental_progress.json"
+_SCRIPT    = Path(__file__).parent.parent / "update_fundamental.py"
+
+
+def _read_progress() -> dict:
+    if not _PROG_PATH.exists():
+        return {}
+    try:
+        return json.loads(_PROG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _is_running() -> bool:
+    """Kiểm tra subprocess scan có đang chạy không qua PID lưu trong session_state."""
+    proc: subprocess.Popen | None = st.session_state.get("fund_scan_proc")
+    if proc is None:
+        return False
+    return proc.poll() is None  # None = vẫn đang chạy
 
 
 def render(ctx: dict) -> None:  # noqa: ARG001
     st.header("🏦 Lọc Cơ Bản — Toàn Thị Trường")
 
-    # ── Metadata & nút cập nhật ──────────────────────────────────────────
     fund_data, fund_updated = load_fundamental_cache()
-    is_running = st.session_state.get("fund_scan_running", False)
+    prog = _read_progress()
+    running = _is_running()
 
+    # ── Metadata & nút cập nhật ──────────────────────────────────────────
     col_meta, col_btn = st.columns([3, 1])
     with col_meta:
         if fund_updated:
@@ -26,54 +49,63 @@ def render(ctx: dict) -> None:  # noqa: ARG001
                 f"📅 Cập nhật lần cuối: **{fund_updated}** — "
                 f"{len(fund_data):,} mã có dữ liệu"
             )
+        elif prog.get("status") == "done":
+            st.caption("✅ Quét hoàn tất. Tải lại trang để xem kết quả.")
+        elif prog and prog.get("status") not in ("done", "error", "interrupted"):
+            st.caption(
+                f"🔄 Đang quét (checkpoint): {prog.get('done', 0):,}/{prog.get('total', 0):,} mã"
+                f" — {prog.get('ts', '')}"
+            )
         else:
-            ckpt = load_checkpoint_meta()
-            if ckpt:
-                st.caption(
-                    f"🔄 Scan đang dở (checkpoint): {ckpt['done']:,}/{ckpt['total']:,} mã "
-                    f"— lưu lúc {ckpt['saved_at']}"
-                )
-            else:
-                st.caption(
-                    "⚠️ Chưa có dữ liệu cơ bản. Nhấn **Cập nhật** để quét toàn thị trường "
-                    "(~1,500 mã, ≈ 15 phút). Hỗ trợ resume nếu bị ngắt giữa chừng."
-                )
+            st.caption(
+                "⚠️ Chưa có dữ liệu cơ bản. Nhấn **Cập nhật** để quét toàn thị trường "
+                "(~1,500 mã, ≈ 15 phút). Hỗ trợ resume nếu bị ngắt."
+            )
 
     with col_btn:
         if st.button(
             "🔄 Cập nhật dữ liệu cơ bản",
-            disabled=is_running,
+            disabled=running,
             key="btn_fund_scan",
-            help="Quét ~1,500 mã từ vnstock KBS. Resume tự động nếu bị ngắt.",
+            help="Chạy update_fundamental.py — resume tự động nếu đã có checkpoint.",
         ):
-            st.session_state["fund_scan_running"]  = True
-            st.session_state["fund_scan_progress"] = (0, 1, "Đang khởi động...")
-
-            def _run():
-                def _cb(i, total, sym):
-                    st.session_state["fund_scan_progress"] = (i, total, sym)
-                scan_all_fundamentals(progress_callback=_cb, resume=True)
-                st.session_state["fund_scan_running"]  = False
-                st.session_state["fund_scan_progress"] = None
-
-            threading.Thread(target=_run, daemon=True).start()
+            # Xoá file progress cũ để tránh nhầm trạng thái
+            if _PROG_PATH.exists():
+                _PROG_PATH.unlink()
+            proc = subprocess.Popen(
+                [sys.executable, str(_SCRIPT)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=(subprocess.CREATE_NO_WINDOW
+                               if sys.platform == "win32" else 0),
+            )
+            st.session_state["fund_scan_proc"] = proc
             st.rerun()
 
-    # ── Progress bar khi đang quét ───────────────────────────────────────
-    if is_running:
-        prog = st.session_state.get("fund_scan_progress") or (0, 1, "...")
-        pi, pt, ps = prog
-        pct = pi / max(pt, 1)
-        remain_sec = int((pt - pi) * 0.6)
+    # ── Progress bar (auto-refresh mỗi 3 giây khi đang quét) ────────────
+    if running or (prog.get("status") == "running"):
+        pi    = prog.get("done",  0)
+        pt    = prog.get("total", 1)
+        ps    = prog.get("current", "...")
+        pct   = prog.get("pct", 0.0) / 100
+        remain = int((pt - pi) * 0.6)
         st.progress(
-            pct,
+            min(pct, 1.0),
             text=f"Đang quét **{ps}** ({pi:,}/{pt:,}) — "
-                 f"ước tính còn {remain_sec // 60} phút {remain_sec % 60} giây",
+                 f"ước tính còn {remain // 60} phút {remain % 60} giây",
         )
-        st.button("↻ Làm mới tiến độ", key="btn_fund_refresh")
-        ckpt2 = load_checkpoint_meta()
-        if ckpt2.get("done", 0) > 0:
-            st.caption(f"Checkpoint: {ckpt2['done']:,}/{ckpt2['total']:,} mã đã xử lý")
+        st.caption(f"Cập nhật lúc {prog.get('ts','')}")
+        # Auto-rerun mỗi 3 giây để cập nhật tiến độ
+        st.markdown(
+            "<meta http-equiv='refresh' content='3'>",
+            unsafe_allow_html=True,
+        )
+
+    elif prog.get("status") == "error":
+        st.error(f"❌ Lỗi trong quá trình quét: {prog.get('error', 'Không rõ')}")
+
+    elif prog.get("status") == "done" and not fund_data:
+        st.success("✅ Quét xong! Tải lại trang để xem kết quả.")
 
     if not fund_data:
         return
@@ -88,7 +120,7 @@ def render(ctx: dict) -> None:  # noqa: ARG001
         fi_roe  = fc3.number_input("ROE tối thiểu (%)",     0.0,  50.0,  15.0, 1.0,  key="fi_roe")
         fi_de   = fc4.number_input("Nợ/VCSH tối đa",        0.0,  20.0,   1.5, 0.5,  key="fi_de")
         fi_nm   = fc5.number_input("Biên ròng tối thiểu %", -100.0, 100.0, 0.0, 1.0, key="fi_nm")
-        fi_nmin = fc6.number_input("Tiêu chí tối thiểu",   1, 5, 4,             key="fi_nmin")
+        fi_nmin = fc6.number_input("Tiêu chí tối thiểu",   1, 5, 4,              key="fi_nmin")
 
     filtered = filter_checklist(
         fund_data,
@@ -118,7 +150,7 @@ def render(ctx: dict) -> None:  # noqa: ARG001
             "P/E":            f"{r['pe']:.1f}"         if r.get("pe")  is not None else "—",
             "P/B":            f"{r['pb']:.1f}"         if r.get("pb")  is not None else "—",
             "ROE %":          f"{r['roe']:.1f}"        if r.get("roe") is not None else "—",
-            "Nợ/VCSH":        f"{r['de']:.2f}x"       if r.get("de")  is not None else "—",
+            "Nợ/VCSH":        f"{r['de']:.2f}x"        if r.get("de")  is not None else "—",
             "Biên ròng %":    f"{r['net_margin']:.1f}" if r.get("net_margin") is not None else "—",
             "Tăng trưởng LN": (
                 f"{r['pat_growth']:+.1f}%"
@@ -144,13 +176,13 @@ def render(ctx: dict) -> None:  # noqa: ARG001
     st.divider()
     st.markdown("#### Thống kê bộ lọc")
     stat1, stat2, stat3, stat4 = st.columns(4)
-    valid_pe  = [r["pe"]          for r in filtered if r.get("pe")  is not None]
-    valid_roe = [r["roe"]         for r in filtered if r.get("roe") is not None]
-    valid_de  = [r["de"]          for r in filtered if r.get("de")  is not None]
-    valid_pg  = [r["pat_growth"]  for r in filtered if r.get("pat_growth") is not None]
+    valid_pe  = [r["pe"]         for r in filtered if r.get("pe")  is not None]
+    valid_roe = [r["roe"]        for r in filtered if r.get("roe") is not None]
+    valid_de  = [r["de"]         for r in filtered if r.get("de")  is not None]
+    valid_pg  = [r["pat_growth"] for r in filtered if r.get("pat_growth") is not None]
 
-    stat1.metric("P/E trung bình",   f"{sum(valid_pe)/len(valid_pe):.1f}"   if valid_pe  else "—")
-    stat2.metric("ROE trung bình %", f"{sum(valid_roe)/len(valid_roe):.1f}" if valid_roe else "—")
-    stat3.metric("Nợ/VCSH TB",       f"{sum(valid_de)/len(valid_de):.2f}x"  if valid_de  else "—")
-    pct_growth = sum(1 for g in valid_pg if g > 0) / len(valid_pg) * 100 if valid_pg else 0
-    stat4.metric("% mã tăng trưởng LN", f"{pct_growth:.0f}%"               if valid_pg  else "—")
+    stat1.metric("P/E trung bình",      f"{sum(valid_pe)/len(valid_pe):.1f}"   if valid_pe  else "—")
+    stat2.metric("ROE trung bình %",    f"{sum(valid_roe)/len(valid_roe):.1f}" if valid_roe else "—")
+    stat3.metric("Nợ/VCSH TB",          f"{sum(valid_de)/len(valid_de):.2f}x"  if valid_de  else "—")
+    pct_up = sum(1 for g in valid_pg if g > 0) / len(valid_pg) * 100 if valid_pg else 0
+    stat4.metric("% mã tăng trưởng LN", f"{pct_up:.0f}%"                       if valid_pg  else "—")
