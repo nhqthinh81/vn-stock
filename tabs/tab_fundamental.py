@@ -34,12 +34,19 @@ def _is_running() -> bool:
     return proc.poll() is None  # None = vẫn đang chạy
 
 
-def render(ctx: dict) -> None:  # noqa: ARG001
+def render(_ctx: dict) -> None:
     st.header("🏦 Lọc Cơ Bản — Toàn Thị Trường")
 
     fund_data, fund_updated = load_fundamental_cache()
-    prog = _read_progress()
     running = _is_running()
+    # Xoá file progress cũ nếu không có subprocess đang chạy
+    # để tránh hiển thị lỗi/trạng thái của lần chạy trước
+    if not running and _PROG_PATH.exists():
+        try:
+            _PROG_PATH.unlink()
+        except Exception:
+            pass
+    prog = _read_progress()
 
     # ── Metadata & nút cập nhật ──────────────────────────────────────────
     col_meta, col_btn = st.columns([3, 1])
