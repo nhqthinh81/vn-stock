@@ -783,8 +783,8 @@ def render(ctx: dict) -> None:
                     ("Không có dấu hiệu cảnh báo nào ở trên", len(flags) == 0),
                 ]
                 n_pass = sum(1 for _, ok in checklist if ok)
-                for label, ok in checklist:
-                    st.checkbox(label, value=bool(ok), disabled=True, key=f"chk_{symbol_input}_{label[:10]}")
+                for idx, (label, ok) in enumerate(checklist):
+                    st.checkbox(label, value=bool(ok), disabled=True, key=f"chk_{symbol_input}_{idx}")
                 st.progress(n_pass / len(checklist),
                             text=f"Đạt {n_pass}/{len(checklist)} tiêu chí")
                 if n_pass >= 5:

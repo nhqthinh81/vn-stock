@@ -107,11 +107,9 @@ def render(_ctx: dict) -> None:
                  f"ước tính còn {remain // 60} phút {remain % 60} giây",
         )
         st.caption(f"Cập nhật lúc {prog.get('ts','')}")
-        # Auto-rerun mỗi 3 giây để cập nhật tiến độ
-        st.markdown(
-            "<meta http-equiv='refresh' content='3'>",
-            unsafe_allow_html=True,
-        )
+        import time as _time
+        _time.sleep(3)
+        st.rerun()
 
     elif prog.get("status") == "error":
         st.error(f"❌ Lỗi: {prog.get('error', 'Không rõ')}")
@@ -134,12 +132,12 @@ def render(_ctx: dict) -> None:
     # ── Bộ lọc ───────────────────────────────────────────────────────────
     with st.expander("⚙️ Điều chỉnh ngưỡng lọc", expanded=True):
         fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
-        fi_pe   = fc1.number_input("P/E tối đa",            0.0, 200.0,  25.0, 1.0,  key="fi_pe")
-        fi_pb   = fc2.number_input("P/B tối đa",            0.0,  20.0,   3.0, 0.5,  key="fi_pb")
-        fi_roe  = fc3.number_input("ROE tối thiểu (%)",     0.0,  50.0,  15.0, 1.0,  key="fi_roe")
-        fi_de   = fc4.number_input("Nợ/VCSH tối đa",        0.0,  20.0,   1.5, 0.5,  key="fi_de")
-        fi_nm   = fc5.number_input("Biên ròng tối thiểu %", -100.0, 100.0, 0.0, 1.0, key="fi_nm")
-        fi_nmin = fc6.number_input("Tiêu chí tối thiểu",   1, 5, 4,              key="fi_nmin")
+        fi_pe   = fc1.number_input("P/E tối đa",            0.0, 200.0,  25.0, 1.0,  key="fund_fi_pe")
+        fi_pb   = fc2.number_input("P/B tối đa",            0.0,  20.0,   3.0, 0.5,  key="fund_fi_pb")
+        fi_roe  = fc3.number_input("ROE tối thiểu (%)",     0.0,  50.0,  15.0, 1.0,  key="fund_fi_roe")
+        fi_de   = fc4.number_input("Nợ/VCSH tối đa",        0.0,  20.0,   1.5, 0.5,  key="fund_fi_de")
+        fi_nm   = fc5.number_input("Biên ròng tối thiểu %", -100.0, 100.0, 0.0, 1.0, key="fund_fi_nm")
+        fi_nmin = fc6.number_input("Tiêu chí tối thiểu",   1, 5, 4,              key="fund_fi_nmin")
 
     filtered = filter_checklist(
         fund_data,
