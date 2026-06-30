@@ -119,7 +119,7 @@ def scan_all_fundamentals(
         time.sleep(delay)
 
     if progress_callback:
-        progress_callback(total, total, "Hoàn tất")
+        progress_callback(total, total, "Done")
 
     results = list(results_map.values())
     _CACHE_PATH.write_text(

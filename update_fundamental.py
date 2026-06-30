@@ -2,10 +2,17 @@
 Chạy: python update_fundamental.py
 Hỗ trợ resume từ checkpoint nếu bị ngắt giữa chừng.
 """
+import io
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Fix Windows stdout encoding (cp1252 -> utf-8) khi chạy qua subprocess
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 _DATA_DIR    = Path(__file__).parent / "data"
 _PROG_PATH   = _DATA_DIR / "fundamental_progress.json"
@@ -35,25 +42,25 @@ def main() -> None:
     from vnstock import Listing
     symbols = Listing().all_symbols()["symbol"].tolist()
     total = len(symbols)
-    _write_progress(0, total, "Bắt đầu quét...", "running")
-    print(f"Bắt đầu quét {total} mã...", flush=True)
+    _write_progress(0, total, "Starting...", "running")
+    print(f"Scanning {total} symbols...", flush=True)
 
     def _cb(i: int, t: int, sym: str) -> None:
         _write_progress(i, t, sym, "running")
         if i % 50 == 0:
-            print(f"  {i}/{t} — {sym}", flush=True)
+            print(f"  {i}/{t} {sym}", flush=True)
 
     scan_all_fundamentals(symbols=symbols, progress_callback=_cb, resume=True)
 
-    _write_progress(total, total, "Hoàn tất", "done")
-    print(f"Hoàn tất! Đã quét {total} mã.", flush=True)
+    _write_progress(total, total, "Done", "done")
+    print(f"Done! Scanned {total} symbols.", flush=True)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        _write_progress(0, 0, "Bị ngắt bởi người dùng", "interrupted")
+        _write_progress(0, 0, "Interrupted", "interrupted")
         sys.exit(0)
     except Exception as e:
         _PROG_PATH.write_text(
