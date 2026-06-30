@@ -1,9 +1,12 @@
 """Fetch và cache chỉ số cơ bản toàn thị trường từ vnstock KBS source."""
+import concurrent.futures
 import json
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
+
+_FETCH_TIMEOUT = 15  # giây tối đa cho mỗi mã — tránh treo vô hạn
 
 _DATA_DIR   = Path(__file__).parent.parent / "data"
 _CACHE_PATH = _DATA_DIR / "fundamental_cache.json"
@@ -110,7 +113,13 @@ def scan_all_fundamentals(
             progress_callback(i, total, sym)
         if sym in done_set:
             continue
-        rec = fetch_fundamental(sym)
+        # Timeout per symbol — tránh treo vô hạn khi vnstock API không phản hồi
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                _fut = _ex.submit(fetch_fundamental, sym)
+                rec = _fut.result(timeout=_FETCH_TIMEOUT)
+        except (concurrent.futures.TimeoutError, Exception):
+            rec = None
         if rec:
             results_map[sym] = rec
         done_set.add(sym)
