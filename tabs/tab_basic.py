@@ -1003,31 +1003,84 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
 
     st.divider()
 
-    # ── Vĩ mô Việt Nam ───────────────────────────────────────────────────────
-    with st.expander("🌐 Bối cảnh vĩ mô Việt Nam", expanded=False):
-        _macro = _fetch_macro()
-        if _macro.get("error"):
-            st.warning(f"Không tải được dữ liệu vĩ mô: {_macro['error']}")
+    # ── Vĩ mô & Thị trường ───────────────────────────────────────────────────
+    with st.expander("🌐 Vĩ mô & Thị trường", expanded=False):
+        from vn_invest.macro_data import fetch_global_market, fetch_vnindex_stats, load_static_macro
+
+        # ── 1. Thị trường toàn cầu (yfinance, cache 15 phút) ─────────────────
+        st.markdown("#### 🌍 Thị trường toàn cầu")
+        _gm = fetch_global_market()
+        if _gm:
+            _gm_cols = st.columns(5)
+            _gm_order = ["dxy", "oil", "gold", "usdvnd", "sp500"]
+            _gm_fmt = {
+                "dxy":    lambda v: f"{v:.2f}",
+                "oil":    lambda v: f"${v:.2f}",
+                "gold":   lambda v: f"${v:,.0f}",
+                "usdvnd": lambda v: f"{v:,.0f}",
+                "sp500":  lambda v: f"{v:,.0f}",
+            }
+            for _gi, _gkey in enumerate(_gm_order):
+                _gitem = _gm.get(_gkey, {})
+                _gval  = _gitem.get("value")
+                _gchg  = _gitem.get("chg_pct")
+                _glbl  = _gitem.get("label", _gkey)
+                if _gval is not None:
+                    _gm_cols[_gi].metric(
+                        _glbl,
+                        _gm_fmt.get(_gkey, lambda v: f"{v:.2f}")(_gval),
+                        f"{_gchg:+.2f}%" if _gchg is not None else None,
+                    )
+                else:
+                    _gm_cols[_gi].metric(_glbl, "—")
+            if _gm.get("fetched_at"):
+                st.caption(f"Nguồn: Yahoo Finance · Cập nhật lúc {_gm['fetched_at'][:16].replace('T',' ')}")
         else:
+            st.caption("Không tải được dữ liệu thị trường toàn cầu.")
+
+        st.markdown("---")
+
+        # ── 2. VNINDEX & thanh khoản thị trường ──────────────────────────────
+        st.markdown("#### 📊 VNINDEX & Dòng tiền thị trường")
+        _vi = fetch_vnindex_stats()
+        if _vi.get("price"):
+            _vi_c1, _vi_c2, _vi_c3, _vi_c4, _vi_c5 = st.columns(5)
+            _vi_price = _vi["price"]
+            _vi_c1.metric("VNINDEX",      f"{_vi_price:,.2f}",
+                          f"{_vi.get('chg_1d'):+.2f}%" if _vi.get('chg_1d') is not None else None)
+            _vi_c2.metric("1 tuần",       f"{_vi.get('chg_5d'):+.2f}%"  if _vi.get('chg_5d')  is not None else "—")
+            _vi_c3.metric("1 tháng",      f"{_vi.get('chg_20d'):+.2f}%" if _vi.get('chg_20d') is not None else "—")
+            _lv = _vi.get("last_vol")
+            _av = _vi.get("avg_vol_5d")
+            _vi_c4.metric("KL phiên (tỷ VND)*", f"{_lv/1e9:.0f}" if _lv else "—")
+            _vi_c5.metric("KL TB 5P (tỷ)*",      f"{_av/1e9:.0f}" if _av else "—")
+            st.caption("*KL ước tính (số cổ phiếu × giá) — nguồn vnstock VCI · Khối ngoại/margin: xem cafef.vn, vietstock.vn")
+        else:
+            st.caption("Không tải được dữ liệu VNINDEX.")
+
+        st.markdown("---")
+
+        # ── 3. Vĩ mô VN — GDP/CPI từ IMF + dữ liệu tĩnh từ GSO/NHNN ────────
+        st.markdown("#### 🇻🇳 Vĩ mô Việt Nam")
+
+        # IMF GDP / CPI
+        _macro = _fetch_macro()
+        if not _macro.get("error"):
             def _latest_m(series):
                 return series[0] if series else None
-
             def _label_yr(item):
-                if not item:
-                    return "—"
+                if not item: return "—"
                 tag = " (dự báo)" if item.get("is_forecast") else ""
                 return f"{item['year']}{tag}"
 
-            _gdp  = _latest_m(_macro.get("gdp_growth", []))
-            _cpi  = _latest_m(_macro.get("cpi", []))
-            _ca   = _latest_m(_macro.get("current_acct", []))
-            _vnd  = _macro.get("usdvnd_spot")
+            _gdp = _latest_m(_macro.get("gdp_growth", []))
+            _cpi = _latest_m(_macro.get("cpi", []))
+            _ca  = _latest_m(_macro.get("current_acct", []))
 
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric(f"GDP tăng trưởng ({_label_yr(_gdp)})", f"{_gdp['value']:+.2f}%" if _gdp else "—")
-            mc2.metric(f"Lạm phát CPI ({_label_yr(_cpi)})", f"{_cpi['value']:+.2f}%" if _cpi else "—")
-            mc3.metric(f"Cán cân vãng lai ({_label_yr(_ca)})", f"{_ca['value']:+.2f}% GDP" if _ca else "—")
-            mc4.metric("USD/VND (spot hôm nay)", f"{_vnd:,.0f}" if _vnd else "—")
+            imf_c1, imf_c2, imf_c3 = st.columns(3)
+            imf_c1.metric(f"GDP tăng trưởng ({_label_yr(_gdp)})",    f"{_gdp['value']:+.2f}%" if _gdp else "—")
+            imf_c2.metric(f"Lạm phát CPI ({_label_yr(_cpi)})",       f"{_cpi['value']:+.2f}%" if _cpi else "—")
+            imf_c3.metric(f"Cán cân vãng lai ({_label_yr(_ca)})",    f"{_ca['value']:+.2f}% GDP" if _ca else "—")
 
             if len(_macro.get("gdp_growth", [])) >= 2:
                 import plotly.graph_objects as _go
@@ -1054,13 +1107,55 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                         marker=dict(size=6),
                     ))
                 _fig_m.update_layout(
-                    height=220, template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0),
+                    height=200, template="plotly_dark", margin=dict(l=0, r=0, t=10, b=0),
                     legend=dict(orientation="h", y=1.15),
                     yaxis=dict(ticksuffix="%"),
                 )
                 st.plotly_chart(_fig_m, use_container_width=True)
+            st.caption(f"Nguồn: IMF WEO (📌 = dự báo năm hiện tại, cập nhật: {_macro['updated']})")
 
-            st.caption(f"Nguồn: IMF WEO (📌 = dự báo/ước tính năm hiện tại, cập nhật: {_macro['updated']}) | Tỷ giá spot: open.er-api.com")
+        # Dữ liệu tĩnh từ GSO/NHNN/MPI
+        _smacro = load_static_macro()
+        _sitems = _smacro.get("items", [])
+        if _sitems:
+            st.markdown(f"<small style='color:#888'>Dữ liệu tham chiếu — nguồn: {_smacro.get('source_note','GSO/NHNN')} · Cập nhật: {_smacro.get('updated_at','')}</small>",
+                        unsafe_allow_html=True)
+            # Chia thành 2 hàng, mỗi hàng 4 cột
+            _grp1 = _sitems[:4]
+            _grp2 = _sitems[4:]
+            _cols1 = st.columns(len(_grp1))
+            for _ci, _item in enumerate(_grp1):
+                _v = _item.get("value")
+                _lbl = _item["label"]
+                _unit = _item.get("unit", "")
+                _period = _item.get("period", "")
+                _note = _item.get("note", "")
+                _cols1[_ci].metric(
+                    f"{_lbl}\n({_period})",
+                    f"{_v:g} {_unit}" if _v is not None else "—",
+                    help=_note if _note else None,
+                )
+            if _grp2:
+                _cols2 = st.columns(len(_grp2))
+                for _ci, _item in enumerate(_grp2):
+                    _v = _item.get("value")
+                    _lbl = _item["label"]
+                    _unit = _item.get("unit", "")
+                    _period = _item.get("period", "")
+                    _note = _item.get("note", "")
+                    _cols2[_ci].metric(
+                        f"{_lbl}\n({_period})",
+                        f"{_v:g} {_unit}" if _v is not None else "—",
+                        help=_note if _note else None,
+                    )
+
+        st.markdown(
+            "<small style='color:#555'>⚠️ Dữ liệu khối ngoại mua/bán ròng, margin, P/E thị trường: "
+            "xem <a href='https://cafef.vn' target='_blank'>cafef.vn</a> hoặc "
+            "<a href='https://vietstock.vn' target='_blank'>vietstock.vn</a> "
+            "(không có free real-time API).</small>",
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
