@@ -26,12 +26,42 @@ def _read_progress() -> dict:
         return {}
 
 
-def _is_running() -> bool:
-    """Kiểm tra subprocess scan có đang chạy không qua PID lưu trong session_state."""
-    proc: subprocess.Popen | None = st.session_state.get("fund_scan_proc")
-    if proc is None:
+def _pid_alive(pid: int) -> bool:
+    """Kiểm tra process theo PID còn sống không (cross-platform)."""
+    try:
+        import os, signal
+        if sys.platform == "win32":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)
+            if not handle:
+                return False
+            import ctypes.wintypes
+            code = ctypes.wintypes.DWORD()
+            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return code.value == 259  # STILL_ACTIVE
+        else:
+            os.kill(pid, 0)
+            return True
+    except Exception:
         return False
-    return proc.poll() is None  # None = vẫn đang chạy
+
+
+def _is_running() -> bool:
+    """Kiểm tra subprocess scan có đang chạy không.
+
+    Ưu tiên: proc trong session_state → PID trong progress file.
+    PID fallback giúp UI không mất track khi Streamlit reload session.
+    """
+    proc: subprocess.Popen | None = st.session_state.get("fund_scan_proc")
+    if proc is not None and proc.poll() is None:
+        return True
+    # Fallback: kiểm tra PID từ progress file (sau khi session_state bị reset)
+    prog = _read_progress()
+    pid = prog.get("pid")
+    if pid and prog.get("status") == "running":
+        return _pid_alive(int(pid))
+    return False
 
 
 def render(_ctx: dict) -> None:
@@ -95,16 +125,21 @@ def render(_ctx: dict) -> None:
             st.rerun()
 
     # ── Progress bar (auto-refresh mỗi 3 giây khi đang quét) ────────────
-    if running or (prog.get("status") == "running"):
+    if running or prog.get("status") in ("running", "enriching"):
         pi    = prog.get("done",  0)
         pt    = prog.get("total", 1)
         ps    = prog.get("current", "...")
         pct   = prog.get("pct", 0.0) / 100
-        remain = int((pt - pi) * 0.6)
+        status = prog.get("status", "running")
+        if status == "enriching":
+            label = f"Cập nhật thanh khoản **{ps.replace('[VOL] ', '')}** ({pi:,}/{pt:,})"
+            remain = int((pt - pi) * 0.5)
+        else:
+            label = f"Đang quét **{ps}** ({pi:,}/{pt:,})"
+            remain = int((pt - pi) * 0.6)
         st.progress(
             min(pct, 1.0),
-            text=f"Đang quét **{ps}** ({pi:,}/{pt:,}) — "
-                 f"ước tính còn {remain // 60} phút {remain % 60} giây",
+            text=f"{label} — ước tính còn {remain // 60} phút {remain % 60} giây",
         )
         st.caption(f"Cập nhật lúc {prog.get('ts','')}")
         import time as _time
@@ -130,6 +165,7 @@ def render(_ctx: dict) -> None:
     st.divider()
 
     # ── Bộ lọc ───────────────────────────────────────────────────────────
+    has_volume = any(r.get("avg_vol_20d") is not None for r in fund_data)
     with st.expander("⚙️ Điều chỉnh ngưỡng lọc", expanded=True):
         fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
         fi_pe   = fc1.number_input("P/E tối đa",            0.0, 200.0,  25.0, 1.0,  key="fund_fi_pe")
@@ -139,6 +175,28 @@ def render(_ctx: dict) -> None:
         fi_nm   = fc5.number_input("Biên ròng tối thiểu %", -100.0, 100.0, 0.0, 1.0, key="fund_fi_nm")
         fi_nmin = fc6.number_input("Tiêu chí tối thiểu",   1, 5, 4,              key="fund_fi_nmin")
 
+        if has_volume:
+            st.markdown("**Thanh khoản** (KL TB 20 phiên — hard filter, áp dụng trước checklist)")
+            fv1, fv2 = st.columns([2, 4])
+            fi_vol = fv1.number_input(
+                "KL tối thiểu (nghìn CP/ngày)", 0, 50000, 100, 50,
+                key="fund_fi_vol",
+                help="0 = bỏ qua filter thanh khoản. Mã không có dữ liệu KL bị loại khi > 0.",
+            )
+            fi_vol_actual = fi_vol * 1000
+            if fi_vol > 0:
+                n_with_vol = sum(1 for r in fund_data if r.get("avg_vol_20d") is not None)
+                fv2.caption(
+                    f"{n_with_vol:,}/{len(fund_data):,} mã có dữ liệu khối lượng. "
+                    "Mã thiếu dữ liệu sẽ bị loại khi filter > 0."
+                )
+        else:
+            fi_vol_actual = 0
+            st.caption(
+                "⚠️ Chưa có dữ liệu khối lượng. Chạy lại **Cập nhật** để bổ sung "
+                "(sau khi quét cơ bản xong, hệ thống tự động cập nhật KL TB 20 phiên)."
+            )
+
     filtered = filter_checklist(
         fund_data,
         pe_max=float(fi_pe),
@@ -147,10 +205,12 @@ def render(_ctx: dict) -> None:
         de_max=float(fi_de),
         net_margin_min=float(fi_nm),
         min_pass=int(fi_nmin),
+        vol_min=float(fi_vol_actual),
     )
 
+    vol_note = f", KL ≥ {fi_vol:,}K CP/ngày" if has_volume and fi_vol_actual > 0 else ""
     st.markdown(
-        f"**{len(filtered):,} mã** đạt ≥{int(fi_nmin)}/5 tiêu chí cơ bản "
+        f"**{len(filtered):,} mã** đạt ≥{int(fi_nmin)}/5 tiêu chí cơ bản{vol_note} "
         f"(từ tổng {len(fund_data):,} mã có dữ liệu)"
     )
 
@@ -172,6 +232,10 @@ def render(_ctx: dict) -> None:
             "Tăng trưởng LN": (
                 f"{r['pat_growth']:+.1f}%"
                 if r.get("pat_growth") is not None else "—"
+            ),
+            "KL TB 20P":  (
+                f"{r['avg_vol_20d'] / 1e6:.1f}M"
+                if r.get("avg_vol_20d") is not None else "—"
             ),
             "Tiêu chí":      f"{r.get('n_pass', 0)}/5",
         })

@@ -1,12 +1,11 @@
 """Fetch và cache chỉ số cơ bản toàn thị trường từ vnstock KBS source."""
-import concurrent.futures
 import json
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-_FETCH_TIMEOUT = 15  # giây tối đa cho mỗi mã — tránh treo vô hạn
+_FETCH_TIMEOUT = 15  # giây tối đa mỗi mã (requests timeout thực sự)
 
 _DATA_DIR   = Path(__file__).parent.parent / "data"
 _CACHE_PATH = _DATA_DIR / "fundamental_cache.json"
@@ -43,20 +42,20 @@ def fetch_fundamental(symbol: str) -> Optional[dict]:
         gm  = _get("gross_margin")
         ci  = _get("cash_to_income")
 
-        pat0 = _get("profit_after_tax_for_shareholders_of_the_parent_company", 0)
-        pat4 = _get("profit_after_tax_for_shareholders_of_the_parent_company", 4)
-        pat_growth = None
-        if pat0 is not None and pat4 is not None and pat4 != 0:
-            pat_growth = (pat0 - pat4) / abs(pat4) * 100
+        # KBS trả % tăng trưởng YoY cho PAT trực tiếp ở col[0]
+        pat_growth = _get("profit_after_tax_for_shareholders_of_the_parent_company", 0)
 
         return {
             "symbol":       symbol,
             "pe":           pe,
             "pb":           pb,
-            "roe":          roe * 100 if roe is not None else None,
-            "de":           de,
-            "net_margin":   nm * 100 if nm is not None else None,
-            "gross_margin": gm * 100 if gm is not None else None,
+            # KBS trả ROE theo quý (%), nhân 4 để annualize
+            "roe":          roe * 4 if roe is not None else None,
+            # KBS trả D/E dạng % (70.24 = 0.7024x), chia 100 để ra ratio
+            "de":           de / 100 if de is not None else None,
+            # net_margin, gross_margin đã là % — không nhân 100
+            "net_margin":   nm,
+            "gross_margin": gm,
             "cash_quality": ci,
             "pat_growth":   pat_growth,
             "period":       year_cols[0] if year_cols else None,
@@ -81,16 +80,63 @@ def _save_checkpoint(done: list, all_syms: list, partial_map: dict) -> None:
             "all_symbols": all_syms,
             "partial":     list(partial_map.values()),
             "saved_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }, ensure_ascii=False),
+        }, ensure_ascii=True),
         encoding="utf-8",
     )
+
+
+def fetch_avg_volume(symbol: str) -> Optional[float]:
+    """Fetch khối lượng giao dịch TB 20 phiên gần nhất (VCI source)."""
+    try:
+        from datetime import timedelta
+        from vnstock import Vnstock
+        end = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+        h = Vnstock().stock(symbol=symbol, source="VCI").quote.history(
+            start=start, end=end, interval="1D"
+        )
+        if h is None or h.empty or "volume" not in h.columns:
+            return None
+        tail = h["volume"].tail(20)
+        return float(tail.mean()) if len(tail) > 0 else None
+    except Exception:
+        return None
+
+
+def enrich_with_volumes(
+    results: list[dict],
+    progress_callback: Optional[Callable] = None,
+    delay: float = 0.5,
+) -> list[dict]:
+    """Bổ sung avg_vol_20d vào từng record và ghi lại cache."""
+    total = len(results)
+    for i, rec in enumerate(results):
+        if progress_callback:
+            progress_callback(i, total, rec["symbol"])
+        if rec.get("avg_vol_20d") is not None:
+            continue  # đã có rồi, bỏ qua
+        try:
+            vol = fetch_avg_volume(rec["symbol"])
+        except Exception:
+            vol = None
+        rec["avg_vol_20d"] = vol
+        time.sleep(delay)
+    _CACHE_PATH.write_text(
+        json.dumps({
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "count":      len(results),
+            "data":       results,
+        }, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    return results
 
 
 def scan_all_fundamentals(
     symbols: Optional[list] = None,
     progress_callback: Optional[Callable] = None,
     resume: bool = True,
-    delay: float = 0.05,
+    delay: float = 0.3,
 ) -> list[dict]:
     """Quét toàn thị trường. Hỗ trợ resume từ checkpoint nếu bị ngắt giữa chừng."""
     if symbols is None:
@@ -113,17 +159,25 @@ def scan_all_fundamentals(
             progress_callback(i, total, sym)
         if sym in done_set:
             continue
-        # Timeout per symbol — tránh treo vô hạn khi vnstock API không phản hồi
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
-                _fut = _ex.submit(fetch_fundamental, sym)
-                rec = _fut.result(timeout=_FETCH_TIMEOUT)
-        except (concurrent.futures.TimeoutError, Exception):
-            rec = None
+            rec = fetch_fundamental(sym)
+        except Exception as _e:
+            # RateLimitExceeded từ vnai (sau khi patch CleanErrorContext)
+            # → sleep retry_after rồi thử lại 1 lần
+            _ename = type(_e).__name__
+            if "RateLimit" in _ename or "rate" in _ename.lower():
+                _wait = min(int(getattr(_e, "retry_after", 65) or 65) + 5, 120)
+                time.sleep(_wait)
+                try:
+                    rec = fetch_fundamental(sym)
+                except Exception:
+                    rec = None
+            else:
+                rec = None
         if rec:
             results_map[sym] = rec
         done_set.add(sym)
-        if i % 50 == 0:
+        if i % 20 == 0:
             _save_checkpoint(list(done_set), symbols, results_map)
         time.sleep(delay)
 
@@ -136,7 +190,7 @@ def scan_all_fundamentals(
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "count":      len(results),
             "data":       results,
-        }, ensure_ascii=False),
+        }, ensure_ascii=True),
         encoding="utf-8",
     )
     _CKPT_PATH.unlink(missing_ok=True)
@@ -172,10 +226,16 @@ def filter_checklist(
     de_max: float = 1.5,
     net_margin_min: float = 0.0,
     min_pass: int = 4,
+    vol_min: float = 0.0,
 ) -> list[dict]:
     """Lọc danh sách mã theo checklist đầu tư. Trả danh sách đã sắp xếp theo ROE giảm dần."""
     result = []
     for r in rows:
+        # Hard filter thanh khoản — áp dụng trước checklist
+        if vol_min > 0:
+            avg_vol = r.get("avg_vol_20d")
+            if avg_vol is None or avg_vol < vol_min:
+                continue
         checks = {
             "P/E hợp lý":     (r.get("pe")  is not None) and r["pe"]  < pe_max,
             "P/B hợp lý":     (r.get("pb")  is not None) and r["pb"]  < pb_max,
