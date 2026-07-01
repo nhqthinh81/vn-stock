@@ -1080,92 +1080,139 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
 
         st.markdown("---")
 
-        # ── 3. Vĩ mô VN — GDP/CPI từ World Bank/IMF + dữ liệu tĩnh từ GSO/NHNN ──
+        # ── 3. Vĩ mô VN — 3 nguồn: World Bank, IMF WEO, GSO/NHNN tĩnh ────────
         st.markdown("#### 🇻🇳 Vĩ mô Việt Nam")
-
-        # World Bank (GDP, CPI, trade balance) — ưu tiên hơn IMF (có dữ liệu 2025)
-        _wb = fetch_wb_macro()
+        _wb    = fetch_wb_macro()
         _macro = _fetch_macro()
-
-        _wb_gdp   = _wb.get("gdp_growth")
-        _wb_cpi   = _wb.get("cpi")
-        _wb_trade = _wb.get("trade_balance")
-
-        # Fallback sang IMF nếu WB không có
-        if not _wb_gdp and not _macro.get("error"):
-            def _latest_m(series):
-                return series[0] if series else None
-            def _label_yr(item):
-                if not item: return "—"
-                tag = " (dự báo)" if item.get("is_forecast") else ""
-                return f"{item['year']}{tag}"
-            _gdp_imf = _latest_m(_macro.get("gdp_growth", []))
-            _cpi_imf = _latest_m(_macro.get("cpi", []))
-            _ca_imf  = _latest_m(_macro.get("current_acct", []))
-        else:
-            _gdp_imf = _cpi_imf = _ca_imf = None
-
-        # GDP / CPI metrics
-        _wb_gdp_val = f"{_wb_gdp['value']:+.2f}% ({_wb_gdp['year']})" if _wb_gdp else (
-            f"{_gdp_imf['value']:+.2f}% ({_gdp_imf['year']})" if _gdp_imf else "—")
-        _wb_cpi_val = f"{_wb_cpi['value']:+.2f}% ({_wb_cpi['year']})" if _wb_cpi else (
-            f"{_cpi_imf['value']:+.2f}% ({_cpi_imf['year']})" if _cpi_imf else "—")
-
-        if _wb_trade:
-            _tb_val = _wb_trade["value"]
-            _tb_str = f"+${_tb_val/1e9:.1f}B USD ({_wb_trade['year']})"
-        elif _ca_imf:
-            _tb_str = f"{_ca_imf['value']:+.2f}% GDP ({_ca_imf['year']})"
-        else:
-            _tb_str = "—"
-
-        imf_c1, imf_c2, imf_c3 = st.columns(3)
-        imf_c1.metric("GDP tăng trưởng", _wb_gdp_val)
-        imf_c2.metric("Lạm phát CPI",    _wb_cpi_val)
-        imf_c3.metric("Cán cân thương mại", _tb_str)
-        _wb_src = "World Bank" if _wb_gdp else "IMF WEO"
-        st.caption(f"Nguồn: {_wb_src} (lag ~1 năm)")
-
-        # Dữ liệu tĩnh từ GSO/NHNN/MPI
         _smacro = load_static_macro()
-        _sitems = _smacro.get("items", [])
-        if _sitems:
-            st.markdown(f"<small style='color:#888'>Dữ liệu tham chiếu — nguồn: {_smacro.get('source_note','GSO/NHNN')} · Cập nhật: {_smacro.get('updated_at','')}</small>",
-                        unsafe_allow_html=True)
-            # Chia thành 2 hàng, mỗi hàng 4 cột
-            _grp1 = _sitems[:4]
-            _grp2 = _sitems[4:]
-            _cols1 = st.columns(len(_grp1))
-            for _ci, _item in enumerate(_grp1):
-                _v = _item.get("value")
-                _lbl = _item["label"]
-                _unit = _item.get("unit", "")
-                _period = _item.get("period", "")
-                _note = _item.get("note", "")
-                _cols1[_ci].metric(
-                    f"{_lbl}\n({_period})",
-                    f"{_v:g} {_unit}" if _v is not None else "—",
-                    help=_note if _note else None,
+
+        _src_wb, _src_imf, _src_static = st.tabs([
+            "🌐 World Bank (tự động)",
+            "📌 IMF WEO (tự động + dự báo)",
+            "📋 GSO / NHNN (thủ công)",
+        ])
+
+        # ── Tab World Bank ────────────────────────────────────────────────────
+        with _src_wb:
+            _wb_gdp   = _wb.get("gdp_growth")
+            _wb_cpi   = _wb.get("cpi")
+            _wb_trade = _wb.get("trade_balance")
+            if _wb_gdp or _wb_cpi or _wb_trade:
+                _wc1, _wc2, _wc3 = st.columns(3)
+                _wc1.metric(
+                    f"GDP tăng trưởng ({_wb_gdp['year'] if _wb_gdp else '—'})",
+                    f"{_wb_gdp['value']:+.2f}%" if _wb_gdp else "—",
                 )
-            if _grp2:
-                _cols2 = st.columns(len(_grp2))
-                for _ci, _item in enumerate(_grp2):
-                    _v = _item.get("value")
-                    _lbl = _item["label"]
-                    _unit = _item.get("unit", "")
-                    _period = _item.get("period", "")
-                    _note = _item.get("note", "")
-                    _cols2[_ci].metric(
-                        f"{_lbl}\n({_period})",
-                        f"{_v:g} {_unit}" if _v is not None else "—",
-                        help=_note if _note else None,
+                _wc2.metric(
+                    f"Lạm phát CPI ({_wb_cpi['year'] if _wb_cpi else '—'})",
+                    f"{_wb_cpi['value']:+.2f}%" if _wb_cpi else "—",
+                )
+                if _wb_trade:
+                    _tb_sign = "+" if _wb_trade["value"] >= 0 else ""
+                    _wc3.metric(
+                        f"Cán cân thương mại ({_wb_trade['year']})",
+                        f"{_tb_sign}${_wb_trade['value']/1e9:.1f}B USD",
                     )
+                else:
+                    _wc3.metric("Cán cân thương mại", "—")
+                _wb_ts = _wb.get("fetched_at", "")[:16].replace("T", " ")
+                st.caption(f"Nguồn: World Bank Open Data · lag ~1 năm · cập nhật cache: {_wb_ts}")
+            else:
+                st.info("Chưa tải được dữ liệu World Bank. Có thể do timeout (server WB chậm). Thử lại sau.")
+                st.caption("Endpoint: api.worldbank.org/v2/country/VN/indicator/... (timeout=30s)")
+
+        # ── Tab IMF WEO ───────────────────────────────────────────────────────
+        with _src_imf:
+            if _macro.get("error"):
+                st.warning(f"Không tải được IMF WEO: {_macro['error']}")
+            else:
+                def _latest_m(series):
+                    return series[0] if series else None
+                def _label_yr(item):
+                    if not item: return "—"
+                    return f"{item['year']}" + (" 📌dự báo" if item.get("is_forecast") else "")
+
+                _gdp_imf = _latest_m(_macro.get("gdp_growth", []))
+                _cpi_imf = _latest_m(_macro.get("cpi", []))
+                _ca_imf  = _latest_m(_macro.get("current_acct", []))
+
+                _ic1, _ic2, _ic3 = st.columns(3)
+                _ic1.metric(f"GDP tăng trưởng ({_label_yr(_gdp_imf)})",
+                            f"{_gdp_imf['value']:+.2f}%" if _gdp_imf else "—")
+                _ic2.metric(f"Lạm phát CPI ({_label_yr(_cpi_imf)})",
+                            f"{_cpi_imf['value']:+.2f}%" if _cpi_imf else "—")
+                _ic3.metric(f"Cán cân vãng lai ({_label_yr(_ca_imf)})",
+                            f"{_ca_imf['value']:+.2f}% GDP" if _ca_imf else "—")
+
+                # Chart GDP + CPI lịch sử nhiều năm (điểm mạnh của IMF so với WB)
+                if len(_macro.get("gdp_growth", [])) >= 2:
+                    import plotly.graph_objects as _go
+                    _gdp_data = sorted(_macro["gdp_growth"], key=lambda x: x["year"])
+                    _fig_m = _go.Figure()
+                    _fig_m.add_trace(_go.Scatter(
+                        x=[d["year"] for d in _gdp_data],
+                        y=[d["value"] for d in _gdp_data],
+                        mode="lines+markers+text",
+                        text=[("📌" if d.get("is_forecast") else "") + f"{d['value']:+.1f}%" for d in _gdp_data],
+                        textposition="top center",
+                        name="GDP Growth %",
+                        line=dict(color="#00e676", width=2),
+                        marker=dict(size=7),
+                    ))
+                    if _macro.get("cpi"):
+                        _cpi_data = sorted(_macro["cpi"], key=lambda x: x["year"])
+                        _fig_m.add_trace(_go.Scatter(
+                            x=[d["year"] for d in _cpi_data],
+                            y=[d["value"] for d in _cpi_data],
+                            mode="lines+markers",
+                            name="CPI %",
+                            line=dict(color="#ff6d00", width=2, dash="dot"),
+                            marker=dict(size=6),
+                        ))
+                    _fig_m.update_layout(
+                        height=200, template="plotly_dark",
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        legend=dict(orientation="h", y=1.15),
+                        yaxis=dict(ticksuffix="%"),
+                    )
+                    st.plotly_chart(_fig_m, use_container_width=True)
+                st.caption(f"Nguồn: IMF WEO Datamapper · 📌 = dự báo/ước tính năm hiện tại · cập nhật: {_macro.get('updated','')}")
+
+        # ── Tab GSO / NHNN (dữ liệu tĩnh, cập nhật thủ công) ─────────────────
+        with _src_static:
+            _sitems = _smacro.get("items", [])
+            if _sitems:
+                st.markdown(
+                    f"<small style='color:#888'>Cập nhật thủ công: {_smacro.get('updated_at','')} "
+                    f"· Nguồn: {_smacro.get('source_note','GSO/NHNN')}</small>",
+                    unsafe_allow_html=True,
+                )
+                # Hiển thị tất cả items theo lưới 3 cột
+                _n_cols = 3
+                for _row_start in range(0, len(_sitems), _n_cols):
+                    _row = _sitems[_row_start:_row_start + _n_cols]
+                    _rcols = st.columns(_n_cols)
+                    for _ci, _item in enumerate(_row):
+                        _v     = _item.get("value")
+                        _unit  = _item.get("unit", "")
+                        _note  = _item.get("note", "")
+                        _src   = _item.get("source", "")
+                        _rcols[_ci].metric(
+                            f"{_item['label']} ({_item.get('period','')})",
+                            f"{_v:g} {_unit}" if _v is not None else "—",
+                            help=f"{_note} | Nguồn: {_src}" if _note else f"Nguồn: {_src}",
+                        )
+            else:
+                st.info("Chưa có dữ liệu. Tạo file `data/macro_static.json` để cập nhật.")
+            st.caption(
+                "⚠️ Dữ liệu này cập nhật thủ công theo quý từ gso.gov.vn và nhnn.gov.vn. "
+                "GSO không có public JSON API — chỉ có PX-Web interface."
+            )
 
         st.markdown(
-            "<small style='color:#555'>⚠️ Dữ liệu khối ngoại mua/bán ròng, margin, P/E thị trường: "
-            "xem <a href='https://cafef.vn' target='_blank'>cafef.vn</a> hoặc "
-            "<a href='https://vietstock.vn' target='_blank'>vietstock.vn</a> "
-            "(không có free real-time API).</small>",
+            "<small style='color:#555'>📊 Margin, P/E thị trường, khối ngoại chi tiết: "
+            "<a href='https://cafef.vn' target='_blank'>cafef.vn</a> · "
+            "<a href='https://vietstock.vn' target='_blank'>vietstock.vn</a></small>",
             unsafe_allow_html=True,
         )
 
