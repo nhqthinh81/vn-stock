@@ -1056,10 +1056,10 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
             _vi_c3.metric("1 tháng",      f"{_vi.get('chg_20d'):+.2f}%" if _vi.get('chg_20d') is not None else "—")
             _lv = _vi.get("last_vol")
             _av = _vi.get("avg_vol_5d")
-            _vi_c4.metric("KL phiên (tỷ VND)*", f"{_lv/1e9:.0f}" if _lv else "—")
-            _vi_c5.metric("KL TB 5P (tỷ)*",      f"{_av/1e9:.0f}" if _av else "—")
+            _vi_c4.metric("KL phiên (triệu CP)*", f"{_lv/1e6:.0f}" if _lv else "—")
+            _vi_c5.metric("KL TB 5P (triệu CP)*", f"{_av/1e6:.0f}" if _av else "—")
             _vi_src = _vi.get("source", "VPS")
-            st.caption(f"*KL = số CP × giá (ước tính) — nguồn VPS chart API · Cập nhật: {_vi.get('fetched_at','')[:16].replace('T',' ')}")
+            st.caption(f"*KL = số cổ phiếu khớp lệnh toàn thị trường (triệu CP) — nguồn VPS chart API · Cập nhật: {_vi.get('fetched_at','')[:16].replace('T',' ')}")
         else:
             st.caption("Không tải được dữ liệu VNINDEX.")
 
