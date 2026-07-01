@@ -5,12 +5,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-_DATA_DIR   = Path(__file__).parent.parent / "data"
-_CACHE_PATH = _DATA_DIR / "macro_cache.json"
+_DATA_DIR    = Path(__file__).parent.parent / "data"
+_CACHE_PATH  = _DATA_DIR / "macro_cache.json"
 _STATIC_PATH = _DATA_DIR / "macro_static.json"
 
-# TTL cho real-time data: 15 phút
-_REALTIME_TTL = 900
+# TTL: 15 phút cho real-time, 6 giờ cho World Bank (lag 1 năm, không cần cập nhật thường)
+_REALTIME_TTL  = 900
+_WB_TTL        = 21600
 
 
 def _load_cache() -> dict:
@@ -83,7 +84,11 @@ def fetch_global_market(force: bool = False) -> dict:
 
 
 def fetch_vnindex_stats(force: bool = False) -> dict:
-    """Lấy thống kê VNINDEX: giá, thay đổi 1D/1W/1M, khối lượng giao dịch."""
+    """Lấy thống kê VNINDEX: giá, thay đổi 1D/1W/1M, khối lượng.
+
+    Dùng VPS chart API (histdatafeed.vps.com.vn) — nhanh, không cần key,
+    trả về OHLCV daily chính xác. Fallback: vnstock VCI.
+    """
     cache = _load_cache()
     vi = cache.get("vnindex_stats", {})
     if not force and _is_fresh(vi.get("fetched_at", "")):
@@ -91,58 +96,177 @@ def fetch_vnindex_stats(force: bool = False) -> dict:
 
     result: dict = {"fetched_at": datetime.now().isoformat()}
 
+    # Thử VPS chart API trước (nhanh, ổn định hơn vnstock VCI)
     try:
-        from vnstock import Vnstock
-        end = datetime.now().strftime("%Y-%m-%d")
-        start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
-        h = Vnstock().stock(symbol="VNINDEX", source="VCI").quote.history(
-            start=start, end=end, interval="1D"
+        import requests as _req
+        end_ts = int(time.time())
+        start_ts = end_ts - 86400 * 35  # 35 ngày để tính 20D change
+        r = _req.get(
+            "https://histdatafeed.vps.com.vn/tradingview/history"
+            f"?symbol=VNINDEX&resolution=D&from={start_ts}&to={end_ts}",
+            timeout=10,
         )
-        if h is None or h.empty:
-            cache["vnindex_stats"] = result
-            _save_cache(cache)
-            return result
+        if r.status_code == 200:
+            data = r.json()
+            closes  = data.get("c", [])
+            volumes = data.get("v", [])
+            if closes:
+                last_price = float(closes[-1])
+                result["price"] = last_price
 
-        close = h["close"].dropna()
-        volume = h["volume"].dropna() if "volume" in h.columns else None
+                def _chg(n):
+                    if len(closes) > n:
+                        p = float(closes[-(n + 1)])
+                        return (last_price - p) / p * 100 if p else None
+                    return None
 
-        if len(close) < 1:
-            cache["vnindex_stats"] = result
-            _save_cache(cache)
-            return result
-
-        last_price = float(close.iloc[-1])
-        result["price"] = last_price
-
-        def _chg(n):
-            if len(close) > n:
-                p = float(close.iloc[-(n + 1)])
-                return (last_price - p) / p * 100 if p else None
-            return None
-
-        result["chg_1d"]  = _chg(1)
-        result["chg_5d"]  = _chg(5)
-        result["chg_20d"] = _chg(20)
-
-        if volume is not None and len(volume) >= 5:
-            # Giá trị khớp lệnh TB 5 phiên (tỷ đồng — ước tính: volume * price * 0.001)
-            avg_vol_5d = float(volume.tail(5).mean())
-            result["avg_vol_5d"] = avg_vol_5d
-            result["last_vol"]   = float(volume.iloc[-1]) if len(volume) > 0 else None
-
+                result["chg_1d"]  = _chg(1)
+                result["chg_5d"]  = _chg(5)
+                result["chg_20d"] = _chg(20)
+                if volumes:
+                    result["last_vol"]   = float(volumes[-1])
+                    result["avg_vol_5d"] = float(sum(volumes[-5:]) / min(len(volumes), 5))
+                result["source"] = "VPS"
     except Exception:
         pass
+
+    # Fallback: vnstock VCI nếu VPS không thành công
+    if not result.get("price"):
+        try:
+            from vnstock import Vnstock
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+            h = Vnstock().stock(symbol="VNINDEX", source="VCI").quote.history(
+                start=start, end=end, interval="1D"
+            )
+            if h is not None and not h.empty:
+                close  = h["close"].dropna()
+                volume = h["volume"].dropna() if "volume" in h.columns else None
+                if len(close) >= 1:
+                    last_price = float(close.iloc[-1])
+                    result["price"] = last_price
+
+                    def _chg2(n):
+                        if len(close) > n:
+                            p = float(close.iloc[-(n + 1)])
+                            return (last_price - p) / p * 100 if p else None
+                        return None
+
+                    result["chg_1d"]  = _chg2(1)
+                    result["chg_5d"]  = _chg2(5)
+                    result["chg_20d"] = _chg2(20)
+                    if volume is not None and len(volume) >= 1:
+                        result["last_vol"]   = float(volume.iloc[-1])
+                        result["avg_vol_5d"] = float(volume.tail(5).mean())
+                    result["source"] = "VCI"
+        except Exception:
+            pass
 
     cache["vnindex_stats"] = result
     _save_cache(cache)
     return result
 
 
-def load_static_macro() -> dict:
-    """Load dữ liệu vĩ mô VN tĩnh (GDP, CPI, lãi suất...) từ file JSON.
+def fetch_foreign_flow(force: bool = False) -> dict:
+    """Lấy khối ngoại mua/bán ròng intraday qua vnstock VCI price_board (VN30 basket).
 
-    File được cập nhật thủ công hoặc qua hàm update_static_macro().
-    Nếu file chưa tồn tại, trả về dữ liệu mẫu với giá trị gần nhất từ nguồn công khai.
+    Trả về tổng giá trị mua/bán ròng của khối ngoại trên ~30 mã lớn (VNĐ).
+    Lag: intraday (dữ liệu phiên đang diễn ra hoặc phiên cuối).
+    """
+    cache = _load_cache()
+    ff = cache.get("foreign_flow", {})
+    if not force and _is_fresh(ff.get("fetched_at", "")):
+        return ff
+
+    result: dict = {"fetched_at": datetime.now().isoformat()}
+
+    # VN30 basket (30 mã vốn hóa lớn nhất HOSE)
+    VN30 = [
+        "ACB", "BCM", "BID", "BVH", "CTG", "FPT", "GAS", "GVR",
+        "HDB", "HPG", "LPB", "MBB", "MSN", "MWG", "PLX", "POW",
+        "SAB", "SHB", "SSB", "SSI", "STB", "TCB", "TPB", "VCB",
+        "VHM", "VIB", "VIC", "VJC", "VNM", "VPB",
+    ]
+
+    try:
+        from vnstock import Trading
+        t = Trading(source="VCI", symbol=VN30[0])
+        board = t.price_board(symbols_list=VN30)
+
+        if board is not None and not board.empty:
+            # MultiIndex columns → flatten
+            if hasattr(board.columns, "levels"):
+                board.columns = ["_".join(c).strip("_") for c in board.columns]
+
+            buy_col  = next((c for c in board.columns if "foreign_buy_value"  in c.lower()), None)
+            sell_col = next((c for c in board.columns if "foreign_sell_value" in c.lower()), None)
+
+            if buy_col and sell_col:
+                total_buy  = float(board[buy_col].fillna(0).sum())
+                total_sell = float(board[sell_col].fillna(0).sum())
+                result.update({
+                    "buy_vnd":  total_buy,
+                    "sell_vnd": total_sell,
+                    "net_vnd":  total_buy - total_sell,
+                    "basket":   "VN30",
+                    "n_stocks": len(VN30),
+                })
+    except Exception:
+        pass
+
+    cache["foreign_flow"] = result
+    _save_cache(cache)
+    return result
+
+
+def fetch_wb_macro(force: bool = False) -> dict:
+    """Lấy GDP growth, CPI, current account từ World Bank API.
+
+    Lag: ~1 năm (dữ liệu năm 2025 sẽ có từ Q1/2026).
+    Free, không cần key. Timeout phải >=30s (server WB chậm).
+    Cache 6 tiếng.
+    """
+    cache = _load_cache()
+    wb = cache.get("wb_macro", {})
+    if not force and _is_fresh(wb.get("fetched_at", ""), ttl=_WB_TTL):
+        return wb
+
+    result: dict = {"fetched_at": datetime.now().isoformat()}
+
+    INDICATORS = {
+        "gdp_growth":    ("NY.GDP.MKTP.KD.ZG", "Tăng trưởng GDP (% YoY)"),
+        "cpi":           ("FP.CPI.TOTL.ZG",    "CPI lạm phát (% YoY)"),
+        "trade_balance": ("BN.CAB.XOKA.CD",    "Cán cân thương mại (USD)"),
+    }
+
+    try:
+        import requests as _req
+        for key, (ind_code, label) in INDICATORS.items():
+            try:
+                url = f"https://api.worldbank.org/v2/country/VN/indicator/{ind_code}?format=json&mrv=5"
+                r = _req.get(url, timeout=30)
+                if r.status_code == 200:
+                    records = [x for x in r.json()[1] if x["value"] is not None]
+                    if records:
+                        result[key] = {
+                            "value": records[0]["value"],
+                            "year":  records[0]["date"],
+                            "label": label,
+                        }
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    cache["wb_macro"] = result
+    _save_cache(cache)
+    return result
+
+
+def load_static_macro() -> dict:
+    """Load dữ liệu vĩ mô VN tĩnh (lãi suất, M2, FDI...) từ file JSON.
+
+    File cập nhật thủ công theo quý. Nếu file chưa tồn tại, dùng default.
     """
     if _STATIC_PATH.exists():
         try:
@@ -153,54 +277,36 @@ def load_static_macro() -> dict:
 
 
 def _default_static_macro() -> dict:
-    """Dữ liệu vĩ mô VN mặc định — cập nhật cuối Q1/2026 từ GSO, NHNN, ADB."""
+    """Dữ liệu vĩ mô VN — các chỉ số không có free real-time API (cập nhật thủ công theo quý)."""
     return {
-        "updated_at": "2026-04-01",
-        "source_note": "GSO, NHNN, ADB — cập nhật thủ công theo quý",
+        "updated_at": "2026-07-01",
+        "source_note": "NHNN, GSO, MPI — cập nhật thủ công theo quý",
         "items": [
-            {
-                "key": "gdp_growth",
-                "label": "Tăng trưởng GDP",
-                "value": 7.09,
-                "unit": "% YoY",
-                "period": "2025 cả năm",
-                "note": "Mục tiêu 2026: 8%+",
-                "source": "GSO",
-            },
-            {
-                "key": "cpi",
-                "label": "CPI (lạm phát)",
-                "value": 3.24,
-                "unit": "% YoY",
-                "period": "Q1/2026",
-                "note": "Mục tiêu < 4.5%",
-                "source": "GSO",
-            },
             {
                 "key": "rate_refin",
                 "label": "Lãi suất tái cấp vốn",
                 "value": 4.50,
                 "unit": "%/năm",
-                "period": "Tháng 6/2025",
-                "note": "NHNN duy trì ổn định",
+                "period": "06/2025",
+                "note": "NHNN duy trì; lãi suất giảm → tích cực cho TTCK",
                 "source": "NHNN",
             },
             {
                 "key": "rate_deposit_12m",
-                "label": "Lãi suất huy động 12 tháng (TB)",
+                "label": "Lãi suất huy động 12T (TB)",
                 "value": 5.20,
                 "unit": "%/năm",
                 "period": "Q1/2026",
-                "note": "Áp lực dịch chuyển tiền gửi → TTCK khi lãi giảm",
+                "note": "Lãi tiết kiệm thấp → dịch chuyển tiền vào TTCK",
                 "source": "NHNN",
             },
             {
                 "key": "m2_growth",
-                "label": "Tăng trưởng cung tiền M2",
+                "label": "Tăng trưởng M2",
                 "value": 11.5,
                 "unit": "% YoY",
-                "period": "2025 cả năm",
-                "note": "Mục tiêu tín dụng 2026: 16%",
+                "period": "2025",
+                "note": "M2 cao → thanh khoản dồi dào",
                 "source": "NHNN",
             },
             {
@@ -208,26 +314,17 @@ def _default_static_macro() -> dict:
                 "label": "Tăng trưởng tín dụng",
                 "value": 15.08,
                 "unit": "% YoY",
-                "period": "2025 cả năm",
-                "note": "",
+                "period": "2025",
+                "note": "Mục tiêu 2026: 16%",
                 "source": "NHNN",
-            },
-            {
-                "key": "trade_balance",
-                "label": "Cán cân thương mại",
-                "value": 24.8,
-                "unit": "tỷ USD",
-                "period": "2025 cả năm",
-                "note": "Xuất siêu",
-                "source": "GSO",
             },
             {
                 "key": "fdi_disbursed",
                 "label": "FDI giải ngân",
                 "value": 25.35,
                 "unit": "tỷ USD",
-                "period": "2025 cả năm",
-                "note": "Cao nhất lịch sử",
+                "period": "2025",
+                "note": "Cao nhất lịch sử → hỗ trợ khu công nghiệp/BĐS KCN",
                 "source": "MPI",
             },
             {
@@ -235,8 +332,8 @@ def _default_static_macro() -> dict:
                 "label": "Giải ngân đầu tư công",
                 "value": 62.3,
                 "unit": "% kế hoạch",
-                "period": "2025 cả năm",
-                "note": "Động lực nhóm xây dựng/vật liệu/hạ tầng",
+                "period": "2025",
+                "note": "Động lực cho xây dựng/vật liệu/hạ tầng",
                 "source": "MOF",
             },
         ],
@@ -244,7 +341,7 @@ def _default_static_macro() -> dict:
 
 
 def save_static_macro(data: dict) -> None:
-    """Lưu dữ liệu vĩ mô tĩnh (dùng khi user cập nhật thủ công)."""
+    """Lưu dữ liệu vĩ mô tĩnh (dùng khi cập nhật thủ công)."""
     _DATA_DIR.mkdir(exist_ok=True)
     _STATIC_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -257,4 +354,6 @@ def get_macro_summary(force: bool = False) -> dict:
         "global_market": fetch_global_market(force=force),
         "vnindex_stats": fetch_vnindex_stats(force=force),
         "static_macro":  load_static_macro(),
+        "wb_macro":      fetch_wb_macro(force=force),
+        "foreign_flow":  fetch_foreign_flow(force=force),
     }
