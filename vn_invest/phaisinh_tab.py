@@ -527,20 +527,22 @@ def _calc_tp(df_1m: pd.DataFrame, signal: str, entry: float, sl: float | None,
 
 # ── Telegram / journal ────────────────────────────────────────────────────────
 
-def _send_telegram(msg: str):
+def _send_telegram(msg: str) -> bool:
     import requests  # type: ignore
     token   = os.getenv("TELEGRAM_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not (token and chat_id):
-        return
+        return False
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
-            timeout=3,
+            timeout=10,
         )
-    except Exception:
-        pass
+        return r.ok
+    except Exception as e:
+        print(f"[Telegram] Lỗi gửi: {e}")
+        return False
 
 
 def _send_telegram_async(msg: str):
@@ -564,7 +566,7 @@ def _append_journal(entry: dict):
     }])
     try:
         exists = os.path.exists(_JOURNAL_FILE)
-        row.to_csv(_JOURNAL_FILE, mode="a" if exists else "w", header=not exists, index=False)
+        row.to_csv(_JOURNAL_FILE, mode="a" if exists else "w", header=not exists, index=False, quoting=1)  # QUOTE_ALL
     except Exception:
         pass
 
@@ -1323,7 +1325,11 @@ def _live_panel_body():
     if _JOURNAL_FILE and os.path.exists(_JOURNAL_FILE):
         with st.expander("📂 Lịch sử Journal (file CSV)", expanded=False):
             try:
-                df_j = pd.read_csv(_JOURNAL_FILE).tail(50).iloc[::-1].reset_index(drop=True)
+                df_j = pd.read_csv(
+                    _JOURNAL_FILE,
+                    on_bad_lines="skip",
+                    engine="python",
+                ).tail(50).iloc[::-1].reset_index(drop=True)
                 # Render HTML để tô màu cột SL/TP/action
                 rows_j = ""
                 for _, r in df_j.iterrows():

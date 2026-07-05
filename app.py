@@ -391,9 +391,9 @@ with st.sidebar:
     )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_basic, tab_tech, tab_scan, tab_fund, tab_port, tab_model, tab_phaisinh, tab_news = st.tabs([
+tab_basic, tab_tech, tab_scan, tab_fund, tab_port, tab_model, tab_phaisinh, tab_news, tab_macro = st.tabs([
     "📊 Cơ Bản", "📉 Kỹ Thuật", "🔍 Quick Scan", "🏦 Lọc Cơ Bản",
-    "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh", "📰 Tin Tức",
+    "💼 Danh Mục", "🤖 Model AI", "⚡ Phái Sinh", "📰 Tin Tức", "🌐 Vĩ Mô",
 ])
 
 # ── ctx dict (shared context) ─────────────────────────────────────────────────
@@ -424,7 +424,7 @@ ctx = {
 # ── Tab routing ───────────────────────────────────────────────────────────────
 from tabs import tab_basic as _tb, tab_tech as _tt, tab_scan as _ts
 from tabs import tab_port as _tp, tab_model as _tm, tab_phaisinh as _tps, tab_news as _tn
-from tabs import tab_fundamental as _tf
+from tabs import tab_fundamental as _tf, tab_macro as _tmacro
 
 with tab_basic:
     _tb.render(ctx)
@@ -449,3 +449,6 @@ with tab_phaisinh:
 
 with tab_news:
     _tn.render(ctx)
+
+with tab_macro:
+    _tmacro.render(ctx)

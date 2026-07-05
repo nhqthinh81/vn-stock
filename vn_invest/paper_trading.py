@@ -1,5 +1,5 @@
 """
-Paper Trading Tracker — ghi nhận BUY-A signal, theo dõi P&L theo thời gian thực.
+Paper Trading Tracker — ghi nhận BUY-A / BUY-A* signal, theo dõi P&L theo thời gian thực.
 
 Data model (mỗi trade trong paper_trades.json):
 {
@@ -9,13 +9,15 @@ Data model (mỗi trade trong paper_trades.json):
   "entry_price": 28.5,
   "tech_score": 72.0,
   "rsi":        45.2,
-  "signal":     "BUY-A",
+  "signal":     "BUY-A" | "BUY-A*",
+  "sector":     "Banks",           # ngành ICB từ vnstock (dùng để phân biệt A*)
+  "is_star":    false | true,      # True nếu signal == "BUY-A*"
   "status":     "open" | "closed",
   "exit_date":  null | "2026-08-01",
   "exit_price": null | 31.0,
   "return_pct": null | 8.77,
   "result":     null | "win" | "loss",
-  "t5_target":  "2026-08-01",   # T+5 tuần
+  "t5_target":  "2026-08-01",      # T+5 tuần
   "note":       ""
 }
 """
@@ -55,7 +57,8 @@ def save_trades(trades: list[dict]) -> None:
 
 def add_trade(symbol: str, entry_price: float,
               tech_score: float = 0.0, rsi: float = 0.0,
-              signal: str = "BUY-A", note: str = "") -> dict:
+              signal: str = "BUY-A", sector: str = "",
+              note: str = "") -> dict:
     """Thêm trade mới. Trả về trade đã thêm."""
     trades = load_trades()
     today  = _today()
@@ -74,6 +77,8 @@ def add_trade(symbol: str, entry_price: float,
         "tech_score":  round(float(tech_score), 1),
         "rsi":         round(float(rsi), 1),
         "signal":      signal,
+        "sector":      sector,
+        "is_star":     signal == "BUY-A*",
         "status":      "open",
         "exit_date":   None,
         "exit_price":  None,
@@ -144,8 +149,22 @@ def update_prices(price_map: dict[str, float]) -> list[dict]:
     return trades
 
 
+def _calc_group_stats(closed: list[dict]) -> dict:
+    if not closed:
+        return {"n": 0, "win_rate": None, "avg_return": None, "best": None, "worst": None}
+    wins    = [t for t in closed if t["result"] == "win"]
+    returns = [t["return_pct"] for t in closed]
+    return {
+        "n":          len(closed),
+        "win_rate":   round(len(wins) / len(closed) * 100, 1),
+        "avg_return": round(sum(returns) / len(returns), 2),
+        "best":       round(max(returns), 2),
+        "worst":      round(min(returns), 2),
+    }
+
+
 def get_stats(trades: Optional[list[dict]] = None) -> dict:
-    """Tính win rate và các chỉ số tổng hợp."""
+    """Tính win rate và các chỉ số tổng hợp. Tách riêng BUY-A vs BUY-A*."""
     if trades is None:
         trades = load_trades()
 
@@ -153,12 +172,19 @@ def get_stats(trades: Optional[list[dict]] = None) -> dict:
     open_  = [t for t in trades if t["status"] == "open"]
 
     if not closed:
-        return {"total_closed": 0, "win": 0, "loss": 0, "win_rate": None,
-                "avg_return": None, "best": None, "worst": None, "total_open": len(open_)}
+        return {
+            "total_closed": 0, "win": 0, "loss": 0,
+            "win_rate": None, "avg_return": None, "best": None, "worst": None,
+            "total_open": len(open_),
+            "star": {"n": 0}, "non_star": {"n": 0},
+        }
 
-    wins   = [t for t in closed if t["result"] == "win"]
-    losses = [t for t in closed if t["result"] == "loss"]
+    wins    = [t for t in closed if t["result"] == "win"]
+    losses  = [t for t in closed if t["result"] == "loss"]
     returns = [t["return_pct"] for t in closed]
+
+    star_closed     = [t for t in closed if t.get("is_star") or t.get("signal") == "BUY-A*"]
+    non_star_closed = [t for t in closed if not (t.get("is_star") or t.get("signal") == "BUY-A*")]
 
     return {
         "total_closed": len(closed),
@@ -169,4 +195,6 @@ def get_stats(trades: Optional[list[dict]] = None) -> dict:
         "avg_return":   round(sum(returns) / len(returns), 2),
         "best":         round(max(returns), 2),
         "worst":        round(min(returns), 2),
+        "star":         _calc_group_stats(star_closed),      # BUY-A* riêng
+        "non_star":     _calc_group_stats(non_star_closed),  # BUY-A thường
     }

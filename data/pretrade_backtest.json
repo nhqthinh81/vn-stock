@@ -1,0 +1,179 @@
+{
+  "run_at": "2026-07-05 06:41",
+  "symbols_count": 3,
+  "data_points": 578,
+  "by_signal": {
+    "BUY-A": {
+      "t5": {
+        "n": 32,
+        "avg": 1.89,
+        "win_rate": 0.562,
+        "median": 1.9
+      },
+      "t10": {
+        "n": 30,
+        "avg": 3.29,
+        "win_rate": 0.867,
+        "median": 2.23
+      },
+      "t20": {
+        "n": 29,
+        "avg": 8.06,
+        "win_rate": 0.897,
+        "median": 5.92
+      },
+      "n_total": 32
+    },
+    "BUY-B": {
+      "t5": {
+        "n": 186,
+        "avg": 0.41,
+        "win_rate": 0.43,
+        "median": 0.0
+      },
+      "t10": {
+        "n": 178,
+        "avg": 0.38,
+        "win_rate": 0.421,
+        "median": 0.0
+      },
+      "t20": {
+        "n": 163,
+        "avg": -0.24,
+        "win_rate": 0.368,
+        "median": -1.43
+      },
+      "n_total": 194
+    },
+    "HOLD": {
+      "t5": {
+        "n": 299,
+        "avg": 0.06,
+        "win_rate": 0.411,
+        "median": 0.0
+      },
+      "t10": {
+        "n": 294,
+        "avg": 0.39,
+        "win_rate": 0.456,
+        "median": 0.0
+      },
+      "t20": {
+        "n": 280,
+        "avg": 1.03,
+        "win_rate": 0.446,
+        "median": 0.0
+      },
+      "n_total": 306
+    },
+    "SELL-B": {
+      "t5": {
+        "n": 37,
+        "avg": -0.62,
+        "win_rate": 0.27,
+        "median": -1.79
+      },
+      "t10": {
+        "n": 37,
+        "avg": -1.88,
+        "win_rate": 0.297,
+        "median": -2.44
+      },
+      "t20": {
+        "n": 37,
+        "avg": -2.77,
+        "win_rate": 0.216,
+        "median": -2.86
+      },
+      "n_total": 37
+    },
+    "SELL-A": {
+      "t5": {
+        "n": 9,
+        "avg": -0.84,
+        "win_rate": 0.333,
+        "median": -2.75
+      },
+      "t10": {
+        "n": 9,
+        "avg": -2.73,
+        "win_rate": 0.111,
+        "median": -3.03
+      },
+      "t20": {
+        "n": 9,
+        "avg": -4.09,
+        "win_rate": 0.0,
+        "median": -3.12
+      },
+      "n_total": 9
+    }
+  },
+  "by_score": {
+    "MUA zone (≥70)": {
+      "t5": {
+        "n": 32,
+        "avg": 1.89,
+        "win_rate": 0.562,
+        "median": 1.9
+      },
+      "t10": {
+        "n": 30,
+        "avg": 3.29,
+        "win_rate": 0.867,
+        "median": 2.23
+      },
+      "t20": {
+        "n": 29,
+        "avg": 8.06,
+        "win_rate": 0.897,
+        "median": 5.92
+      },
+      "n_total": 32
+    },
+    "CHỜ zone (50-70)": {
+      "t5": {
+        "n": 288,
+        "avg": 0.4,
+        "win_rate": 0.434,
+        "median": 0.0
+      },
+      "t10": {
+        "n": 280,
+        "avg": 0.61,
+        "win_rate": 0.443,
+        "median": 0.0
+      },
+      "t20": {
+        "n": 259,
+        "avg": 0.31,
+        "win_rate": 0.405,
+        "median": -0.94
+      },
+      "n_total": 299
+    },
+    "TRÁNH zone (<50)": {
+      "t5": {
+        "n": 243,
+        "avg": -0.22,
+        "win_rate": 0.374,
+        "median": 0.0
+      },
+      "t10": {
+        "n": 238,
+        "avg": -0.35,
+        "win_rate": 0.408,
+        "median": 0.0
+      },
+      "t20": {
+        "n": 230,
+        "avg": 0.13,
+        "win_rate": 0.383,
+        "median": 0.0
+      },
+      "n_total": 247
+    }
+  },
+  "verdict": "BUY-A avg T+10=+3.29% | win=87% | alpha=+2.90%",
+  "note": "Backtest chỉ kiểm chứng phần KT (tech_score). Fund/Macro/News là point-in-time, không tái tạo được cho dữ liệu lịch sử."
+}

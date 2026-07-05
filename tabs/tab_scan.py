@@ -36,10 +36,15 @@ def render(ctx: dict) -> None:
             _auto_pb = st.progress(0, text="📡 Phát hiện Amibroker export mới — đang tải...")
             def _auto_cb(i, total, sym):
                 _auto_pb.progress(min(i / max(total, 1), 1.0), text=f"Đang load {sym} ({i}/{total})")
-            st.session_state.scan_cache = refresh_signals_from_ami(progress_callback=_auto_cb)
+            _new_cache = refresh_signals_from_ami(progress_callback=_auto_cb)
+            # Chỉ cập nhật mtime khi result hợp lệ — tránh scan_cache bị kẹt rỗng cả session
             st.session_state.scan_ami_mtime = _ami_mtime_qs
             _auto_pb.empty()
-            st.toast(f"✅ Đã tải lại {len(st.session_state.scan_cache)} mã từ Amibroker export mới", icon="📡")
+            if _new_cache:
+                st.session_state.scan_cache = _new_cache
+                st.toast(f"✅ Đã tải lại {len(_new_cache)} mã từ Amibroker export mới", icon="📡")
+            else:
+                st.warning("⚠️ Amibroker export mới nhưng không đọc được dữ liệu — giữ cache cũ.")
 
     _ami_list      = get_ami_watchlist()
     _all_ami_syms  = get_all_ami_symbols()
@@ -209,7 +214,7 @@ def render(ctx: dict) -> None:
     st.divider()
 
     filter_cols = st.columns(5)
-    f_signal   = filter_cols[0].selectbox("Tín hiệu Python", ["Tất cả","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
+    f_signal   = filter_cols[0].selectbox("Tín hiệu Python", ["Tất cả","BUY-A*","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
     f_risk     = filter_cols[1].selectbox("Rủi ro",          ["Tất cả","Low","Medium","High"])
     f_phase    = filter_cols[2].selectbox("Giai đoạn",       ["Tất cả","Accumulation","Markup","Distribution","Markdown","Neutral"])
     f_ai       = filter_cols[3].selectbox("AI Score",        ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
@@ -267,19 +272,24 @@ def render(ctx: dict) -> None:
     _has_ai_full = "ai_score" in _df_full.columns and _df_full["ai_score"].notna().any() if not _df_full.empty else False
 
     from vn_invest.paper_trading import add_trade as _pt_add
-    _buya_rows = [r for r in (_active_cache or []) if r.get("signal") == "BUY-A"]
+    _buya_rows = [r for r in (_active_cache or []) if r.get("signal") in ("BUY-A", "BUY-A*")]
+    _buya_star_rows = [r for r in _buya_rows if r.get("signal") == "BUY-A*"]
     _pt_col1, _pt_col2 = st.columns([3, 1])
     with _pt_col1:
         if _buya_rows:
-            st.caption(f"📌 Hiện có **{len(_buya_rows)} mã BUY-A** trong cache: "
+            _caption_parts = []
+            if _buya_star_rows:
+                _caption_parts.append(f"⭐ **{len(_buya_star_rows)} mã BUY-A***")
+            _caption_parts.append(f"**{len(_buya_rows) - len(_buya_star_rows)} mã BUY-A**")
+            st.caption(f"📌 Hiện có " + " · ".join(_caption_parts) + " trong cache: "
                        + ", ".join(r["symbol"] for r in _buya_rows[:10])
                        + ("..." if len(_buya_rows) > 10 else ""))
         else:
-            st.caption("📌 Không có mã BUY-A trong cache hiện tại.")
+            st.caption("📌 Không có mã BUY-A / BUY-A* trong cache hiện tại.")
     with _pt_col2:
         if st.button("📌 Ghi BUY-A hôm nay", use_container_width=True,
                      disabled=not _buya_rows,
-                     help="Ghi toàn bộ mã BUY-A hiện tại vào Paper Trading để theo dõi T+5 tuần"):
+                     help="Ghi toàn bộ mã BUY-A và BUY-A* hiện tại vào Paper Trading để theo dõi T+5 tuần"):
             _added = []
             for _r in _buya_rows:
                 _pt_add(
@@ -287,7 +297,8 @@ def render(ctx: dict) -> None:
                     entry_price=float(_r.get("close") or 0),
                     tech_score=float(_r.get("tech_score") or 0),
                     rsi=float(_r.get("rsi") or 0),
-                    signal="BUY-A",
+                    signal=_r.get("signal", "BUY-A"),
+                    sector=_r.get("sector", ""),
                 )
                 _added.append(_r["symbol"])
             st.success(f"Đã ghi {len(_added)} mã vào Paper Trading: {', '.join(_added)}")
@@ -297,7 +308,7 @@ def render(ctx: dict) -> None:
         st.subheader("⚡ Khuyến Nghị Nhanh")
 
         _BAD_PHASES  = {"Distribution", "Markdown"}
-        _BUY_SIGNALS = {"BUY-A", "BUY-B"}
+        _BUY_SIGNALS = {"BUY-A*", "BUY-A", "BUY-B"}
         _DOWNTREND_PHASES = {"Markdown"}
 
         _STRONG_BEAR_PATTERNS = {
@@ -598,6 +609,36 @@ def render(ctx: dict) -> None:
                 "Forecast":  st.column_config.TextColumn(width="small"),
                 "Mẫu hình giá": st.column_config.TextColumn(width="large"),
             })
+
+        # ── Pre-Trade Analysis ─────────────────────────────────────────────────
+        _pt_syms = df_scan["symbol"].tolist() if "symbol" in df_scan.columns else []
+        if _pt_syms:
+            _pt_pick_col, _pt_btn_col = st.columns([3, 1])
+            with _pt_pick_col:
+                _pre_sym = st.selectbox(
+                    "🔬 Chọn mã để phân tích trước giao dịch",
+                    options=_pt_syms,
+                    key="pretrade_symbol_pick",
+                    help="Chọn mã → nhấn nút bên phải để mở phân tích toàn diện",
+                )
+            with _pt_btn_col:
+                st.markdown("<br>", unsafe_allow_html=True)
+                _run_pretrade = st.button(
+                    "🔬 Phân Tích Trước GD",
+                    key="pretrade_run_btn",
+                    type="primary",
+                    use_container_width=True,
+                )
+            if _run_pretrade and _pre_sym:
+                st.session_state["pretrade_open_sym"] = _pre_sym
+
+            _open_sym = st.session_state.get("pretrade_open_sym")
+            if _open_sym and _open_sym in _pt_syms:
+                _pt_row_list = [r for r in filtered if r.get("symbol") == _open_sym]
+                _pt_row = _pt_row_list[0] if _pt_row_list else {}
+                with st.expander(f"🔬 Phân Tích Trước Giao Dịch — {_open_sym}", expanded=True):
+                    from tabs.tab_pretrade import render_panel as _render_pretrade
+                    _render_pretrade(_open_sym, _pt_row)
 
         with st.expander("🔬 Phân tích nâng cao (kéo-thả như Tableau)", expanded=False):
             try:

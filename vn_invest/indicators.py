@@ -312,6 +312,35 @@ def classify_signal(
         return "SELL-A"
 
 
+# Ngành có alpha BUY-A cao (từ analyze_buya_alpha.py — backtest 4509 tín hiệu)
+_STAR_SECTORS: set[str] = {
+    "Oil & Gas",           # alpha +5.28%, win rate 64.5%
+    "Telecommunications",  # alpha +3.16%
+    "Basic Resources",     # alpha +1.27%, n=315
+    "Banks",               # alpha +1.15%, n=188
+}
+
+def classify_star_signal(
+    signal: str,
+    rsi: float,
+    sector: str = "",
+) -> str:
+    """Nâng BUY-A lên BUY-A* khi đủ 2 điều kiện từ backtest:
+    1. RSI ≥ 60 (loại noise vùng RSI 35-60 — 78% tín hiệu nhiễu)
+    2. Ngành thuộc top alpha: Oil & Gas, Telecom, Basic Resources, Banks
+
+    BUY-A* có alpha +2.08% (vs BUY-A tổng thể +0.05%) theo backtest 4509 signals.
+    Trả về "BUY-A*" hoặc giữ nguyên signal gốc.
+    """
+    if signal != "BUY-A":
+        return signal
+    rsi_ok    = not math.isnan(rsi) and rsi >= 60
+    sector_ok = sector in _STAR_SECTORS
+    if rsi_ok and sector_ok:
+        return "BUY-A*"
+    return signal
+
+
 def classify_risk(
     tech_score: float,
     dist_ema_pct: float,
@@ -1307,7 +1336,7 @@ def _safe_float(val) -> float:
         return float("nan")
 
 
-def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan"), rs_pct: float = float("nan")) -> dict:
+def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan"), rs_pct: float = float("nan"), sector: str = "") -> dict:
     """Trả dict tín hiệu mới nhất từ DataFrame đã có indicators."""
     last = df.dropna(subset=["rsi", "macd_hist", "dist_ema34_pct"]).iloc[-1]
     rsi       = float(last["rsi"])
@@ -1354,6 +1383,9 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan"), rs_pct:
         macd_ok  = macd_hist > 0
         if ma_aligned < 2 or not rsi_ok or not wmt_ok or not t20_ok or not phase_ok or not macd_ok:
             signal = "BUY-B"
+
+    # Nâng lên BUY-A* nếu đủ điều kiện alpha cao (RSI≥60 + ngành top)
+    signal = classify_star_signal(signal, rsi, sector)
 
     risk   = classify_risk(tech_score, dist_ema, atr_pct, bb_width_pct, volume_ratio)
 
@@ -1404,6 +1436,8 @@ def get_latest_signals(df: pd.DataFrame, ai_score: float = float("nan"), rs_pct:
         "log_return":        round(log_ret, 4) if not math.isnan(log_ret) else 0.0,
         "tech_score":        round(tech_score, 1),
         "signal":            signal,
+        "is_star":           signal == "BUY-A*",
+        "sector":            sector,
         "risk":              risk,
         "phase":             phase,
         "candle_patterns":   _fmt_patterns(candle_patterns),

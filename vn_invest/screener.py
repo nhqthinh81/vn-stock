@@ -15,6 +15,14 @@ from .config import CACHE_FILE, DEFAULT_SOURCE, DEFAULT_WATCHLIST, RESTRICTED_SY
 from .data import get_price_history, get_price_board
 from .indicators import add_all_indicators, get_latest_signals
 
+# Sector map — dùng để phân loại BUY-A* (load 1 lần, tra cứu O(1))
+_SECTOR_MAP_PATH = Path(__file__).parent.parent / "data" / "sector_map.json"
+_SECTOR_MAP: dict[str, str] = {}
+try:
+    _SECTOR_MAP = json.loads(_SECTOR_MAP_PATH.read_text(encoding="utf-8"))
+except Exception:
+    pass
+
 # Đường dẫn Amibroker
 _AMI_SCAN   = Path(os.getenv("AMIBROKER_SCAN_CSV", r"C:\AmibrokerData\scan_result.csv"))
 _AMI_DIR    = Path(os.getenv("AMIBROKER_HIST_DIR", r"C:\AmibrokerData\history_by_ticker"))
@@ -82,7 +90,8 @@ def scan_symbol(symbol: str, source: str = DEFAULT_SOURCE) -> Optional[dict]:
         if df is None or len(df) < 35:
             return None
         df = add_all_indicators(df)
-        sig = get_latest_signals(df)
+        sector = _SECTOR_MAP.get(symbol.upper(), "")
+        sig = get_latest_signals(df, sector=sector)
         return {"symbol": symbol, **sig}
     except Exception:
         return None
@@ -273,7 +282,8 @@ def scan_symbol_realtime(symbol: str, source: str = DEFAULT_SOURCE,
             df = pd.concat([df, pd.DataFrame([new_bar])], ignore_index=True)
 
         df = add_all_indicators(df)
-        sig = get_latest_signals(df)
+        sector = _SECTOR_MAP.get(symbol.upper(), "")
+        sig = get_latest_signals(df, sector=sector)
         sig["realtime"] = True
         sig["realtime_date"] = today_str
         return {"symbol": symbol, **sig}
@@ -643,7 +653,8 @@ def scan_ami_symbol(symbol: str, with_lstm: bool = False) -> Optional[dict]:
         if not _vni_rets.empty and "Date" in df.columns:
             df["vni_ret_14d"] = df["Date"].map(_vni_rets)
         df = add_all_indicators(df)
-        sig = get_latest_signals(df)
+        sector = _SECTOR_MAP.get(symbol.upper(), "")
+        sig = get_latest_signals(df, sector=sector)
         # Tính % thay đổi so phiên trước để dùng trong alert message
         _closes = df["close"].dropna()
         if len(_closes) >= 2:
