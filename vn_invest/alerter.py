@@ -27,7 +27,8 @@ logger = logging.getLogger("vn_invest.alerter")
 _AMI_SCAN       = Path(os.getenv("AMIBROKER_SCAN_CSV", r"C:\AmibrokerData\scan_result.csv"))
 _ALERT_HISTORY  = Path(__file__).parent.parent / "data" / "alert_history.json"
 _LAST_RUN_PATH  = Path(__file__).parent.parent / "data" / "alert_last_run.json"
-_COOLDOWN_DAYS  = int(os.getenv("ALERT_COOLDOWN_DAYS", "3"))
+_COOLDOWN_DAYS  = int(os.getenv("ALERT_COOLDOWN_DAYS", "3"))   # legacy, không còn dùng trong should_alert()
+_MIN_GAP_HOURS  = float(os.getenv("ALERT_MIN_GAP_HOURS", "1")) # chặn dao động: tối thiểu N giờ giữa 2 lần gửi cùng mã
 
 # Ngưỡng composite score để alert
 _BUY_THRESHOLD  = float(os.getenv("ALERT_BUY_THRESHOLD",  "65"))
@@ -82,24 +83,34 @@ def _save_history(history: dict) -> None:
 
 def should_alert(symbol: str, signal: str, history: dict) -> bool:
     """
-    Trả True nếu nên gửi alert.
-    Không gửi nếu cùng symbol+signal đã alert trong COOLDOWN_DAYS ngày.
-    Nếu signal thay đổi (ví dụ HOLD→BUY-A) thì luôn cho qua bất kể cooldown.
+    Chống spam theo TRẠNG THÁI, không theo thời gian:
+      - Mã chưa từng alert → gửi.
+      - Tín hiệu ĐỔI so với lần gửi gần nhất (VD HOLD→BUY-A, BUY-A→SELL-B) → gửi.
+      - Tín hiệu GIỮ NGUYÊN so với lần gửi gần nhất → KHÔNG gửi lại, bất kể đã bao lâu
+        (khác hành vi cũ: trước đây cứ sau N ngày lại gửi lại dù không đổi gì).
+      - Anti-flap: nếu tín hiệu vừa đổi lại NGAY sau lần gửi trước chưa đủ
+        _MIN_GAP_HOURS giờ (dao động quanh ngưỡng điểm) → tạm hoãn, chờ ổn định.
+
+    Lịch sử lưu theo KEY = symbol (không còn symbol_signal), vì chỉ cần biết
+    "tín hiệu gần nhất đã gửi cho mã này là gì" để so sánh trạng thái.
     """
-    key = f"{symbol}_{signal}"
-    if key not in history:
+    if symbol not in history:
         return True
-    last_str = history[key].get("sent_at", "")
-    try:
-        last_dt = datetime.fromisoformat(last_str)
-        return datetime.now() - last_dt > timedelta(days=_COOLDOWN_DAYS)
-    except Exception:
-        return True
+    prev = history[symbol]
+    if prev.get("signal") == signal:
+        return False   # trạng thái không đổi — im lặng vĩnh viễn cho tới khi đổi
+    if _MIN_GAP_HOURS > 0:
+        try:
+            last_dt = datetime.fromisoformat(prev.get("sent_at", ""))
+            if datetime.now() - last_dt < timedelta(hours=_MIN_GAP_HOURS):
+                return False   # đổi quá nhanh — nghi dao động quanh ngưỡng, chờ ổn định
+        except Exception:
+            pass
+    return True
 
 
 def mark_sent(symbol: str, signal: str, score: float, history: dict) -> None:
-    key = f"{symbol}_{signal}"
-    history[key] = {
+    history[symbol] = {
         "sent_at": datetime.now().isoformat(),
         "signal":  signal,
         "score":   score,
@@ -171,6 +182,10 @@ def format_message(
     close: float,
     pct_change: float,
 ) -> str:
+    # Công thức THẬT đang chạy — không hardcode, vì khi thiếu LSTM hệ thống
+    # tự chuyển sang AMI 60% + KT 40% (composite_score() dòng fallback)
+    _weights_s = (f"AMI {_W_AMI*100:.0f}% + AI {_W_LSTM*100:.0f}% + KT {_W_TECH*100:.0f}%"
+                  if lstm_result else "AMI 60% + KT 40% (không có AI Score)")
     _SIGNAL_ICON = {
         "BUY-A":  "🟢", "BUY-B": "🟩",
         "HOLD":   "🟡",
@@ -186,11 +201,13 @@ def format_message(
     pct_s = f"+{pct_change:.2f}%" if pct_change >= 0 else f"{pct_change:.2f}%"
     now_s = datetime.now().strftime("%d/%m %H:%M")
 
+    # [AMI-TH] = tín hiệu TỔNG HỢP từ AmiBroker+LSTM+KT — đánh dấu riêng để
+    # KHÔNG nhầm với tín hiệu Python thuần (BUY-A trong tab Quick Scan)
     lines = [
-        f"{icon} <b>{signal} — {symbol}</b>   [{now_s}]",
+        f"{icon} <b>[AMI-TH] {signal} — {symbol}</b>   [{now_s}]",
         f"💰 Giá: <b>{close:,.0f}</b>  ({pct_s})",
         f"",
-        f"📊 Điểm tổng hợp: <b>{comp_score:.0f}/100</b>",
+        f"📊 Điểm tổng hợp: <b>{comp_score:.0f}/100</b>  ({_weights_s})",
         f"   • AMI: {ami_score} (Rec={ami_rec}) | KT: {tech.get('tech_score', 0):.0f}",
     ]
 
@@ -208,6 +225,9 @@ def format_message(
         f"📉 RSI: {tech.get('rsi', 0):.1f}  |  Dist EMA34: {tech.get('dist_ema34_pct', 0):+.2f}%",
         f"📈 Giai đoạn: {_PHASE_ICON.get(tech.get('phase',''), '')} {tech.get('phase', '—')}"
         f"  |  Rủi ro: {_RISK_ICON.get(tech.get('risk',''), '')} {tech.get('risk', '—')}",
+        f"",
+        f"<i>🔀 Nguồn AMI-TH (AmiBroker scan tổng hợp) — khác với tín hiệu"
+        f" 🐍 BUY-A Python trong Quick Scan (gate bull+breadth+trail12)</i>",
     ]
 
     return "\n".join(lines)
@@ -219,6 +239,7 @@ def run_alert_scan(
     use_lstm: bool = True,
     progress_callback=None,
     dry_run: bool = False,
+    max_alerts: int = 10,
 ) -> dict:
     """
     Quét toàn bộ scan_result.csv, lọc tín hiệu chất lượng, gửi Telegram.
@@ -253,6 +274,7 @@ def run_alert_scan(
             lstm_module = None
 
     stats = {"scanned": 0, "qualified": 0, "sent": 0, "skipped_spam": 0, "alerts": []}
+    _pending: list[tuple] = []   # (comp_score, symbol, signal, msg) — gửi top N sau khi quét hết
 
     for i, symbol in enumerate(symbols):
         if progress_callback:
@@ -304,7 +326,7 @@ def run_alert_scan(
         }
         stats["alerts"].append(alert_rec)
 
-        # Spam filter
+        # Spam filter (cooldown theo mã+tín hiệu)
         if not should_alert(symbol, signal, history):
             stats["skipped_spam"] += 1
             continue
@@ -315,7 +337,15 @@ def run_alert_scan(
             lstm_result=lstm_result, tech=tech,
             close=close, pct_change=pct_change,
         )
+        _pending.append((comp, symbol, signal, msg))
 
+    # Chống spam: chỉ gửi TOP max_alerts theo composite score (không gửi cả trăm tin)
+    _pending.sort(key=lambda x: -x[0])
+    stats["capped"] = max(0, len(_pending) - max_alerts) if max_alerts else 0
+    if max_alerts:
+        _pending = _pending[:max_alerts]
+
+    for comp, symbol, signal, msg in _pending:
         if not dry_run:
             ok = send_telegram(msg)
             if ok:
@@ -350,14 +380,14 @@ def check_and_alert(use_lstm: bool = False, dry_run: bool = False) -> Optional[d
 
 
 def get_alert_history() -> list[dict]:
-    """Trả lịch sử alert để hiển thị trong UI."""
+    """Trả lịch sử alert để hiển thị trong UI. Key lưu trữ = symbol (1 dòng/mã
+    = tín hiệu gần nhất đã gửi, không phải toàn bộ lịch sử gửi)."""
     h = _load_history()
     records = []
-    for key, val in h.items():
-        sym, sig = key.rsplit("_", 1)
+    for sym, val in h.items():
         records.append({
             "symbol":  sym,
-            "signal":  sig,
+            "signal":  val.get("signal", ""),
             "score":   val.get("score", 0),
             "sent_at": val.get("sent_at", ""),
         })

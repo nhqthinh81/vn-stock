@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Optional
 
 _DATA_PATH = Path(__file__).parent.parent / "data" / "paper_trades.json"
-_T5_WEEKS  = 5   # khung đánh giá mặc định: 5 tuần
+_T5_WEEKS  = 5    # khung đánh giá mặc định: 5 tuần
+_TRAIL_PCT = 12.0  # trailing stop % — khớp exit_strategy "trail12pct" của backtest
 
 
 def _today() -> str:
@@ -64,8 +65,10 @@ def add_trade(symbol: str, entry_price: float,
     today  = _today()
     trade_id = f"{symbol}_{today}"
 
-    # Tránh duplicate cùng ngày
-    existing = [t for t in trades if t["id"] == trade_id]
+    # Tránh duplicate: đã có lệnh OPEN cùng mã (bất kể ngày) thì không vào thêm
+    # (fix bug 04/07+06/07: scan cuối tuần ghi lại nguyên lô lệnh thứ Sáu)
+    existing = [t for t in trades
+                if t["symbol"] == symbol.upper() and t["status"] == "open"]
     if existing:
         return existing[0]
 
@@ -132,7 +135,18 @@ def update_prices(price_map: dict[str, float]) -> list[dict]:
         if cur_price and cur_price > 0:
             t["current_price"] = round(float(cur_price), 2)
             t["unrealized_pct"] = round((cur_price - t["entry_price"]) / t["entry_price"] * 100, 2)
+            # Trailing stop: theo dõi đỉnh giá kể từ khi vào lệnh
+            peak = max(float(t.get("peak_price") or t["entry_price"]), float(cur_price))
+            t["peak_price"] = round(peak, 2)
             changed = True
+            if cur_price <= peak * (1 - _TRAIL_PCT / 100):
+                t["status"]     = "closed"
+                t["exit_date"]  = today
+                t["exit_price"] = round(float(cur_price), 2)
+                t["return_pct"] = round((cur_price - t["entry_price"]) / t["entry_price"] * 100, 2)
+                t["result"]     = "win" if t["return_pct"] > 0 else "loss"
+                t["note"]       = (t.get("note") or "") + f" [trail-stop -{_TRAIL_PCT:.0f}% từ đỉnh {peak}]"
+                continue
 
         # Auto-close khi quá T+5 tuần: dùng current_price nếu có
         if t.get("t5_target") and today >= t["t5_target"]:

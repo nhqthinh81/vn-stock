@@ -105,6 +105,13 @@ def backtest_symbol(
 
     records = []
     close_arr  = df["close"].values
+    # Trendline state per-bar (causal) — dùng cho experiment alpha
+    try:
+        from .trendline import compute_trendline_states
+        tl_states = compute_trendline_states(
+            df["high"].values, df["low"].values, close_arr)
+    except Exception:
+        tl_states = ["none"] * len(df)
     dates_arr  = df["Date"].values
     rsi_arr    = df["rsi"].values if "rsi" in df.columns else np.full(len(df), np.nan)
     macd_arr   = df["macd_hist"].values if "macd_hist" in df.columns else np.full(len(df), np.nan)
@@ -192,7 +199,21 @@ def backtest_symbol(
         else:
             cf  = close_arr[i + forward_days]
             fwd = (cf - c0) / c0 * 100
-        records.append({"signal": signal, "fwd_return": round(fwd, 3)})
+        # Ghi thêm metadata cho A/B experiment: cả 2 exit + giá vào + regime
+        cf_hold   = close_arr[i + forward_days]
+        fwd_hold  = (cf_hold - c0) / c0 * 100
+        fwd_trail = simulate_exit(close_arr, i, forward_days, trail_pct=0.12)
+        records.append({
+            "symbol":      symbol.upper(),
+            "signal":      signal,
+            "fwd_return":  round(fwd, 3),
+            "fwd_hold":    round(fwd_hold, 3),
+            "fwd_trail12": round(fwd_trail, 3),
+            "entry_close": round(float(c0), 3),
+            "regime":      regime,
+            "date":        str(dates_arr[i])[:10],
+            "tl":          tl_states[i],
+        })
 
     return records
 

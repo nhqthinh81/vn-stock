@@ -52,5 +52,17 @@
     "quantity": 5000,
     "avg_price": 14620.0,
     "sector": "SX Phụ trợ"
+  },
+  {
+    "symbol": "VIB",
+    "quantity": 6000,
+    "avg_price": 16730.0,
+    "sector": "Ngân hàng"
+  },
+  {
+    "symbol": "VAB",
+    "quantity": 6000,
+    "avg_price": 11420.0,
+    "sector": "Ngân hàng"
   }
 ]

@@ -579,17 +579,25 @@ def get_ami_scan_data() -> dict[str, dict]:
 
 def get_ami_watchlist() -> list[str]:
     """Đọc danh sách mã từ scan_result.csv của Amibroker Explorer (đã qua lọc).
-    Đọc từng dòng lấy field đầu tiên để tránh lỗi do dấu phẩy trong số."""
+    Đọc từng dòng lấy field đầu tiên để tránh lỗi do dấu phẩy trong số.
+
+    Loại trùng theo ticker (giữ thứ tự xuất hiện lần đầu) — AFL export ghi ở chế độ
+    append ("a") và chỉ ghi đè header 1 lần/phiên AmiBroker, nên nhiều lần chạy
+    Explorer liên tiếp (không restart AmiBroker giữa các lần) sẽ cộng dồn cùng 1 mã
+    lặp lại nhiều lần trong file (VD: 410 mã thật nhưng file có 2776 dòng)."""
     if not _AMI_SCAN.exists():
         return DEFAULT_WATCHLIST
     try:
+        seen = set()
         tickers = []
         with open(_AMI_SCAN, encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f):
-                first = line.split(",")[0].strip()
-                if i == 0 or not first or first.upper() == "TICKER":
+                first = line.split(",")[0].strip().upper()
+                if i == 0 or not first or first == "TICKER":
                     continue
-                tickers.append(first.upper())
+                if first not in seen:
+                    seen.add(first)
+                    tickers.append(first)
         return tickers if tickers else DEFAULT_WATCHLIST
     except Exception:
         return DEFAULT_WATCHLIST
@@ -663,6 +671,19 @@ def scan_ami_symbol(symbol: str, with_lstm: bool = False) -> Optional[dict]:
             )
         else:
             sig["pct_change"] = 0.0
+        # Close > SMA50 — nguyên liệu tính market breadth (gate ghi BUY-A:
+        # breadth>=60% → win 59.8%, alpha +2.34% theo backtest daily 399 mã)
+        if len(_closes) >= 50:
+            sig["above_sma50"] = bool(
+                _closes.iloc[-1] > _closes.rolling(50).mean().iloc[-1]
+            )
+        # Momentum 12 tháng (252 phiên daily) — chuẩn Jegadeesh-Titman 12M.
+        # Data AMI đã export DAILY từ 07/2026; mã ít lịch sử fallback 63 phiên (3M).
+        _mom_win = 252 if len(_closes) >= 253 else (63 if len(_closes) >= 64 else 0)
+        if _mom_win and _closes.iloc[-_mom_win - 1] > 0:
+            sig["ret_12m"] = round(
+                (_closes.iloc[-1] / _closes.iloc[-_mom_win - 1] - 1) * 100, 2
+            )
         # Sol 5: Composite Score (partial — chưa có ami_rec, sẽ recompute sau khi merge)
         # Trọng số: tech_score 65%, reversal_strength 35%
         _ts  = sig.get("tech_score", 50) or 50
@@ -816,6 +837,20 @@ def scan_ami_watchlist(
             rec["composite_score"] = round(ts * 0.50 + ami_norm * 0.30 + rs * 0.20, 1)
 
         results.append(rec)
+
+    # Momentum rank cross-sectional (Jegadeesh-Titman 12M): percentile của ret_12m
+    # so toàn bộ mã trong cache. Backtest: BUY khi mom_pct>=70 + bull
+    # → win 75-77%, alpha +9% (vs +6.4% không có momentum).
+    _mom_vals = sorted(r["ret_12m"] for r in results if r.get("ret_12m") is not None)
+    if len(_mom_vals) >= 20:
+        import bisect
+        _n_mom = len(_mom_vals)
+        for rec in results:
+            v = rec.get("ret_12m")
+            if v is not None:
+                rec["mom_pct"] = round(
+                    bisect.bisect_left(_mom_vals, v) / max(_n_mom - 1, 1) * 100, 1
+                )
 
     save_cache(results)
     clear_checkpoint()  # xóa checkpoint khi scan hoàn thành

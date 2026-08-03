@@ -76,27 +76,43 @@ def render(ctx: dict) -> None:
     except Exception:
         pass
 
-    scan_opt_c1, scan_opt_c2, scan_opt_c3, scan_opt_c4, scan_opt_c5 = st.columns([2, 1, 1, 1, 1])
-    with scan_opt_c2:
-        _use_lstm_scan = st.checkbox(
-            "Kèm AI Score", value=_lstm_avail,
-            disabled=not _lstm_avail,
-            help="Chạy LSTM cho mỗi mã khi scan (~2-3s thêm/mã nếu không có GPU)"
-        )
-    with scan_opt_c3:
-        _live_mode = st.toggle("🔴 Live (vnstock)", value=False, key="scan_live_mode",
-                               help="Tính lại RSI/MACD/Dist từ giá vnstock realtime phiên hôm nay. VolRatio giữ từ AMI EOD.")
-    with scan_opt_c4:
-        _auto_refresh_price = st.toggle("⏱ Tự làm mới giá", value=False, key="scan_auto_toggle")
-    with scan_opt_c5:
-        _auto_interval_min = st.selectbox("Mỗi (phút)", [5, 10, 15, 30],
-                                          index=1, key="scan_interval",
-                                          disabled=not _auto_refresh_price)
+    # ── Tùy chọn phụ + công cụ scan 1 mã: gom vào expander cho gọn ──────────
+    with st.expander("⚙️ Tùy chọn scan · 🔍 Scan 1 mã", expanded=False):
+        opt_c1, opt_c2, opt_c3, opt_c4 = st.columns(4)
+        with opt_c1:
+            _use_lstm_scan = st.checkbox(
+                "Kèm AI Score", value=_lstm_avail,
+                disabled=not _lstm_avail,
+                help="Chạy LSTM cho mỗi mã khi scan (~2-3s thêm/mã nếu không có GPU)"
+            )
+        with opt_c2:
+            _live_mode = st.toggle("🔴 Live (vnstock)", value=False, key="scan_live_mode",
+                                   help="Tính lại RSI/MACD/Dist từ giá vnstock realtime phiên hôm nay. VolRatio giữ từ AMI EOD.")
+        with opt_c3:
+            _auto_refresh_price = st.toggle("⏱ Tự làm mới giá", value=False, key="scan_auto_toggle")
+        with opt_c4:
+            _auto_interval_min = st.selectbox("Mỗi (phút)", [5, 10, 15, 30],
+                                              index=1, key="scan_interval",
+                                              disabled=not _auto_refresh_price)
+        # Scan 1 mã lẻ
+        _s1c1, _s1c2 = st.columns([3, 1])
+        scan_single = _s1c1.text_input("Scan 1 mã", placeholder="VNM",
+                                       key="scan_single_input").upper().strip()
+        with _s1c2:
+            st.markdown("<div style='height:1.75em'></div>", unsafe_allow_html=True)
+            _btn_single = st.button("🔍 Scan", use_container_width=True)
+        if _btn_single and scan_single:
+            with st.spinner(f"Đang scan {scan_single}..."):
+                rec = scan_ami_symbol(scan_single, with_lstm=_use_lstm_scan) or scan_symbol(scan_single, source=source)
+            if rec: st.session_state["single_scan_result"] = rec
+            else:   st.error("Không lấy được dữ liệu")
 
-    col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 2])
+    # ── 3 nút scan chính — 1 hàng duy nhất ──────────────────────────────────
+    col_b, col_c, col_a = st.columns(3)
 
     with col_a:
-        if st.button("🔄 Làm mới (giá + signal)", use_container_width=True):
+        if st.button("🔄 Làm mới (giá + signal)", use_container_width=True,
+                     help="Đọc lại scan_result.csv + tính lại signal cho cache hiện tại"):
             _total_ami = len(load_cache())
             _prog = st.progress(0, text="Đang scan từ Amibroker...")
             def _cb(i, total, sym):
@@ -110,6 +126,7 @@ def render(ctx: dict) -> None:
         _btn_filtered = st.button(
             f"⚡ Scan đã lọc ({len(_ami_list)} mã{_age_note})",
             use_container_width=True,
+            type="primary",
             help="Scan các mã trong scan_result.csv — đã qua bộ lọc Amibroker Explorer (~20s)",
         )
 
@@ -144,14 +161,6 @@ def render(ctx: dict) -> None:
             f"✅ Hoàn tất! Scan {len(st.session_state.scan_cache)}/{_total_scan} mã{ai_note}."
         )
         st.rerun()
-
-    with col_d:
-        scan_single = st.text_input("Scan 1 mã", placeholder="VNM", key="scan_single_input").upper().strip()
-        if st.button("Scan mã này", use_container_width=True) and scan_single:
-            with st.spinner(f"Đang scan {scan_single}..."):
-                rec = scan_ami_symbol(scan_single, with_lstm=_use_lstm_scan) or scan_symbol(scan_single, source=source)
-            if rec: st.session_state["single_scan_result"] = rec
-            else:   st.error("Không lấy được dữ liệu")
 
     _meta = load_cache_meta()
     _scanned_str   = _meta.get("scanned_at")
@@ -214,7 +223,7 @@ def render(ctx: dict) -> None:
     st.divider()
 
     filter_cols = st.columns(5)
-    f_signal   = filter_cols[0].selectbox("Tín hiệu Python", ["Tất cả","BUY-A*","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
+    f_signal   = filter_cols[0].selectbox("Tín hiệu Python", ["Tất cả","MOM-BUY","BUY-A*","BUY-A","BUY-B","HOLD","SELL-B","SELL-A"])
     f_risk     = filter_cols[1].selectbox("Rủi ro",          ["Tất cả","Low","Medium","High"])
     f_phase    = filter_cols[2].selectbox("Giai đoạn",       ["Tất cả","Accumulation","Markup","Distribution","Markdown","Neutral"])
     f_ai       = filter_cols[3].selectbox("AI Score",        ["Tất cả","≥ 70 (Mạnh)","≥ 50 (Tích cực)","≤ 30 (Yếu)","Có AI Score"])
@@ -254,8 +263,11 @@ def render(ctx: dict) -> None:
     else:
         _active_cache = st.session_state.scan_cache
 
+    # MOM-BUY là tín hiệu dẫn xuất (mom_pct>=80 + giá>=10), không phải giá trị
+    # field "signal" trong cache → lọc riêng sau filter_cache
+    _f_mom_buy = (f_signal == "MOM-BUY")
     filtered = filter_cache(
-        signal=None   if f_signal=="Tất cả"   else f_signal,
+        signal=None   if f_signal in ("Tất cả", "MOM-BUY") else f_signal,
         risk=None     if f_risk=="Tất cả"     else f_risk,
         phase=None    if f_phase=="Tất cả"    else f_phase,
         ai_score=None if f_ai=="Tất cả"       else f_ai,
@@ -266,6 +278,11 @@ def render(ctx: dict) -> None:
         data=_active_cache,
         exclude_restricted=not show_restricted,
     )
+    if _f_mom_buy:
+        filtered = [r for r in filtered
+                    if (r.get("mom_pct") or 0) >= 80
+                    and float(r.get("close") or 0) >= 10]
+        filtered.sort(key=lambda r: -(r.get("mom_pct") or 0))
 
     _full_cache = _active_cache
     _df_full    = pd.DataFrame(_active_cache) if _active_cache else pd.DataFrame()
@@ -290,18 +307,62 @@ def render(ctx: dict) -> None:
         if st.button("📌 Ghi BUY-A hôm nay", use_container_width=True,
                      disabled=not _buya_rows,
                      help="Ghi toàn bộ mã BUY-A và BUY-A* hiện tại vào Paper Trading để theo dõi T+5 tuần"):
-            _added = []
-            for _r in _buya_rows:
-                _pt_add(
-                    symbol=_r["symbol"],
-                    entry_price=float(_r.get("close") or 0),
-                    tech_score=float(_r.get("tech_score") or 0),
-                    rsi=float(_r.get("rsi") or 0),
-                    signal=_r.get("signal", "BUY-A"),
-                    sector=_r.get("sector", ""),
-                )
-                _added.append(_r["symbol"])
-            st.success(f"Đã ghi {len(_added)} mã vào Paper Trading: {', '.join(_added)}")
+            # Gate 1: market regime — không vào BUY mới khi VNI bear (dưới SMA50)
+            _regime = "neutral"
+            try:
+                from vn_invest.market_regime import get_market_regime as _get_mr
+                _regime = (_get_mr() or {}).get("regime", "neutral")
+            except Exception:
+                pass
+            if _regime != "bull":
+                st.error(f"⛔ VNI đang **{_regime}** (cần bull: VNI > SMA50×1.01) — không ghi BUY-A mới. "
+                         "Backtest 440 mã: BUY-A vào lệnh khi bull đạt win 64-68%, alpha +5.6%; "
+                         "vào khi neutral/bear alpha chỉ +1-2% (chính là lô lệnh thua T7/2026).")
+            else:
+                # Gate 2: market breadth ≥ 70% (% mã trên SMA50) — backtest daily 399 mã,
+                # sweep 50→80: alpha tăng đơn điệu; ngưỡng 70 → win 64.1%, alpha +3.01%
+                # (T+20: +4.67%). 75-80 còn cao hơn chút nhưng gate hiếm mở + rủi ro overfit.
+                # (Momentum gate ĐÃ GỠ: trên daily 12M momentum mất alpha — chỉ là artifact weekly)
+                _MIN_PRICE   = 10.0
+                _MIN_BREADTH = 70.0
+                _sma_flags = [r.get("above_sma50") for r in (_full_cache or [])
+                              if r.get("above_sma50") is not None]
+                _breadth = (sum(1 for x in _sma_flags if x) / len(_sma_flags) * 100
+                            if _sma_flags else None)
+                if _breadth is not None and _breadth < _MIN_BREADTH:
+                    st.error(f"📊 Breadth {_breadth:.0f}% < {_MIN_BREADTH:.0f}% "
+                             f"({sum(1 for x in _sma_flags if x)}/{len(_sma_flags)} mã trên SMA50) "
+                             "— không ghi BUY-A mới. Backtest daily: breadth≥70 nâng win 51→64%, "
+                             "alpha +1.21→+3.01% (T+20: +4.67%).")
+                else:
+                    if _breadth is None:
+                        st.caption("ℹ️ Cache chưa có above_sma50 — breadth gate tạm tắt, chạy Scan lại để bật.")
+                    _added, _skip_penny = [], []
+                    for _r in _buya_rows:
+                        _px = float(_r.get("close") or 0)
+                        if _px < _MIN_PRICE:
+                            _skip_penny.append(f"{_r['symbol']}({_px:g})")
+                            continue
+                        _pt_add(
+                            symbol=_r["symbol"],
+                            entry_price=_px,
+                            tech_score=float(_r.get("tech_score") or 0),
+                            rsi=float(_r.get("rsi") or 0),
+                            signal=_r.get("signal", "BUY-A"),
+                            sector=_r.get("sector", ""),
+                        )
+                        _added.append(_r["symbol"])
+                    if _added:
+                        st.success(f"Đã ghi {len(_added)} mã vào Paper Trading: {', '.join(_added)}")
+                    else:
+                        st.info("Không có mã nào được ghi (đã open sẵn hoặc bị lọc).")
+                    if _skip_penny:
+                        st.caption(f"⛔ Loại {len(_skip_penny)} mã penny < {_MIN_PRICE:g}: "
+                                   + ", ".join(_skip_penny))
+
+    # LƯU Ý: nút "Ghi MOM-BUY" đã gỡ (20/07/2026) — backtest daily 399 mã cho thấy
+    # momentum 12M KHÔNG có alpha ở horizon T+10 phiên (kết quả +9% trước đó là
+    # artifact của data weekly). Cột Mom + filter MOM-BUY giữ lại làm công cụ quan sát.
 
     # ── Khuyến nghị nhanh ─────────────────────────────────────────────────────
     if not _df_full.empty:
@@ -494,7 +555,20 @@ def render(ctx: dict) -> None:
 
     # ── Bảng chi tiết ─────────────────────────────────────────────────────────
     if not filtered:
-        st.info("Cache rỗng. Nhấn 'Scan Amibroker' để bắt đầu.")
+        # Phân biệt 2 tình huống hay bị nhầm lẫn:
+        # (1) Cache THẬT SỰ rỗng (chưa scan lần nào) → cần bấm Scan
+        # (2) Cache có dữ liệu nhưng KHÔNG mã nào khớp tổ hợp filter hiện tại
+        #     (VD: BUY-A + Rủi ro Low + Giai đoạn Accumulation cùng lúc, đặc biệt
+        #     khi thị trường yếu — filter đúng, chỉ là không có kết quả, KHÔNG
+        #     phải lỗi cần scan lại)
+        if not _active_cache:
+            st.info("Cache rỗng. Nhấn 'Scan Amibroker' để bắt đầu.")
+        else:
+            st.warning(
+                f"🔍 Không có mã nào khớp với bộ lọc hiện tại "
+                f"(cache có {len(_active_cache)} mã). Thử nới lỏng bớt điều kiện lọc "
+                f"— không cần Scan lại."
+            )
     else:
         df_scan = pd.DataFrame(filtered)
         has_ai  = "ai_score" in df_scan.columns and df_scan["ai_score"].notna().any()
@@ -559,7 +633,7 @@ def render(ctx: dict) -> None:
 
         display_cols = [c for c in [
             "symbol","_warn","close","ami_date","rsi","dist_ema34_pct",
-            "atr_pct","bb_width_pct","volume_ratio",
+            "atr_pct","bb_width_pct","volume_ratio","mom_pct",
             "ai_score","tech_score","consensus","signal","risk","phase",
             "ami_rec_label","ami_score","ami_setup","ami_forecast",
             "chart_patterns",
@@ -568,6 +642,7 @@ def render(ctx: dict) -> None:
             "symbol":"Mã","_warn":"Trạng thái","close":"Giá","ami_date":"Ngày DL",
             "rsi":"RSI","dist_ema34_pct":"Dist%",
             "atr_pct":"ATR%","bb_width_pct":"BB%","volume_ratio":"VolR",
+            "mom_pct":"Mom",
             "ai_score":"AI","tech_score":"KT","consensus":"Đồng thuận",
             "signal":"Tín hiệu","risk":"Rủi ro","phase":"Giai đoạn",
             "ami_rec_label":"Ami Rec","ami_score":"AmiSc",
@@ -597,6 +672,9 @@ def render(ctx: dict) -> None:
                                  help="Bollinger Band Width. <5%: squeeze, >15%: đang giãn"),
                 "VolR":      st.column_config.NumberColumn(format="%.2f",   width="small",
                                  help="Khối lượng / SMA20(KL). >1.5: xác nhận tín hiệu mạnh"),
+                "Mom":       st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f",
+                                 help="Momentum rank 12 tháng (252 phiên): percentile return so toàn thị trường. "
+                                      "Chỉ để tham khảo — backtest daily KHÔNG xác nhận alpha ở horizon T+10 phiên"),
                 "KT":        st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
                 "AI":        st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
                 "Đồng thuận":st.column_config.TextColumn(width="small"),
@@ -641,24 +719,37 @@ def render(ctx: dict) -> None:
                     _render_pretrade(_open_sym, _pt_row)
 
         with st.expander("🔬 Phân tích nâng cao (kéo-thả như Tableau)", expanded=False):
-            try:
-                from pygwalker.api.streamlit import StreamlitRenderer
+            # Opt-in tường minh: nội dung trong st.expander vẫn CHẠY mỗi lần rerun dù
+            # đang đóng — nếu không gate, PygWalker (kernel_computation=True) khởi tạo
+            # ngầm mỗi lần đổi filter. Đây là nguyên nhân "filter treo sau 1 thời gian":
+            # cache_resource không có ttl/max_entries + key gồm len(df đã lọc) → mỗi
+            # combo filter mới sinh 1 renderer mới, không bao giờ giải phóng → rò rỉ RAM.
+            _pyg_on = st.checkbox("Bật phân tích nâng cao", value=False, key="pyg_enable")
+            if _pyg_on:
+                try:
+                    from pygwalker.api.streamlit import StreamlitRenderer
 
-                @st.cache_resource
-                def _get_pyg_walker(data_hash: int, cols: tuple):
-                    return StreamlitRenderer(
-                        df_scan[list(cols)],
-                        kernel_computation=True,
-                        appearance="dark",
-                    )
+                    @st.cache_resource(ttl=1800, max_entries=2)
+                    def _get_pyg_walker(data_hash: int, cols: tuple):
+                        # Dùng _df_full (không lọc) — tách khỏi filter Quick Scan,
+                        # PygWalker tự kéo-thả/lọc bên trong nó. Cache key ổn định
+                        # theo lần scan (scanned_at + số mã), KHÔNG đổi theo filter.
+                        return StreamlitRenderer(
+                            _df_full[list(cols)] if not _df_full.empty else pd.DataFrame(),
+                            kernel_computation=True,
+                            appearance="dark",
+                        )
 
-                _pyg_cols = tuple(df_scan.columns.tolist())
-                _pyg_hash = hash(_pyg_cols + (len(df_scan),))
-                _get_pyg_walker(_pyg_hash, _pyg_cols).explorer(default_tab="data")
-            except ImportError:
-                st.warning("Cài `pygwalker` để dùng tính năng này: `pip install pygwalker`")
-            except Exception as e:
-                st.error(f"PyGWalker lỗi: {e}")
+                    _pyg_cols = tuple(_df_full.columns.tolist()) if not _df_full.empty else ()
+                    _pyg_hash = hash((_scanned_str, len(_df_full)))
+                    if _pyg_cols:
+                        _get_pyg_walker(_pyg_hash, _pyg_cols).explorer(default_tab="data")
+                    else:
+                        st.info("Chưa có dữ liệu để phân tích.")
+                except ImportError:
+                    st.warning("Cài `pygwalker` để dùng tính năng này: `pip install pygwalker`")
+                except Exception as e:
+                    st.error(f"PyGWalker lỗi: {e}")
 
         st.divider()
         st.subheader("Phân bổ tín hiệu")

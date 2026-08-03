@@ -201,7 +201,7 @@ def render(ctx: dict) -> None:
 
     from vn_invest.alerter import (
         run_alert_scan, get_alert_history,
-        _BUY_THRESHOLD, _SELL_THRESHOLD, _COOLDOWN_DAYS,
+        _BUY_THRESHOLD, _SELL_THRESHOLD, _MIN_GAP_HOURS,
     )
     from vn_invest.screener import get_ami_scan_data as _get_ami_scan_data
 
@@ -211,15 +211,20 @@ def render(ctx: dict) -> None:
                                           help="Composite score >= ngưỡng này mới gửi cảnh báo mua")
         al_sell_thr = al_c2.number_input("Ngưỡng SELL (composite ≤)", 0, 50, int(_SELL_THRESHOLD), step=5,
                                           help="Composite score <= ngưỡng này mới gửi cảnh báo bán")
-        al_cooldown = al_c3.number_input("Cooldown (ngày)", 1, 30, _COOLDOWN_DAYS,
-                                          help="Không re-alert cùng mã+tín hiệu trong N ngày")
+        al_min_gap  = al_c3.number_input("Chống dao động (giờ)", 0, 24, int(_MIN_GAP_HOURS),
+                                          help="Nếu tín hiệu vừa đổi lại quá nhanh (dao động quanh ngưỡng), "
+                                               "chờ tối thiểu N giờ mới gửi lại. 0 = tắt.")
         al_use_lstm = st.checkbox("Dùng LSTM trong tính điểm tổng hợp", value=model_ready(),
                                    help="Tắt nếu không có model hoặc muốn chạy nhanh hơn")
         al_dry_run  = st.checkbox("Dry run (không gửi thật, chỉ xem kết quả)", value=False)
+        st.caption(
+            "🔀 Chống spam theo **trạng thái**: mỗi mã chỉ gửi khi tín hiệu THAY ĐỔI so với "
+            "lần gửi gần nhất (VD HOLD→BUY-A). Tín hiệu giữ nguyên sẽ không gửi lại, dù đã bao lâu."
+        )
 
         os.environ["ALERT_BUY_THRESHOLD"]  = str(al_buy_thr)
         os.environ["ALERT_SELL_THRESHOLD"] = str(al_sell_thr)
-        os.environ["ALERT_COOLDOWN_DAYS"]  = str(al_cooldown)
+        os.environ["ALERT_MIN_GAP_HOURS"]  = str(al_min_gap)
 
     _tg_token   = os.getenv("TELEGRAM_TOKEN", "")
     _tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")

@@ -17,6 +17,8 @@ data/scores_cache.json
 data/dataset_cache.npz
 data/alert_history.json
 data/train_running.log
+data/alert_watcher.log
+data/*_backup_*.json
 
 # Model files (lớn)
 *.keras
