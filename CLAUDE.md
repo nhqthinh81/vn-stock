@@ -1153,3 +1153,22 @@ Bỏ lỡ 1 nến còn hơn spam 60 tin.
 ⚠️ Dấu vết phân biệt nguyên nhân spam: đếm số lần lặp mỗi bản ghi journal.
 Lặp **đúng ×2** = hai cửa sổ cùng chạy. Lặp **10–60 lần** = chốt chặn commit muộn.
 
+### Nhãn ⭐ TÍN HIỆU MẠNH — gắn nhãn, KHÔNG lọc (Phase 27)
+```python
+_STRONG_DMH_ATR = 0.10   # |Δ MACD hist| >= 0.10 × ATR14 tại nến tín hiệu
+# detail["dmh_atr"], detail["strong"]; reason có prefix "⭐ MẠNH · " khi strong
+```
+Đo 273 phiên trên cùng dòng lệnh chuẩn: nhóm mạnh (~14% số lệnh, ~1/ngày)
+**+1,454đ/lệnh** (IS +1,660 / OOS +1,301 · 5/5 quý · cả 2 chiều dương ·
+p hoán vị = 0,007) so với +0,285đ nhóm thường. Quét 0.06→0.14 đơn điệu, đỉnh
+bằng phẳng 0.09–0.12 — không phải đỉnh nhọn khớp nhiễu.
+
+⚠️ **KHÔNG được nâng cấp nhãn thành bộ lọc.** Nhóm thường vẫn cộng +459đ tổng —
+lọc bỏ là vứt tiền. Nhãn chỉ để người theo lệnh thủ công ưu tiên. Nhãn nằm trong
+`reason` nên journal ghi lại được — đối chiếu nhóm mạnh/thường trên dữ liệu thật
+sau ~2-3 tháng trước khi cân nhắc bất kỳ thay đổi hành vi nào.
+
+Đã thử và BÁC BỎ ở vòng 4 (đừng thử lại): bỏ một chiều LONG/SHORT, lọc khoảng
+cách tới VWAP, dấu mh đồng pha, bền vững 2 nến, nghỉ sau SL, cầu dao thua K
+lệnh/ngày — tất cả đều giảm tổng lợi nhuận so với v4 chuẩn (+844đ).
+

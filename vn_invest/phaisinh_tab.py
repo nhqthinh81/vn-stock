@@ -81,6 +81,13 @@ _MAX_STALE_MIN = 5    # dữ liệu cũ hơn ngần này phút → KHÔNG vào l
 #   không lọc  win 44,8% · +0,356đ/lệnh · OOS +0,280
 #   0,9×median win 46,0% · +0,462đ/lệnh · OOS +0,440   (ít hơn 24% số lệnh)
 _MIN_ATR_RATIO = 0.9
+# Nguong TIN HIEU MANH: |MACD hist - MACD hist truoc| >= nguong nay x ATR14.
+# Do tren 273 phien (research_v5b): quet 0.06..0.14 don dieu tang toi dinh bang
+# phang 0.09-0.12; tai 0.10 nhom manh (~1 lenh/ngay, ~14% so lenh) dat
+# +1,454d/lenh (IS +1,660 / OOS +1,301, 5/5 quy duong, p hoan vi = 0.007),
+# nhom thuong chi +0,285d/lenh. CHI GAN NHAN de nguoi theo lenh thu cong uu
+# tien — KHONG loc bo lenh thuong (tong cua chung van +459d).
+_STRONG_DMH_ATR = 0.10
 _ATR_MED_BARS  = 500
 
 # Chốt lời tuỳ chọn, tính theo bội số RỦI RO (R = khoảng cách tới SL).
@@ -351,10 +358,14 @@ def _get_rule_signal(df_1m: pd.DataFrame) -> tuple[str, str, dict]:
         _atr, _med = _get_atr_state(df_1m)
         _ratio = (_atr / _med) if (_atr and _med) else None
         _vol_ok = (_ratio is None) or (_ratio >= _MIN_ATR_RATIO)
+        # Do manh cua cu tang toc MACD hist, chuan hoa theo ATR — xem chu thich
+        # tai _STRONG_DMH_ATR. Chi la NHAN uu tien, khong tham gia dieu kien.
+        _dmh_atr = (abs(mh - mh_p) / _atr) if (_atr and _atr > 0) else None
+        _strong  = bool(_dmh_atr is not None and _dmh_atr >= _STRONG_DMH_ATR)
         detail = {"close": close, "vwap": vwap, "mh": mh, "mh_prev": mh_p,
                   "above": above, "rising": rising, "bar": bar_at,
                   "atr": _atr, "atr_med": _med, "atr_ratio": _ratio,
-                  "vol_ok": _vol_ok}
+                  "vol_ok": _vol_ok, "dmh_atr": _dmh_atr, "strong": _strong}
         ctx = (f"nến đóng {bar_at} · giá {_fvn(close, 1)} {'trên' if above else 'dưới'} "
                f"VWAP {_fvn(vwap, 1)} · MACD hist {_fvn(mh, 2, signed=True)} "
                f"{'tăng' if rising else 'giảm'}")
@@ -364,10 +375,11 @@ def _get_rule_signal(df_1m: pd.DataFrame) -> tuple[str, str, dict]:
         if not _vol_ok:
             return "WAIT", (f"Biến động quá thấp (ATR {_fvn(_atr, 2)} = "
                             f"{_ratio:.0%} nền, cần ≥{_MIN_ATR_RATIO:.0%}) — {ctx}"), detail
+        _tag = "⭐ MẠNH · " if _strong else ""
         if above and rising:
-            return "LONG",  f"Trên VWAP + MACD hist tăng — {ctx}", detail
+            return "LONG",  f"{_tag}Trên VWAP + MACD hist tăng — {ctx}", detail
         if (not above) and (not rising):
-            return "SHORT", f"Dưới VWAP + MACD hist giảm — {ctx}", detail
+            return "SHORT", f"{_tag}Dưới VWAP + MACD hist giảm — {ctx}", detail
         return "WAIT", f"Chưa đồng pha — {ctx}", detail
 
     except Exception as e:
@@ -1953,8 +1965,15 @@ def _live_panel_body():
                         _fvn(pos["entry"] + _sgn * _p, 1) for _p in _WIN_PCTL.values()
                     )
                     icon = "🚀" if ai_signal == "LONG" else "🔻"
+                    _rd = st.session_state.get("ps_rule_detail") or {}
+                    _strong_line = (
+                        "⭐ <b>TÍN HIỆU MẠNH</b> — cú tăng tốc MACD thuộc nhóm ~14% "
+                        "mạnh nhất (lịch sử: +1,45đ/lệnh so với +0,29đ nhóm thường)\n"
+                        if _rd.get("strong") else ""
+                    )
                     _send_telegram_async(
                         f"{icon} <b>#VN30F1M MỞ {_tg_escape(ai_signal)} (lệnh #{_tid})</b>\n"
+                        + _strong_line +
                         f"📥 Vào: {_fvn(pos['entry'], 1)}  (nến đóng {closed_ts.strftime('%H:%M')})\n"
                         f"🛡️ SL: {_fvn(pos['sl'], 1)}  (rủi ro {_fvn(pos['risk'], 1)}đ = "
                         f"{_fvn(pos['risk'] * _PT_VALUE_VND)} VND/HĐ)\n"

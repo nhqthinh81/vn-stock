@@ -1220,3 +1220,53 @@ Xác nhận độc lập: pyflakes cảnh báo ở **đúng 10 dòng cũ**. Chi 
 **Mọi script sửa file từ nay ghi nguyên tử**: `compile()` → `encode()` →
 file `.tmp` → `os.replace()`.
 
+## Phase 27 — Review sinh lời vòng 4: nhãn TÍN HIỆU MẠNH (26/08/2026)
+
+**Yêu cầu:** "review toàn bộ code sinh tín hiệu phái sinh và đề xuất cải tiến,
+nhấn mạnh về khả năng sinh lời."
+
+### Review đúng-sai code sinh tín hiệu: KHÔNG có lỗi
+- `_get_rule_signal`: tính trên nến ĐÃ ĐÓNG, VWAP phiên đủ nến (tail 300 > 241),
+  cổng biến động chặn trước — đúng thiết kế.
+- `_check_position_exit`: SL xét TRƯỚC TP trong cùng nến (bi quan) — khớp harness
+  backtest, số backtest không bị thổi phồng.
+- Khác biệt nhỏ chấp nhận được: production tính MACD trên 300 nến cuối, backtest
+  trên toàn chuỗi — sai số warmup EMA sau 274 nến là không đáng kể.
+
+### 7 hướng sinh lời CHƯA TỪNG thử (research_v5.py) — 6 bác bỏ, 1 nhận
+Chuẩn đo: cùng harness sản xuất (hold 30 · SL 3×ATR · TP 3R · gate 0.9 · phí
+0,25) · tổng lợi nhuận làm thước đo · IS/OOS · từng quý · đơn điệu tham số.
+| Hướng | Kết quả (tổng so với chuẩn +844đ) |
+|---|---|
+| A. Bỏ 1 chiều (chỉ LONG / chỉ SHORT) | +366 / +392 — hai chiều bù nhau theo quý, giữ cả hai |
+| B. Khoảng cách tới VWAP (min/max) | mọi ngưỡng đều giảm tổng, không đơn điệu |
+| C. Độ lớn gia tốc MACD hist | **NHẬN — làm nhãn, không lọc** (dưới) |
+| D. Dấu mh đồng pha với chiều | +677 — bác |
+| E. Bền vững 2 nến | +620 — bác |
+| F. Nghỉ sau khi chạm SL | tốt nhất +821 < 844 — bác |
+| G. Cầu dao ngày (thua K lệnh nghỉ) | K=2 sập còn +247 — "ngày xấu tiếp tục xấu" là SAI |
+
+### Nhãn ⭐ TÍN HIỆU MẠNH (`_STRONG_DMH_ATR = 0.10`)
+`|MACD hist − MACD hist trước| ≥ 0.10 × ATR14` tại nến tín hiệu. Trên cùng dòng
+lệnh chuẩn (research_v5b, gắn nhãn không lọc):
+```
+Quét 0.06→0.14: đơn điệu tăng tới đỉnh BẰNG PHẲNG 0.09–0.12 (+1,1..+1,45đ)
+Mạnh : n=265 (~1 lệnh/ngày, 14%)  +1,454đ/lệnh · IS +1,660 / OOS +1,301 · 5/5 quý
+       LONG +1,188 (n=137) · SHORT +1,740 (n=128) — cả hai chiều dương
+Thường: n=1.608  +0,285đ/lệnh (quý gần nhất đã âm)
+Hoán vị 100.000 lần: p = 0,007
+Chỉ theo lệnh mạnh: sụt giảm vốn tối đa −46đ so với −118đ khi theo tất cả
+```
+**Vì sao gắn nhãn thay vì lọc:** nhóm thường vẫn cộng +459đ tổng — lọc bỏ là vứt
+tiền (bài học 13). Bot giữ nguyên; nhãn giúp người theo lệnh THỦ CÔNG (~1-2
+lệnh/ngày là thực tế) ưu tiên đúng lệnh. Nhãn sai thì cũng không mất gì.
+
+**Triển khai (patch8):** hằng số + `dmh_atr`/`strong` trong detail + prefix
+"⭐ MẠNH · " vào reason (UI/journal tự kế thừa) + dòng ⭐ riêng trong tin nhắn MỞ
+Telegram. Nhãn nằm trong reason → journal ghi lại được → sau này đối chiếu nhóm
+mạnh/thường trên dữ liệu THẬT bằng chính `load_trades()`.
+
+Kiểm chứng: test_strong.py — 405 thời điểm cắt dữ liệu thật qua đúng
+`_get_rule_signal`: nhãn nhất quán nội bộ, reason khớp cờ, tỷ lệ mạnh 9% (khớp
+bậc với backtest 14%). Hồi quy test_lock/test_takeover/test_spam/render đều đạt.
+
