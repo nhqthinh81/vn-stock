@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+from html import escape as _html_escape
 from pathlib import Path
 from typing import Optional
 
@@ -153,6 +154,34 @@ def _telegram_creds() -> tuple[str, str]:
     return token, chat_id
 
 
+def fmt_vn(value, decimals: int = 0, signed: bool = False) -> str:
+    """Định dạng số theo chuẩn VN: chấm = hàng nghìn, phẩy = thập phân.
+
+    Đặt ở đây (module không phụ thuộc streamlit) để cả phaisinh_tab lẫn
+    daily_report dùng chung một định nghĩa — trước đây UI hiện "-105,000đ"
+    kiểu Mỹ trong khi báo cáo email hiện "-105.000đ" chuẩn VN.
+    """
+    if value is None or value != value:      # None hoặc NaN
+        return "—"
+    s = f"{float(value):{'+' if signed else ''},.{decimals}f}"
+    # Hoán đổi 1 lượt bằng translate — replace tuần tự sẽ ghi đè lẫn nhau
+    return s.translate(str.maketrans({",": ".", ".": ","}))
+
+
+def tg_escape(value) -> str:
+    """Escape ký tự HTML trong nội dung ĐỘNG trước khi nhúng vào tin nhắn Telegram.
+
+    Bắt buộc cho mọi biến nội suy. Tin nhắn gửi với parse_mode="HTML", nên một
+    ký tự `<` trong dữ liệu sẽ bị Telegram hiểu là thẻ mở và từ chối CẢ tin nhắn:
+        HTTP 400 Bad Request: can't parse entities: Unsupported start tag "..."
+
+    Đây là lỗi từng khiến toàn bộ cảnh báo phái sinh không tới nơi suốt nhiều
+    tháng (lý do tín hiệu chứa "RSI=36.3<40(+2)"). Xem tasks/lessons.md mục 6.
+    Chỉ giữ nguyên các thẻ <b>/<i> do chính mình chủ động viết trong template.
+    """
+    return _html_escape(str(value), quote=False)
+
+
 def send_telegram(message: str) -> bool:
     token, chat_id = _telegram_creds()
     if not token or not chat_id:
@@ -165,7 +194,16 @@ def send_telegram(message: str) -> bool:
             "text":       message,
             "parse_mode": "HTML",
         }, timeout=10)
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
+        # Telegram trả mô tả lỗi rất cụ thể (sai chat_id, lỗi parse HTML, bị chặn…).
+        # Bản cũ chỉ so status_code rồi trả False nên mọi lỗi đều vô hình.
+        try:
+            desc = r.json().get("description", "")
+        except Exception:
+            desc = r.text[:200]
+        logger.error("Telegram từ chối (HTTP %s): %s", r.status_code, desc)
+        return False
     except Exception as e:
         logger.error("Gửi Telegram thất bại: %s", e)
         return False
@@ -201,14 +239,21 @@ def format_message(
     pct_s = f"+{pct_change:.2f}%" if pct_change >= 0 else f"{pct_change:.2f}%"
     now_s = datetime.now().strftime("%d/%m %H:%M")
 
+    # Escape mọi trường lấy từ dữ liệu — xem tg_escape() để biết vì sao bắt buộc
+    _symbol = tg_escape(symbol)
+    _signal = tg_escape(signal)
+    _phase  = tg_escape(tech.get("phase", "—"))
+    _risk   = tg_escape(tech.get("risk", "—"))
+
     # [AMI-TH] = tín hiệu TỔNG HỢP từ AmiBroker+LSTM+KT — đánh dấu riêng để
     # KHÔNG nhầm với tín hiệu Python thuần (BUY-A trong tab Quick Scan)
     lines = [
-        f"{icon} <b>[AMI-TH] {signal} — {symbol}</b>   [{now_s}]",
+        f"{icon} <b>[AMI-TH] {_signal} — {_symbol}</b>   [{now_s}]",
         f"💰 Giá: <b>{close:,.0f}</b>  ({pct_s})",
         f"",
         f"📊 Điểm tổng hợp: <b>{comp_score:.0f}/100</b>  ({_weights_s})",
-        f"   • AMI: {ami_score} (Rec={ami_rec}) | KT: {tech.get('tech_score', 0):.0f}",
+        f"   • AMI: {tg_escape(ami_score)} (Rec={tg_escape(ami_rec)}) "
+        f"| KT: {tech.get('tech_score', 0):.0f}",
     ]
 
     if lstm_result:
@@ -223,8 +268,8 @@ def format_message(
     lines += [
         f"",
         f"📉 RSI: {tech.get('rsi', 0):.1f}  |  Dist EMA34: {tech.get('dist_ema34_pct', 0):+.2f}%",
-        f"📈 Giai đoạn: {_PHASE_ICON.get(tech.get('phase',''), '')} {tech.get('phase', '—')}"
-        f"  |  Rủi ro: {_RISK_ICON.get(tech.get('risk',''), '')} {tech.get('risk', '—')}",
+        f"📈 Giai đoạn: {_PHASE_ICON.get(tech.get('phase',''), '')} {_phase}"
+        f"  |  Rủi ro: {_RISK_ICON.get(tech.get('risk',''), '')} {_risk}",
         f"",
         f"<i>🔀 Nguồn AMI-TH (AmiBroker scan tổng hợp) — khác với tín hiệu"
         f" 🐍 BUY-A Python trong Quick Scan (gate bull+breadth+trail12)</i>",
@@ -339,11 +384,39 @@ def run_alert_scan(
         )
         _pending.append((comp, symbol, signal, msg))
 
-    # Chống spam: chỉ gửi TOP max_alerts theo composite score (không gửi cả trăm tin)
-    _pending.sort(key=lambda x: -x[0])
-    stats["capped"] = max(0, len(_pending) - max_alerts) if max_alerts else 0
+    # Chống spam: chỉ gửi TOP max_alerts theo ĐỘ MẠNH tín hiệu.
+    #
+    # KHÔNG sort theo composite thô. Với BUY thì điểm cao = mua mạnh, nhưng với
+    # SELL thì điểm THẤP mới là bán mạnh — sort giảm dần composite sẽ chọn đúng
+    # các lệnh bán YẾU nhất (sát ngưỡng 35) và vứt bỏ các lệnh bán mạnh nhất.
+    # Đo thực tế 19/08/2026: 264 tín hiệu SELL, mạnh nhất là PVX -4,5 / DVG -3,3,
+    # nhưng 7 tin gửi đi lại toàn SELL-B 32,5-34,7 còn PVX bị cắt.
+    #
+    # Độ mạnh = khoảng cách vượt ra ngoài vùng trung tính, so sánh được giữa 2 chiều.
+    def _strength(item) -> float:
+        comp, _sym, sig, _msg = item
+        if sig.startswith("BUY"):
+            return comp - _BUY_THRESHOLD
+        return _SELL_THRESHOLD - comp
+
+    # Chia suất cho CẢ HAI chiều. Nếu chỉ xếp chung theo độ mạnh, phiên nào thị
+    # trường lệch một bên là chiều đó chiếm sạch: đo 19/08/2026 có 264 SELL vs
+    # 31 BUY, và SELL đạt độ mạnh cao hơn (composite xuống âm được) nên top 10
+    # toàn SELL-A, mất hết BUY-A 92,9 / 87,7 / 86,8.
+    _buys  = sorted([x for x in _pending if x[2].startswith("BUY")],  key=_strength, reverse=True)
+    _sells = sorted([x for x in _pending if x[2].startswith("SELL")], key=_strength, reverse=True)
+
     if max_alerts:
-        _pending = _pending[:max_alerts]
+        _half   = max_alerts // 2
+        _take_s = min(len(_sells), max_alerts - min(len(_buys), _half))
+        _take_b = min(len(_buys),  max_alerts - _take_s)   # bù chỗ nếu một chiều thiếu
+        stats["capped"] = max(0, len(_pending) - _take_b - _take_s)
+        _pending = _buys[:_take_b] + _sells[:_take_s]
+    else:
+        stats["capped"] = 0
+        _pending = _buys + _sells
+
+    _pending.sort(key=_strength, reverse=True)
 
     for comp, symbol, signal, msg in _pending:
         if not dry_run:

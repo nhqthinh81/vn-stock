@@ -38,8 +38,9 @@ vn-invest-app/
 │   ├── screener.py          # Scan Amibroker data, cache JSON, filter
 │   ├── lstm.py              # LSTM inference (v6/v7 auto-select)
 │   ├── train_lstm.py        # Training pipeline (10 features, 3 heads T+5/T+10/T+25)
-│   ├── phaisinh_tab.py      # Tab Phái Sinh: VN30F1M Signal Bot (Multi-TF + Trailing Stop)
-│   ├── alerter.py           # Composite score, spam filter, Telegram alerts
+│   ├── phaisinh_tab.py      # Tab Phái Sinh: VN30F1M Signal Bot v4 (VWAP + MACD hist)
+│   ├── daily_report.py      # Báo cáo lãi/lỗ cuối ngày + gửi email SMTP
+│   ├── alerter.py           # Composite score, spam filter, Telegram (+ tg_escape dùng chung)
 │   ├── portfolio.py         # CSV upload, PnL, sector allocation
 │   └── cli.py               # CLI: scan + list
 ├── data/
@@ -47,6 +48,9 @@ vn-invest-app/
 │   ├── alert_history.json   # Lịch sử cảnh báo Telegram (spam filter)
 │   ├── model_metrics.json   # Metrics lần train gần nhất
 │   └── train_running.log    # Log training đang chạy
+├── tasks/
+│   ├── todo.md              # Nhật ký thay đổi lớn + việc còn tồn
+│   └── lessons.md           # Bài học từ lỗi đã gặp — ĐỌC ĐẦU MỖI SESSION
 ├── .env                     # API keys (gitignored)
 ├── .env.example
 ├── requirements.txt
@@ -62,7 +66,7 @@ vn-invest-app/
 | Quick Scan | Scan mã từ Amibroker (263 đã lọc hoặc 440 tất cả), Khuyến Nghị Nhanh, filter, auto price-refresh |
 | Danh Mục | Upload CSV → tính PnL, phân bổ ngành |
 | Model AI | Quản lý LSTM, auto-retrain, gửi cảnh báo Telegram |
-| Phái Sinh | VN30F1M Signal Bot: LSTM + Multi-TF trend + Trailing Stop, auto-refresh theo phiên |
+| Phái Sinh | VN30F1M Signal Bot v4: VWAP phiên + MACD histogram, quản lý vị thế (30 phút / SL 3×ATR), báo cáo lãi lỗ + email |
 
 ## Nguồn dữ liệu — Phân cấp
 
@@ -714,105 +718,332 @@ _SECTION_END();
 - Dữ liệu lịch sử: 56,382 nến (11/07/2025 → 19/06/2026), lưu tại `E:\AmiBroker\ITD\V\VN30F1M`
 
 ### LSTM Train tích hợp trong UI
-- Expander "🧠 Train / Retrain Model LSTM" ở cuối tab Phái Sinh
+- Expander "🧠 Train / Retrain Model LSTM v2 (3-class)" ở cuối tab Phái Sinh
 - Hàm `_run_lstm_training()` trong `phaisinh_tab.py`
 - Hiển thị progress bar từng epoch qua `_StreamlitCallback`
 - Sau train: `st.cache_resource.clear()` để bot load model mới ngay
-- **Tham số mặc định**: SEQ_LEN=30, future_bars=5, profit_target=1.0đ, epochs=30
-- **Features**: RSI, MACD, Dist_EMA, Log_Ret, Vol_Change (5 features — khớp với inference)
+- **Tham số mặc định UI**: SEQ_LEN=30, future_bars=10, profit_target=0.5đ, epochs=30
+- **Features (8)**: `_FEATURES` = RSI, MACD, Dist_EMA, Log_Ret, Vol_Change,
+  VWAP_Dist, Session_Gap, ATR_Norm — KHÔNG đổi thứ tự (scaler phụ thuộc)
+- **Label 3 class**: 0=SHORT / 1=WAIT / 2=LONG, `class_weight="balanced"`,
+  loss `sparse_categorical_crossentropy`, output `Dense(3, softmax)`
 
-### Tổng quan
-Bot tín hiệu VN30F1M: đọc data từ Amibroker → tính LSTM + Multi-TF trend → quản lý lệnh Trailing Stop.
+⚠️ LSTM **không** tham gia tín hiệu ở chế độ mặc định. Engine v4 là rule-based
+(xem dưới); LSTM chỉ dùng khi chọn chế độ `LSTM` hoặc `Ensemble`.
+
+### Engine v4 (cập nhật 14/08/2026) — ĐÃ THAY THẾ HOÀN TOÀN v2/v3
+
+> Bảng điểm 7 thành phần của v3 đã bị **loại bỏ**. Backtest 65.786 nến
+> (11/07/2025–13/08/2026, 273 phiên) cho thấy v3 bắn 105 tín hiệu/ngày với edge ~0
+> và **lỗ −0,44đ/lệnh sau phí**. Phân rã alpha từng thành phần: thành phần trọng
+> số CAO nhất (RSI<40/>60, +2.0) lại **dự báo ngược** (alpha −0,29đ), còn thành
+> phần tốt nhất (giá vs VWAP) chỉ được trọng số 0.5. VN30F1M khung 1 phút là
+> **momentum**, không phải mean-reversion. Chi tiết: `tasks/todo.md`.
+
+```
+LONG : Close > VWAP phiên  AND  MACD histogram tăng so với nến trước
+SHORT: Close < VWAP phiên  AND  MACD histogram giảm so với nến trước
+```
+
+⚠️ **Tuỳ chọn TP 3R** (`ps_use_tp`, **user đã bật 19/08/2026**). A/B cùng harness: bật cho
++9,8% tổng, nhưng **+69,1/+71,3đ lợi ích dồn vào riêng quý 2025Q3** — bốn quý còn
+lại cộng lại chỉ +2,2đ. Thêm nữa kết quả không đơn điệu theo mức TP (2R +736 ·
+3R +796 · 4R +703 · tắt +725) ⇒ khớp nhiễu, không khuyến nghị bật.
+
+⚠️ **KHÔNG có take-profit mặc định — và đó là chủ ý.** Đo trên chính cấu hình này:
+`không TP +0,356đ/lệnh · 3R +0,347 · 2R +0,276 · 1,5R +0,218 · 1R +0,112`.
+Lệnh thắng chạy xa (trung vị +4,25đ, top 10% +12,91đ), cắt đuôi lãi đó thì không
+đủ bù 55% lệnh thua. UI hiện `_WIN_PCTL` làm **vùng lãi tham chiếu** (mức giá
+lệnh thắng thường đạt) chứ không phải lệnh chốt.
+
+**Thoát lệnh là một phần chiến thuật, không phải phụ trợ:**
+- Giữ tối đa `_HOLD_BARS = 30` nến 1 phút
+- Hoặc chạm SL `_SL_ATR_MULT = 3.0` × ATR14 (sàn `_MIN_SL_PTS = 1.0`đ)
+- Đóng bắt buộc cuối phiên — **không bao giờ giữ qua đêm**
+- SL chặt kiểu v3 (pivot 10 nến) bị nhiễu quét trước khi edge kịp hiện → âm
+
+**Chỉ 1 vị thế tại 1 thời điểm** — ràng buộc load-bearing, KHÔNG phải chống spam
+UI. Nới ra là quay lại 105 lệnh/ngày và mất toàn bộ edge (lọc bỏ 93,4% tín hiệu thừa).
+
+⚠️ **Gặp tín hiệu NGƯỢC khi đang giữ lệnh thì KHÔNG làm gì cả** — không thoát,
+không đảo. 44,2% số lệnh gặp tình huống này (nhiễu khung 1 phút, không phải đảo
+chiều thật). Đo được: giữ đến hết `+0,356đ/lệnh` (5/5 quý) · thoát sớm `+0,086`
+(−76%, 3/5 quý) · đảo lệnh `+0,047` (−87%). Nhóm thoát sớm lỗ TB −2,32đ.
+UI phải nói rõ "cố ý bỏ qua" chứ đừng hiện như một tín hiệu nên hành động.
+
+**Kết quả** (replay qua chính các hàm trong file, phí 0,25đ/lệnh):
+```
+2.343 lệnh (8,6/ngày) | win 44,9% | +0,349đ/lệnh | +818,2đ = +81.825.000 VND/HĐ
+DƯƠNG Ở CẢ 5/5 QUÝ | LONG +0,265đ (n=1.155) | SHORT +0,431đ (n=1.188)
+Hoà vốn ở mức phí 0,62đ/lệnh — biên an toàn ~2,5 lần
+```
+
+⚠️ **Tín hiệu tính trên nến ĐÃ ĐÓNG** (`_closed_bars()`). v3 dùng nến đang hình
+thành: RSI lệch trung bình 3,46 điểm, 15,6% số lần điều kiện đảo trạng thái.
+
+⚠️ **KHÔNG dùng trend đa khung để ra tín hiệu** — đo được alpha của trend=±1
+xấp xỉ 0 (IS +0,006 / OOS −0,061), nó chỉ phản ánh drift thị trường. `_get_trend_full()`
+vẫn còn nhưng **chỉ để hiển thị tham khảo**.
 
 ### Kiến trúc
 ```python
-@st.cache_resource
-def _load_ai_system():  # (scaler, model) hoặc (None, error_str)
-    # Tìm theo thứ tự: D:\AmibrokerData, C:\AmibrokerData, ./AmibrokerData
-    # Model: lstm_brain.keras + lstm_scaler.pkl (khác với stock_lstm_v7 của Tab KT)
+def _closed_bars(df_1m, n=300) -> pd.DataFrame | None
+    # Bỏ nến cuối (đang hình thành). tail(300) > 241 nến/phiên nên VWAP phiên đủ.
 
-def _calculate_features(df):
-    df.dropna(subset=["RSI", "MACD", "EMA_34"], inplace=True)  # bỏ warmup NaN, KHÔNG fillna(0)
-    df[["Log_Ret", "Vol_Change"]] = df[["Log_Ret", "Vol_Change"]].fillna(0)  # chỉ 2 field này OK
+def _get_rule_signal(df_1m) -> tuple[str, str, dict]
+    # (signal, reason, detail). detail = {close, vwap, mh, mh_prev, above, rising, bar}
+    # → UI hiển thị "đang thiếu điều kiện nào" thay vì chỉ báo WAIT trống
 
-def _get_ai_prediction(df_1m, scaler, model) -> tuple[float, str | None]:
-    # Trả (prob, warning_msg) — warning nếu feature ngoài phạm vi training ±20%
+def _get_atr(df_1m) -> float | None            # ATR14 trên nến đã đóng, để đặt SL
 
-def _get_trend_from_1m(df_1m) -> tuple[int, str]:
-    # Multi-TF: Daily EMA20, 1H EMA20, 15m EMA10 (resample từ 1m data)
-    # +1 UPTREND | -1 DOWNTREND | 0 CONFLICT
+def _open_position(side, entry, entry_ts, atr, tid=0) -> dict
+    # dict có: tid, side, entry, entry_ts, last_ts, sl, risk, atr, bars
 
-def _in_trading_session(now=None) -> tuple[bool, str]:
-    # VN30F1M: 9:00-11:30 và 13:00-14:45 (Vietnam giờ)
-    # Cảnh báo 5 phút trước đóng cửa (_WARN_BEFORE_CLOSE_MIN = 5)
-    # Block tín hiệu cho_vao nếu ngoài phiên
+def _check_position_exit(pos, new_bars, in_session) -> (bool, str, float, ts)
+    # Duyệt MỌI nến từ lúc vào lệnh, KHÔNG chỉ nến cuối — AFL export ~5 phút/lần
+    # nên mỗi lần thấy "nến mới" có thể đã trôi qua nhiều nến.
+    # Ưu tiên: sang ngày mới → đóng cuối phiên | SL | hết hạn giữ | ngoài phiên
 
-def render_phaisinh_tab():  # entry point từ app.py
+def _position_pnl(pos, exit_price) -> float    # PnL gộp, chưa trừ phí
+def _calc_session_stats(log) -> dict           # total/wins/losses/win_rate/total_pnl/net_pnl
+def _get_trend_full(df_1m) -> (int, str, dict) # CHỈ hiển thị, không ra tín hiệu
+def _get_stop_levels(df_1m) -> dict            # Buy/Sell Stop — chỉ tham khảo
+def render_phaisinh_tab()                      # entry point từ app.py
 ```
+
+⚠️ `pos["last_ts"]` là con trỏ nến đã xử lý — lọc `new_bars` theo `last_ts`,
+**KHÔNG** theo `entry_ts`, nếu không `bars` bị đếm trùng mỗi lần gọi lại.
 
 ### Session State Keys (prefix `ps_`)
 ```python
-# Tất cả key dùng prefix ps_ để tránh conflict với tabs khác
-st.session_state["ps_active_trade"]   # dict hoặc None (lệnh đang chạy)
-st.session_state["ps_log_history"]    # list dict — lịch sử lệnh
-st.session_state["ps_last_time"]      # timestamp candle cuối xử lý
+st.session_state["ps_position"]       # dict | None — vị thế ảo (1 tại 1 thời điểm)
+st.session_state["ps_trade_seq"]      # int — bộ đếm mã lệnh trong phiên
+st.session_state["ps_last_closed"]    # dict | None — lệnh vừa đóng (banner nhận biết)
+st.session_state["ps_log_history"]    # list dict — cặp MỞ/ĐÓNG
+st.session_state["ps_rule_signal"]    # "LONG" | "SHORT" | "WAIT"
+st.session_state["ps_rule_reason"]    # str — lý do dạng chữ
+st.session_state["ps_rule_detail"]    # dict — giá trị thô 2 điều kiện
+st.session_state["ps_last_time"]      # timestamp candle cuối đã xử lý
 st.session_state["ps_last_mtime"]     # mtime file csv lần check trước
 st.session_state["ps_df_1m"]          # DataFrame cache
-st.session_state["ps_last_prob"]      # float — giữ prob qua rerun
-st.session_state["ps_last_trend"]     # (int, str) — trend cache
-st.session_state["ps_trend_mtime"]    # mtime khi trend cuối được tính
+st.session_state["ps_last_prob_long"] / ["ps_last_prob_short"]   # LSTM
+st.session_state["ps_last_trend"] / ["ps_tf_detail"] / ["ps_trend_mtime"]
+st.session_state["ps_signal_audit"]   # list dict — 50 nến gần nhất (chẩn đoán)
 st.session_state["ps_errors"]         # list str — log lỗi trading
-st.session_state["ps_ai_warn"]        # str | None — cảnh báo scaler out-of-range
+st.session_state["ps_report_sent_date"]  # str — chống gửi email báo cáo 2 lần/ngày
+```
+⚠️ `ps_active_trade` (v2) và `ps_last_prob` (v2) **không còn tồn tại**.
+
+### Auto-refresh — dùng `st.fragment`, KHÔNG dùng `sleep + rerun`
+```python
+@st.fragment(run_every=1)
+def _live_panel_auto():   _live_panel_body()
+
+@st.fragment
+def _live_panel_manual(): _live_panel_body()
+# run_every phải cố định lúc khai báo decorator → cần 2 hàm riêng.
+# Fragment chỉ rerun vùng bên trong, app.py và tab khác không bị block.
 ```
 
-### Trend Caching (by mtime)
+### Bền hoá trạng thái — session_state KHÔNG sống qua F5
 ```python
-# CHỈ tính lại trend khi Amibroker ghi file mới (không phải mỗi rerun)
-cur_mtime = os.path.getmtime(data_file)
-if cur_mtime != st.session_state["ps_trend_mtime"] and df_1m is not None:
-    trend, trend_text = _get_trend_from_1m(df_1m)
-    st.session_state["ps_last_trend"] = (trend, trend_text)
-    st.session_state["ps_trend_mtime"] = cur_mtime
+data/ps_state.json    # vị thế đang mở + ps_trade_seq  (nghiệp vụ)
+data/ps_ui_pref.json  # auto refresh, signal_mode, ngưỡng…  (sở thích UI)
+```
+⚠️ Mất `ps_position` khi reload không chỉ là mất hiển thị: journal có dòng `MỞ`
+mà không bao giờ có `ĐÓNG` → lệnh biến mất khỏi báo cáo lãi/lỗ. Và `ps_trade_seq`
+về 0 → mã lệnh trùng → `load_trades()` gộp nhầm giá vào của lệnh này với giá ra
+của lệnh kia. Bộ đếm luôn lấy `max(seq trên đĩa, max trade_id trong journal hôm nay)`.
+
+⚠️ Widget có `key` đã được nạp sẵn trong session_state thì **KHÔNG truyền
+`value=` / `index=`** nữa — Streamlit cảnh báo và bỏ qua một trong hai. Ghi đĩa
+bằng `on_change=`, đừng ghi mỗi lần render (auto-refresh 1s sẽ ghi 1 lần/giây).
+
+### Ngưỡng LSTM đọc từ session_state — nhớ chia 100
+```python
+# slider lưu SỐ NGUYÊN 50–90, so trực tiếp `prob >= 55` sẽ KHÔNG BAO GIỜ đúng
+thr_long  = st.session_state.get("ps_thr_buy",  _DEFAULT_THRESHOLD_BUY  * 100) / 100
+thr_short = st.session_state.get("ps_thr_sell", _DEFAULT_THRESHOLD_SELL * 100) / 100
 ```
 
-### Strict Trend vs Filter Trend
+### Journal CSV — schema có kiểm tra + tự lưu trữ
 ```python
-if strict_trend:  # option trong sidebar
-    cho_vao = (ai_signal == "LONG" and trend == 1) or (ai_signal == "SHORT" and trend == -1)
-else:
-    # CONFLICT → đổi signal thành WAIT
-    if (trend == 1 and ai_signal == "SHORT") or (trend == -1 and ai_signal == "LONG"):
-        ai_signal = "WAIT"
-    cho_vao = ai_signal != "WAIT"
+_JOURNAL_COLUMNS = ["date","time","ticker","action","price","sl","tp",
+                    "tp_method","pnl","trade_id","result","reason"]
+_rotate_journal_if_stale(path)  # header lệch → ĐỔI TÊN (không xoá) sang *_legacy_<ts>.csv
 ```
+⚠️ `to_csv(mode="a", header=False)` ghi theo thứ tự cột của DataFrame mà **không**
+đối chiếu header sẵn có. File cũ từng trộn 3 thế hệ (7/10/12 trường) khiến
+`read_csv(on_bad_lines="skip")` **âm thầm vứt 360/483 dòng**. Đổi `_JOURNAL_COLUMNS`
+BẮT BUỘC phải đi kèm cơ chế xoay vòng này.
+
+⚠️ Lọc bản ghi v4 theo **`trade_id`**, KHÔNG theo `action`: bot cũ cũng ghi
+`"ĐÓNG SHORT"` nên lọc theo action để lọt 42 dòng pnl rác (−1.976,9 → +64,4).
+
+### Cảnh báo Telegram — PHẢI escape nội dung động
+```python
+from .alerter import tg_escape as _tg_escape   # dùng chung, alerter không cần streamlit
+_send_telegram_async(f"🚀 <b>MỞ {_tg_escape(side)}</b>\n⚡ {_tg_escape(reason)}")
+```
+⚠️ Gửi với `parse_mode="HTML"`. Một ký tự `<` trong dữ liệu → Telegram từ chối
+CẢ tin nhắn: `400 can't parse entities: Unsupported start tag "40(+2)"`.
+Lý do tín hiệu v3 chứa `RSI=36.3<40(+2)` ⇒ **không cảnh báo nào tới nơi suốt
+nhiều tháng**, mà `_send_telegram_async` lại vứt bỏ giá trị trả về nên hoàn toàn
+im lặng. Xem `tasks/lessons.md` mục 6.
+
+- `_send_telegram()` log `response.json()["description"]` khi thất bại
+- `_TG_LOG` + `_TG_LOG_LOCK` ở module-level (thread không được chạm session_state)
+- UI: expander "📨 Telegram" — trạng thái, nút Gửi thử, nhật ký; tự mở khi có lỗi
+- `alerter.py` (cảnh báo cổ phiếu) dùng cùng `tg_escape()` + log description
+
+### Định dạng số — `fmt_vn()` trong `alerter.py`
+```python
+from .alerter import tg_escape as _tg_escape, fmt_vn as _fvn
+_fvn(1234567.89, 2)            # "1.234.567,89"  (chấm=nghìn, phẩy=thập phân)
+_fvn(-105000, 0, signed=True)  # "-105.000"
+```
+⚠️ Đặt ở `alerter.py` vì module đó KHÔNG phụ thuộc streamlit; `daily_report`
+import ngược `phaisinh_tab` nên không thể là nơi ở của helper dùng chung.
+**Một định nghĩa duy nhất** — trước đây UI hiện `-105,000đ` kiểu Mỹ còn email
+hiện `-105.000đ` chuẩn VN, cùng một app hai chuẩn.
+
+⚠️ PnL sau phí phải hiện **2 chữ số thập phân**: PnL gộp bước 0,1 nhưng phí
+0,25 nên net luôn lẻ 0,05 — làm tròn 1 chữ số cho ra `-1,1đ` cạnh `-105.000đ`
+(tức 1,05đ), nhìn như sai số liệu.
+
+### Báo cáo lệnh phái sinh — `vn_invest/daily_report.py`
+```python
+load_trades(journal_file, day=, day_from=, day_to=)   # ghép cặp MỞ↔ĐÓNG theo trade_id
+summarize_by_period(trades, freq)  # "D"/"W"/"M" — nhãn VN: Tuần 30/2026 (20/07–26/07)
+build_range_report(d0, d1, freq)   # → (trades, summary, by_period, html)
+summarize(trades)                 # + profit factor, max drawdown, theo chiều/lý do thoát
+build_email_html(trades, s, day)  # inline style, nền sáng (mail client không đọc <style>)
+send_report_email(html, subject)  # SMTP STARTTLS, trả (ok, msg) — không ném lỗi
+email_ready()                     # kiểm tra cấu hình trước, báo rõ thiếu biến nào
+fmt_vn(value, decimals, signed)   # chuẩn VN: chấm=nghìn, phẩy=thập phân
+```
+⚠️ Lọc khoảng ngày phải làm **SAU khi ghép cặp** và theo **ngày ĐÓNG lệnh**. Lọc
+trước trên toàn bộ bản ghi sẽ cắt mất dòng `MỞ` của lệnh mở từ hôm trước → lệnh
+đó bị coi như chưa đóng và biến mất khỏi báo cáo.
+
+⚠️ CSV xuất bằng `utf-8-sig` (BOM) để Excel đọc đúng tiếng Việt.
+⚠️ `daily_report` import `phaisinh_tab` để lấy hằng số → `phaisinh_tab` phải
+import ngược **bên trong hàm** `_render_daily_report()`, không đặt ở module-level.
+
+⚠️ Mọi số nhúng vào HTML email PHẢI qua `fmt_vn()` — mail client hiển thị đúng y
+chuỗi text, không tự áp locale.
+
+Cấu hình `.env`: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
+`REPORT_EMAIL_TO`, `REPORT_EMAIL_FROM`. Gmail bắt buộc **App Password**.
+
+
+### Dự phòng nóng: hai cửa sổ là CÓ CHỦ Ý (Phase 25–26)
+User cố ý mở 2 cửa sổ trình duyệt trên cùng 1 server Streamlit (một trình duyệt
+hay bị đóng khi lấy cookie đăng nhập). Cửa sổ thứ hai là **dự phòng**, không phải
+lỗi — đừng thiết kế như thể nó sai.
+
+```python
+_reload_from_disk()   # nap lai vi the + bo dem + nhat ky tu dia
+                      # BAT BUOC goi khi chuyen tu "chi xem" sang "dieu khien"
+```
+⚠️ **Tiếp quản mà không nạp lại đĩa = mở lệnh trùng.** `ps_position` trong RAM của
+cửa sổ dự phòng là bản chụp lúc nó khởi động, có thể cũ hàng giờ. Không nạp lại
+thì nó không thấy lệnh cửa sổ kia đang mở ⇒ mở thêm lệnh thứ hai, lệnh cũ kẹt với
+dòng MỞ không có ĐÓNG.
+
+⚠️ Nhịp tim ghi đĩa **tiết chế 10s** — fragment chạy 1 lần/giây, ghi mỗi giây là
+thừa. TTL 90s ≫ 10s nên không có nguy cơ hết hạn oan.
+
+Test: `scratchpad/test_takeover.py` — A mở lệnh → A chết → B tiếp quản → B phải
+thấy lệnh của A, không cấp trùng mã, journal ghép cặp đúng.
+
+### Chống hai phiên Streamlit chạy song song (Phase 25)
+`st.session_state` là RIÊNG từng tab. Hai tab cùng mở tab Phái Sinh ⇒ hai engine
+chạy song song, cùng ghi một journal ⇒ mã lệnh trùng, dòng trùng, vị thế chồng
+nhau. Đã xảy ra thật: 6/56 dòng trùng, 4 mã lệnh bị dùng cho hai lệnh khác nhau.
+
+```python
+_OWNER_TTL_SEC = 90
+_session_token()      # uuid theo phiên trình duyệt
+_read_owner()         # -> (token chủ sở hữu, số giây kể từ nhịp tim cuối)
+_claim_ownership()    # -> (là_chủ_sở_hữu, tuổi nhịp tim phiên kia); gọi đầu _live_panel_body()
+_can_trade()          # -> ps_is_owner; CHẶN TẬN GỐC _append_journal + _save_ps_state
+                      #    + cả khối `if df_1m is not None ... and _can_trade():`
+_next_trade_id()      # mã lệnh DUY NHẤT TOÀN CỤC, đọc max trade_id từ ĐĨA
+_is_duplicate_of_last(row)   # bỏ qua dòng trùng hệt dòng cuối journal
+```
+
+⚠️ **Mã lệnh KHÔNG được reset theo ngày.** `load_trades()` gộp bằng
+`groupby("trade_id")`, nên báo cáo nhiều ngày sẽ ghép lệnh #1 của ngày A với
+lệnh #1 của ngày B.
+
+⚠️ **Đừng chỉ cảnh báo — phải chặn tận gốc.** Đặt guard ở `_append_journal()` và
+`_save_ps_state()` chứ không chỉ ở chỗ gọi, vì các chỗ gọi nằm rải rác 5 nơi.
+
+### Ghép cặp MỞ↔ĐÓNG chịu được dữ liệu hỏng — `_pair_by_time()`
+```python
+# SAI: tin trade_id là duy nhất
+c = cl.iloc[-1]; o = op.iloc[0]     # ghép giá vào lệnh này với giá ra lệnh kia
+
+# ĐÚNG: duyệt theo thứ tự thời gian, ghép MỞ với ĐÓNG kế tiếp
+for o, c in _pair_by_time(g): ...
+```
+Sửa hàm ĐỌC thay vì sửa file dữ liệu — không mất lịch sử. Kèm
+`drop_duplicates(subset=["time","action","price","trade_id"])`.
+
+### `hold_min` đếm theo PHÚT GIAO DỊCH — `_trading_minutes()`
+Trừ nghỉ trưa 11:30–13:00. Lệnh vào 11:29 ra 13:29 là **30 nến**, không phải
+120 phút. Đếm bằng đồng hồ cho ra những dòng trông như bot chạy sai luật.
+
+### Đã đối chiếu dữ liệu thật (24/08/2026) — KHÔNG sửa thuật toán
+26 lệnh/5 phiên: win 34,6%, −0,365đ/lệnh, **0/26 vi phạm luật 30 nến**.
+Bootstrap 200.000 lần từ 1.862 lệnh lịch sử: khoảng 90% thường gặp khi n=26 là
+**[−1,767đ ; +2,859đ]**, xác suất tệ bằng/hơn **28,4%**, xác suất vẫn lỗ sau 26
+lệnh dù edge đúng **38,1%**. ⇒ Không có bằng chứng bot hỏng.
+
+⚠️ **Không lọc theo giờ vào lệnh.** Dữ liệu thật gợi ý bỏ 09h (6 lệnh thắng 0%),
+nhưng 273 phiên cho thấy 09h là khung TỐT (+0,483đ, IS +0,471 / OOS +0,495).
+Luật có nguyên lý "không mở lệnh khi còn <K phút trước giờ đóng phiên" quét
+K=0..40: không đơn điệu, OOS/IS tụt 0,68→0,48 ⇒ khớp nhiễu. Xem `lessons.md` 18–19.
 
 ### Error Logging (KHÔNG dùng bare `except: pass`)
 ```python
 except Exception as e:
     err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {type(e).__name__}: {e}"
     st.session_state["ps_errors"].insert(0, err_msg)
-    st.session_state["ps_errors"] = st.session_state["ps_errors"][:50]  # giữ tối đa 50
-# UI: hiển thị trong expander "⚠️ Error Log"
+    st.session_state["ps_errors"] = st.session_state["ps_errors"][:10]
+# UI: expander "🐛 Lỗi hệ thống", tự mở khi có lỗi
 ```
 
-### Params cấu hình (sidebar)
-- `trailing_pts`: khoảng cách trailing stop (points VN30F1M)
-- `initial_sl_pts`: stop loss cứng ban đầu
-- `thr_buy` / `thr_sell`: ngưỡng xác suất LSTM để vào lệnh LONG/SHORT
-
-### Auto-refresh Pattern (cuối render)
+### Chặn giao dịch khi dữ liệu cũ
 ```python
-if auto_refresh:
-    time.sleep(1)
-    st.rerun()
-# KHÔNG dùng while-loop — gây block Streamlit
+_MAX_STALE_MIN = 5
+_data_age_min(df_1m) -> float | None   # phút kể từ nến cuối trong DỮ LIỆU
+data_stale = data_age > _MAX_STALE_MIN  -> ai_signal = "WAIT"
 ```
+⚠️ **KHÔNG tin mtime của file để đánh giá độ mới.** AFL vẫn ghi đè
+`vn30f1m_1min.csv` đều đặn ngay cả khi Amibroker mất kết nối nguồn intraday —
+file "mới 2 phút" mà nến cuối bên trong là của **hôm trước**. Đo tuổi bằng
+`df_1m.index[-1]`, không phải `os.path.getmtime()`.
 
-### Cảnh báo Telegram
-- Cần `.env`: `TELEGRAM_TOKEN` và `TELEGRAM_CHAT_ID`
-- Spam filter lưu tại `data/alert_history.json`
-- Cooldown mặc định: 3 ngày / symbol+signal
-- Dry run: preview kết quả trước khi gửi thật
+Cảnh báo phải phân biệt 2 nguyên nhân (chữa khác nhau):
+| Triệu chứng | Nguyên nhân | Cách chữa |
+|---|---|---|
+| mtime cũ + nến cũ | AFL chưa chạy Explorer | chạy lại Explorer |
+| **mtime mới + nến cũ** | nguồn dữ liệu Amibroker đã dừng | kiểm tra kết nối/đăng nhập data feed |
+
+⚠️ Vị thế mở từ phiên trước sẽ **kẹt vô hạn** nếu nguồn dừng: không có nến mới
+nào để `_check_position_exit()` kích hoạt. Có guard chạy mỗi lần render — nếu
+`pos["entry_ts"].date() != hôm nay` thì chốt tại giá đóng cuối cùng biết được
+với lý do "Đóng cuối phiên (dữ liệu dừng)".
+
+### Giờ giao dịch
+```python
+_in_trading_session(now=None) -> (bool, str)
+# Phiên 1: 09:00–11:30 | Phiên 2: 13:00–14:45
+# Cảnh báo 5 phút trước đóng cửa (_WARN_BEFORE_CLOSE_MIN = 5)
+# Ngoài phiên → ai_signal = "WAIT" (chặn vào lệnh mới, KHÔNG chặn thoát lệnh)
+```
 
 ### Telegram từ AFL (wycoff AFL) — Bug đã biết
 AFL gửi Telegram trực tiếp qua `SendTelegramMessage_Safe()`. Khi `Current_Rec <= -2`:
@@ -836,6 +1067,27 @@ Msg = "BAN: " + Name() + "\nPrice: " + NumToStr(C[i], 1.2) +
 - Shape mismatch v6(5 feat) vs v7(10 feat): detect và auto switch sang full train
 - Delay 3.1s/mã để tránh rate limit khi build dataset
 
+## Cảnh báo cổ phiếu cơ sở — chạy TÁCH KHỎI app
+
+`alert_watcher.py` là tiến trình nền riêng, **không** chạy kèm Streamlit. Mở app
+không bật nó. Đây là thứ gửi Telegram tự động khi AmiBroker quét xong.
+
+- Tự chạy cùng Windows: Task Scheduler **`VNInvest_AlertWatcher`** (AtLogOn,
+  `pythonw.exe`, tự restart 999 lần/5 phút)
+- Chạy tay dự phòng: `start_alert_watcher.bat`
+- Tab Model AI có panel báo watcher sống/chết (đọc mtime `data/alert_watcher.log`)
+
+⚠️ Chạy bằng `pythonw.exe` thì **`sys.stdout is None`** — mọi `sys.stdout.xxx`
+phải guard, nếu không script chết với mã lỗi 1 mà KHÔNG để lại dòng log nào.
+
+⚠️ Có mutex `VNInvest_AlertWatcher_Mutex` chống chạy 2 tiến trình cùng lúc
+(task tự động + user bấm .bat) gây gửi trùng.
+
+⚠️ Xếp hạng chọn top `max_alerts`: KHÔNG sort composite thô. Với SELL thì điểm
+THẤP mới mạnh, sort giảm dần sẽ chọn lệnh bán yếu nhất. Dùng `_strength()`
+(khoảng cách vượt ngưỡng) + **chia suất cho cả hai chiều**, nếu không phiên lệch
+một bên là chiều đó chiếm sạch. Xem `tasks/lessons.md` mục 9.
+
 ## .env
 ```
 VNSTOCK_API_KEY=...
@@ -848,4 +1100,56 @@ LSTM_SCALER_PATH=C:\AmibrokerData\stock_scaler_v7.pkl
 ALERT_BUY_THRESHOLD=65
 ALERT_SELL_THRESHOLD=35
 ALERT_COOLDOWN_DAYS=3
+
+# Email báo cáo lãi/lỗ cuối ngày (tab Phái Sinh) — Gmail cần App Password
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=...
+SMTP_PASSWORD=...
+REPORT_EMAIL_TO=...
+REPORT_EMAIL_FROM=
 ```
+
+Xem `.env.example` để biết đầy đủ và ghi chú từng biến.
+
+## Sửa file bằng script — BẮT BUỘC ghi nguyên tử
+
+```python
+# ❌ SAI — "w" truncate file NGAY, lỗi encode sau đó là mất trắng
+io.open(P, "w", encoding="utf-8").write(src)
+
+# ✅ ĐÚNG
+compile(src, P, "exec")        # cú pháp sai -> dừng, file đích còn nguyên
+data = src.encode("utf-8")     # encode sai  -> dừng, file đích còn nguyên
+tmp = P + ".tmp"
+with open(tmp, "wb") as f:
+    f.write(data)
+os.replace(tmp, P)             # thay thế nguyên tử
+```
+⚠️ Ngày 25/08/2026 mẫu sai ở trên đã xoá sạch `phaisinh_tab.py` (136.641 byte).
+Khôi phục được nhờ `.pyc` + transcript — xem `tasks/lessons.md` mục 20–21.
+
+⚠️ **Không viết emoji bằng `\uXXXX`** cho ký tự ngoài BMP: `\ud83d\udee1` là cặp
+surrogate, hợp lệ trong chuỗi Python nhưng KHÔNG encode được UTF-8. Viết thẳng
+ký tự hoặc dùng `\U0001F6E1`.
+
+### Chống spam Telegram — HAI lớp, đừng bỏ lớp nào
+
+```python
+_TG_DEDUP_SEC = 90
+_tg_is_duplicate(msg)   # bam sha256 noi dung, bo qua tin y het trong 90s
+```
+⚠️ **Chốt chặn "mỗi nến một lần" phải commit NGAY sau khi kiểm tra**, trước mọi
+lần gửi Telegram / ghi journal:
+```python
+if last_time != st.session_state["ps_last_time"]:
+    st.session_state["ps_last_time"] = last_time   # <- NGAY DAY
+    ... gui Telegram, ghi journal ...
+```
+Đặt commit ở cuối khối `try` (như bản cũ) thì một exception giữa chừng khiến nến
+cũ vẫn "mới" ở lần render sau — fragment chạy 1 lần/giây ⇒ **~60 tin/phút**.
+Bỏ lỡ 1 nến còn hơn spam 60 tin.
+
+⚠️ Dấu vết phân biệt nguyên nhân spam: đếm số lần lặp mỗi bản ghi journal.
+Lặp **đúng ×2** = hai cửa sổ cùng chạy. Lặp **10–60 lần** = chốt chặn commit muộn.
+

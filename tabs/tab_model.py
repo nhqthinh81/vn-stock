@@ -226,6 +226,43 @@ def render(ctx: dict) -> None:
         os.environ["ALERT_SELL_THRESHOLD"] = str(al_sell_thr)
         os.environ["ALERT_MIN_GAP_HOURS"]  = str(al_min_gap)
 
+    # ── Tình trạng Alert Watcher ─────────────────────────────────────────────
+    # Watcher là tiến trình NỀN RIÊNG (alert_watcher.py), không nằm trong app.
+    # Nó chết thì cảnh báo tự động ngừng hẳn mà giao diện không hề báo gì —
+    # thực tế đã từng dừng 4 tuần liền mà không ai biết. Panel này để lộ ra.
+    from datetime import datetime as _dt
+    _wlog    = _APP_DIR / "data" / "alert_watcher.log"
+    _lastrun = _APP_DIR / "data" / "alert_last_run.json"
+    _src = _wlog if _wlog.exists() else (_lastrun if _lastrun.exists() else None)
+    if _src is None:
+        st.error(
+            "🛑 **Cảnh báo tự động chưa bao giờ chạy.** Tiến trình nền "
+            "`alert_watcher.py` là thứ gửi Telegram tự động khi AmiBroker quét xong — "
+            "nó KHÔNG chạy kèm app này. Chạy `start_alert_watcher.bat` để bật."
+        )
+    else:
+        _age_h = (_dt.now().timestamp() - _src.stat().st_mtime) / 3600
+        _when  = _dt.fromtimestamp(_src.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
+        if _age_h > 24:
+            st.error(
+                f"🛑 **Cảnh báo tự động đã dừng {_age_h/24:.0f} ngày** — lần chạy "
+                f"cuối {_when}. Tiến trình nền `alert_watcher.py` không còn hoạt "
+                f"động, nên không có tin Telegram nào được gửi tự động. "
+                f"Bật lại bằng `start_alert_watcher.bat`; muốn tự chạy cùng Windows "
+                f"thì đặt shortcut của file đó vào `shell:startup`."
+            )
+        elif _age_h > 2:
+            st.warning(
+                f"⚠️ Watcher im lặng {_age_h:.0f} giờ (lần cuối {_when}). "
+                f"Bình thường nếu ngoài giờ giao dịch hoặc AmiBroker chưa quét lại."
+            )
+        else:
+            st.success(f"✅ Watcher đang hoạt động — lần chạy cuối {_when}")
+        st.caption(
+            "Nút **Quét & gửi cảnh báo** bên dưới chỉ chạy 1 lần thủ công. "
+            "Cảnh báo tự động do `alert_watcher.py` đảm nhiệm, chạy tách khỏi app."
+        )
+
     _tg_token   = os.getenv("TELEGRAM_TOKEN", "")
     _tg_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if _tg_token and _tg_chat_id:

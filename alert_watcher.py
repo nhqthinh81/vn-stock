@@ -25,7 +25,11 @@ from pathlib import Path
 
 APP = Path(__file__).parent
 sys.path.insert(0, str(APP))
-sys.stdout.reconfigure(encoding="utf-8")
+# pythonw.exe (chay nen, khong console) khong co stdout -> sys.stdout is None.
+# Khong guard cho nay thi script chet ngay dong nay voi ma loi 1, TRUOC khi
+# logging kip khoi tao, nen khong de lai dau vet nao trong log.
+if sys.stdout is not None:
+    sys.stdout.reconfigure(encoding="utf-8")
 
 POLL_SECONDS = int(os.getenv("ALERT_WATCHER_POLL", "60"))
 
@@ -35,10 +39,10 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-    ],
+    handlers=(
+        ([logging.StreamHandler(sys.stdout)] if sys.stdout is not None else [])
+        + [logging.FileHandler(LOG_PATH, encoding="utf-8")]
+    ),
 )
 log = logging.getLogger("alert_watcher")
 
@@ -79,6 +83,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="Kiem tra 1 lan roi thoat")
     args = ap.parse_args()
+
+    # Chống chạy trùng: từ khi đăng ký Task Scheduler tự khởi động, user vẫn có
+    # thể bấm start_alert_watcher.bat → 2 tiến trình cùng poll một file, cùng
+    # ghi alert_history/alert_last_run. Mutex đặt tên là cách atomic trên Windows.
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW(None, False, "VNInvest_AlertWatcher_Mutex")
+        if ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            log.warning("Watcher da chay o tien trinh khac — thoat de tranh gui trung.")
+            sys.exit(0)
 
     _load_env()
     if not os.getenv("TELEGRAM_TOKEN") or not os.getenv("TELEGRAM_CHAT_ID"):
