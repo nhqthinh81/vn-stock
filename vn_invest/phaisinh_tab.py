@@ -1529,8 +1529,7 @@ def _render_autotrade_panel():
     cfg = _cfg_load()
     _on, _dry = bool(cfg.get("enabled")), bool(cfg.get("dry_run", True))
     _sel_ok = all(cfg["selectors"].get(k) for k in
-                  ("symbol_input", "qty_input", "long_button",
-                   "short_button", "submit_button"))
+                  ("symbol_select", "qty_input", "long_button", "short_button"))
     _badge = ("🟢 BẬT — DRY-RUN" if _on and _dry else
               "🔴 BẬT — TIỀN THẬT" if _on else "⚪ TẮT")
 

@@ -11,4 +11,4 @@ start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" ^
   --remote-debugging-port=9222 ^
   --user-data-dir="%PROFILE%" ^
   --no-first-run --no-default-browser-check ^
-  "https://smartpro.vps.com.vn"
+  "https://smartpro.vps.com.vn/v1/"

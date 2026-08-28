@@ -19,10 +19,12 @@ data/alert_history.json
 data/train_running.log
 data/alert_watcher.log
 data/*_backup_*.json
+data/autotrade_config.json
 data/autotrade_state.json
 data/autotrade_log.txt
 data/autotrade_shots/
 data/vps_dom_dump.json
+data/vps_*.html
 
 # Model files (lớn)
 *.keras

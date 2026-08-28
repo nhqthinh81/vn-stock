@@ -1210,3 +1210,29 @@ MẠNH+dry-run=điền không bấm → MẠNH+live=bấm thật → ngoài phi�
 20/20 đạt. Chưa kiểm chứng với Chrome/SmartPro thật — CẦN dry-run thực tế
 trước khi tắt dry_run.
 
+### Đã dò xong phiếu lệnh VPS SmartPro thật (28/08/2026)
+
+Kiến trúc THẬT khác giả định ban đầu ở Phase 28:
+```
+#right_stock_cd   <select>  — mã hợp đồng NỘI BỘ (vd "41I1G9000"), KHÔNG phải "VN30F1M"
+#right_price       input    — giá đặt
+#sohopdong         input    — số hợp đồng
+#btn_long / #btn_short       — bấm = GỬI LỆNH LUÔN, không có nút "Đặt lệnh" tách riêng
+#acceptCreateOrderNew        — nút "Xác nhận" trong modal (nếu bật xác nhận)
+```
+`_fill_ticket()` vì vậy KHÔNG được đụng `long_button`/`short_button` — chỉ
+`_submit(page, cfg, side)` mới bấm, và bấm nghĩa là gửi lệnh thật.
+
+⚠️ **Mã hợp đồng đổi HÀNG THÁNG**, không phải theo quý — VN30F1M là hợp đồng
+tháng gần nhất, đáo hạn Thứ Năm tuần 3 mỗi tháng. `_verify_symbol_price()`
+chạy TRƯỚC mọi lệnh: so giá hiển thị trên trang cho `symbol_code` với giá từ
+feed nội bộ, lệch quá `max_price_drift_pct` (mặc định 3%) thì TỪ CHỐI — không
+dựa vào việc nhớ cập nhật tay mỗi tháng. Xác nhận mã đúng qua 3 nguồn độc lập:
+option đã selected sẵn, dòng "active" trong bảng theo dõi + đáo hạn gần nhất,
+giá khớp đúng feed nội bộ.
+
+Đã kiểm chứng SỐNG (không phải mô phỏng): dry-run thật trên tài khoản VPS đang
+đăng nhập — điền đúng mã/giá/KL, chụp màn hình xác nhận, KHÔNG bấm gì. Ảnh
+chụp và mọi log/config runtime đều gitignore (lộ tên chủ TK, số dư, PnL —
+tuyệt đối không commit).
+
