@@ -25,6 +25,12 @@ data/autotrade_log.txt
 data/autotrade_shots/
 data/vps_dom_dump.json
 data/vps_*.html
+data/ps_state.json
+data/ps_ui_pref.json
+data/alpha_log.txt
+data/backtest_log.txt
+data/fundamental_cache.json
+data/fundamental_scan.log
 
 # Model files (lớn)
 *.keras
