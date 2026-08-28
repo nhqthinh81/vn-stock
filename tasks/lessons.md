@@ -583,3 +583,43 @@ cầu ở mức tối đa ngay. Nói rõ với user cái gì đã kiểm chứng
 qua test giả lập) và cái gì CHƯA (hành vi thật với Chrome/sàn thật) — đừng để
 "đã viết xong code" bị hiểu nhầm thành "đã sẵn sàng chạy tiền thật".
 
+## 26. Playwright + Streamlit trên Windows: NotImplementedError do xung đột asyncio policy
+
+**Lỗi gặp:** Bật auto trade trong app Streamlit → "Không nối được
+http://127.0.0.1:9222: NotImplementedError" — dù `check_connection()` chạy
+độc lập qua `python -c` (main thread) hoạt động hoàn hảo.
+
+**Nguyên nhân:** Streamlit chạy trên Tornado, và Tornado tự đặt process-wide
+asyncio event loop policy thành `WindowsSelectorEventLoopPolicy` trên Windows.
+Playwright (kể cả `connect_over_cdp`, không chỉ launch trình duyệt mới) vẫn
+spawn một tiến trình driver nội bộ để nói CDP qua websocket — mà
+`SelectorEventLoop` KHÔNG hỗ trợ subprocess trên Windows, ném thẳng
+`NotImplementedError` tại `asyncio.create_subprocess_exec`.
+
+`auto_trader` luôn chạy trong `threading.Thread` (đúng thiết kế — không chặn
+render), nên thừa hưởng policy sai đó từ tiến trình. Chạy trong main thread
+của script rời thì không dính, vì main thread chưa từng bị Tornado đụng vào.
+
+**Cách tái hiện trước khi vá (bắt buộc, xem mục 7 CLAUDE.md — không đoán
+nguyên nhân khi chưa có feedback loop):** giả lập chính policy Tornado đặt,
+gọi hàm từ thread nền y hệt cách production gọi:
+```python
+asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+threading.Thread(target=lambda: check_connection()).start()
+# -> NotImplementedError tai asyncio.create_subprocess_exec
+```
+
+**Cách vá:** `_ensure_win_proactor_policy()` — ép lại
+`WindowsProactorEventLoopPolicy` ngay trước khi tạo `sync_playwright()`. An
+toàn vì đây là process-wide nhưng chỉ ảnh hưởng loop MỚI tạo sau lệnh này;
+IOLoop của Tornado đã tồn tại từ lúc Streamlit khởi động, không đổi theo policy
+nữa. Gọi ở CẢ HAI nơi dùng `sync_playwright()` (`check_connection` và
+`submit_signal`), không chỉ import-time — vì mỗi lệnh mở kết nối CDP mới.
+
+**Rule phòng tránh:** bất kỳ thư viện nào dùng `asyncio.create_subprocess_*`
+bên trong (Playwright, một số driver trình duyệt khác) mà chạy trong thread
+nền của một app web Windows dựa trên Tornado/asyncio (Streamlit, Jupyter,
+một số FastAPI setup) đều có nguy cơ này. Luôn kiểm tra process-wide event
+loop policy trước khi debug sâu hơn — dấu hiệu nhận biết là `NotImplementedError`
+trỏ thẳng tới `_make_subprocess_transport` trong traceback.
+

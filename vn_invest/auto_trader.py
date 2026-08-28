@@ -22,10 +22,38 @@ Module KHÔNG import streamlit — gọi được từ thread (như _send_telegr
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 import threading
 from datetime import datetime
+
+
+def _ensure_win_proactor_policy() -> None:
+    """Ép lại ProactorEventLoopPolicy trên Windows trước khi gọi Playwright.
+
+    Streamlit chạy trên Tornado, và Tornado tự đặt process-wide asyncio policy
+    thành WindowsSelectorEventLoopPolicy trên Windows. Playwright (kể cả
+    connect_over_cdp) vẫn cần spawn tiến trình driver nội bộ để nói chuyện CDP
+    qua websocket — SelectorEventLoop KHÔNG hỗ trợ subprocess trên Windows,
+    lỗi `NotImplementedError` ở `asyncio.create_subprocess_exec`. Vì auto_trader
+    luôn chạy trong thread nền (threading.Thread), nó thừa hưởng policy sai đó.
+
+    Đặt lại policy là thao tác toàn tiến trình, nhưng vô hại với Streamlit:
+    Tornado đã tạo xong IOLoop của nó từ trước (lúc khởi động server), object
+    loop đã tồn tại không đổi theo policy nữa — chỉ các loop MỚI tạo sau lệnh
+    này (đúng cái Playwright sắp tạo) mới theo policy mới.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        if not isinstance(asyncio.get_event_loop_policy(),
+                          asyncio.WindowsProactorEventLoopPolicy):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CFG_FILE   = os.path.join(_APP_DIR, "data", "autotrade_config.json")
@@ -164,6 +192,7 @@ def check_connection() -> tuple[bool, str]:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return False, "Thiếu playwright — pip install playwright"
+    _ensure_win_proactor_policy()
     try:
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(cfg["cdp_url"], timeout=5000)
@@ -285,6 +314,7 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
     except ImportError:
         _log("❌ Thiếu playwright")
         return False, "Thiếu playwright"
+    _ensure_win_proactor_policy()
 
     with _LOCK:
         try:

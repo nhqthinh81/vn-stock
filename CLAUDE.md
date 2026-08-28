@@ -1236,3 +1236,14 @@ giá khớp đúng feed nội bộ.
 chụp và mọi log/config runtime đều gitignore (lộ tên chủ TK, số dư, PnL —
 tuyệt đối không commit).
 
+### Playwright trong thread nền của Streamlit trên Windows — bắt buộc ép lại policy
+```python
+_ensure_win_proactor_policy()   # goi truoc MOI lan tao sync_playwright()
+```
+Streamlit/Tornado tự đặt `WindowsSelectorEventLoopPolicy` toàn tiến trình —
+Playwright cần `WindowsProactorEventLoopPolicy` để spawn subprocess driver
+(kể cả `connect_over_cdp`, không chỉ mở trình duyệt mới). Thiếu bước này →
+`NotImplementedError` tại `asyncio.create_subprocess_exec`, chỉ xảy ra khi
+gọi từ thread nền (`threading.Thread`) — gọi từ script `python -c` rời thì
+không dính, dễ gây hiểu nhầm "code đúng, chỉ app mới lỗi". Xem `lessons.md` 26.
+
