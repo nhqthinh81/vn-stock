@@ -1517,6 +1517,60 @@ def _render_telegram_panel():
 
 # ── Báo cáo lãi/lỗ cuối ngày ──────────────────────────────────────────────────
 
+def _render_autotrade_panel():
+    """Bảng điều khiển đặt lệnh tự động VPS SmartPro (qua Chrome debug port).
+
+    Công tắc ghi thẳng vào `data/autotrade_config.json` — nguồn sự thật duy
+    nhất, vì auto_trader chạy trong thread riêng không đọc được session_state.
+    """
+    from .auto_trader import (load_config as _cfg_load, save_config as _cfg_save,
+                              check_connection, read_log_tail, _orders_today)
+
+    cfg = _cfg_load()
+    _on, _dry = bool(cfg.get("enabled")), bool(cfg.get("dry_run", True))
+    _sel_ok = all(cfg["selectors"].get(k) for k in
+                  ("symbol_input", "qty_input", "long_button",
+                   "short_button", "submit_button"))
+    _badge = ("🟢 BẬT — DRY-RUN" if _on and _dry else
+              "🔴 BẬT — TIỀN THẬT" if _on else "⚪ TẮT")
+
+    with st.expander(f"🤖 Đặt lệnh tự động VPS ({_badge})", expanded=False):
+        st.caption(
+            "⭐ Lệnh **MẠNH** → đặt tự động · lệnh thường → chỉ **điền sẵn** phiếu, "
+            "bạn bấm xác nhận. Chrome phải chạy bằng `Chay_Chrome_AutoTrade.bat` "
+            "và đã đăng nhập SmartPro. "
+            f"Trần: {cfg.get('max_qty', 1)} HĐ/lệnh · "
+            f"{cfg.get('max_orders_per_day', 6)} lệnh/ngày "
+            f"(hôm nay đã {_orders_today()})."
+        )
+        if not _sel_ok:
+            st.warning("⚠️ Chưa cấu hình selector phiếu lệnh — chạy "
+                       "`python inspect_vps.py` rồi gửi kết quả cho Claude. "
+                       "Trước đó mọi lệnh chỉ ghi log, không thao tác gì.")
+
+        c1, c2, c3 = st.columns([1, 1, 1])
+        _new_on  = c1.toggle("Bật auto trade", value=_on, key="at_on")
+        _new_dry = c2.toggle("Dry-run (điền, không bấm)", value=_dry, key="at_dry")
+        if _new_on != _on or _new_dry != _dry:
+            if _new_on and not _new_dry and not _sel_ok:
+                st.error("Không thể tắt dry-run khi chưa cấu hình selector.")
+            else:
+                cfg["enabled"], cfg["dry_run"] = _new_on, _new_dry
+                _cfg_save(cfg)
+                st.rerun()
+        if _on and not _dry:
+            st.error("⚠️ **CHẾ ĐỘ TIỀN THẬT** — lệnh ⭐ MẠNH sẽ được đặt "
+                     "không cần xác nhận.")
+
+        if c3.button("🔌 Kiểm tra kết nối", key="at_check"):
+            _ok, _msg = check_connection()
+            (st.success if _ok else st.error)(_msg)
+
+        _lines = read_log_tail(12)
+        if _lines:
+            st.code("\n".join(_lines), language=None)
+
+
 def _render_daily_report(in_session: bool):
     """Báo cáo lệnh phái sinh: xem, tải về, tổng hợp theo ngày/tuần/tháng, gửi mail.
 
@@ -1994,6 +2048,20 @@ def _live_panel_body():
                     }
                     st.session_state["ps_log_history"].insert(0, log_entry)
                     _append_journal(log_entry)
+
+                    # Đặt lệnh tự động VPS (chính sách MẠNH/thường + mọi trần
+                    # an toàn nằm TRONG auto_trader — hook chỉ chuyển tín hiệu).
+                    # Import cục bộ: module tự đứng, thiếu playwright cũng không
+                    # làm hỏng tab.
+                    try:
+                        from .auto_trader import load_config as _at_cfg, \
+                            submit_signal_async as _at_submit
+                        if _at_cfg().get("enabled"):
+                            _at_submit(ai_signal, bool(_rd.get("strong")),
+                                       price=pos["entry"], in_session=in_session)
+                    except Exception as _at_e:
+                        st.session_state["ps_errors"].insert(
+                            0, f"[auto_trade] {type(_at_e).__name__}: {_at_e}")
 
         except Exception as e:
             err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {type(e).__name__}: {e}"
@@ -2625,6 +2693,7 @@ def _live_panel_body():
 
     # ── Trạng thái Telegram ──────────────────────────────────────────────────
     _render_telegram_panel()
+    _render_autotrade_panel()
 
     # ── Báo cáo lãi/lỗ cuối ngày ─────────────────────────────────────────────
     _render_daily_report(in_session)

@@ -1,0 +1,291 @@
+"""Đặt lệnh tự động VPS SmartPro qua trình duyệt đang mở (Chrome DevTools Protocol).
+
+Cách hoạt động
+--------------
+Chrome chạy sẵn với cờ ``--remote-debugging-port=9222`` (dùng ``Chay_Chrome_AutoTrade.bat``,
+profile riêng), người dùng tự đăng nhập SmartPro + nhập PIN trong cửa sổ đó.
+Mỗi lệnh: mở kết nối CDP mới → tìm tab VPS → điền phiếu lệnh → (tuỳ chế độ) bấm.
+Không giữ kết nối lâu dài — trình duyệt khởi động lại cũng không cần sửa gì.
+
+Chính sách theo tín hiệu (user chọn 26/08/2026):
+  ⭐ MẠNH  → đặt lệnh TỰ ĐỘNG (khi enabled=true và dry_run=false)
+  thường   → chỉ ĐIỀN SẴN phiếu lệnh, người dùng tự bấm xác nhận
+
+An toàn — nhiều lớp, lớp nào cũng chặn được:
+  1. ``enabled`` mặc định false — bật thủ công trong config/UI
+  2. ``dry_run`` mặc định true — điền form, chụp màn hình, KHÔNG bấm
+  3. Trần cứng: ``max_qty`` (mặc định 1 HĐ), ``max_orders_per_day``
+  4. Chỉ trong giờ giao dịch; bộ đếm lệnh/ngày bền trên đĩa
+  5. Mọi hành động ghi ``data/autotrade_log.txt`` + chụp màn hình
+
+Module KHÔNG import streamlit — gọi được từ thread (như _send_telegram).
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+from datetime import datetime
+
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CFG_FILE   = os.path.join(_APP_DIR, "data", "autotrade_config.json")
+_STATE_FILE = os.path.join(_APP_DIR, "data", "autotrade_state.json")
+_LOG_FILE   = os.path.join(_APP_DIR, "data", "autotrade_log.txt")
+_SHOT_DIR   = os.path.join(_APP_DIR, "data", "autotrade_shots")
+
+_LOCK = threading.Lock()          # 1 lệnh browser tại 1 thời điểm là đủ
+
+_DEFAULT_CFG = {
+    "enabled": False,             # công tắc tổng — false thì mọi lệnh chỉ ghi log
+    "dry_run": True,              # true: điền + chụp màn hình, KHÔNG bấm nút đặt
+    "cdp_url": "http://127.0.0.1:9222",
+    "page_url_contains": "vps.com.vn",
+    "symbol": "VN30F1M",
+    "max_qty": 1,
+    "max_orders_per_day": 6,
+    # Selector CSS của phiếu lệnh SmartPro — điền bằng inspect_vps.py.
+    # Còn trống thì mọi lệnh dừng ở bước "chưa cấu hình" (an toàn mặc định).
+    "selectors": {
+        "symbol_input":  "",
+        "price_input":   "",
+        "qty_input":     "",
+        "long_button":   "",      # nút MUA / LONG
+        "short_button":  "",      # nút BÁN / SHORT
+        "submit_button": "",      # nút Đặt lệnh
+        "confirm_button": ""      # nút Xác nhận trong hộp thoại (nếu có)
+    },
+}
+
+
+# ── Config / state / log ─────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    cfg = json.loads(json.dumps(_DEFAULT_CFG))          # deep copy
+    try:
+        if os.path.exists(_CFG_FILE):
+            with open(_CFG_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+            for k, v in saved.items():
+                if k == "selectors" and isinstance(v, dict):
+                    cfg["selectors"].update(v)
+                else:
+                    cfg[k] = v
+    except Exception as e:
+        _log(f"⚠️ Lỗi đọc config: {e} — dùng mặc định (enabled=false)")
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    os.makedirs(os.path.dirname(_CFG_FILE), exist_ok=True)
+    data = json.dumps(cfg, ensure_ascii=False, indent=2).encode("utf-8")
+    tmp = _CFG_FILE + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, _CFG_FILE)
+
+
+def _orders_today() -> int:
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("date") == datetime.now().strftime("%Y-%m-%d"):
+            return int(st.get("count", 0))
+    except Exception:
+        pass
+    return 0
+
+
+def _bump_orders_today() -> None:
+    st = {"date": datetime.now().strftime("%Y-%m-%d"), "count": _orders_today() + 1}
+    os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+    tmp = _STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(st, f)
+    os.replace(tmp, _STATE_FILE)
+
+
+def _log(line: str) -> None:
+    stamp = datetime.now().strftime("%d/%m %H:%M:%S")
+    try:
+        os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {line}\n")
+    except Exception:
+        pass
+
+
+def read_log_tail(n: int = 15) -> list[str]:
+    try:
+        with open(_LOG_FILE, encoding="utf-8", errors="replace") as f:
+            return f.read().strip().splitlines()[-n:][::-1]
+    except Exception:
+        return []
+
+
+# ── Lõi browser ──────────────────────────────────────────────────────────────
+
+def _find_vps_page(browser, url_part: str):
+    for ctx in browser.contexts:
+        for page in ctx.pages:
+            if url_part in (page.url or ""):
+                return page
+    return None
+
+
+def _shot(page, tag: str) -> str:
+    try:
+        os.makedirs(_SHOT_DIR, exist_ok=True)
+        path = os.path.join(_SHOT_DIR,
+                            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{tag}.png")
+        page.screenshot(path=path)
+        return os.path.basename(path)
+    except Exception as e:
+        return f"(chụp lỗi: {e})"
+
+
+def check_connection() -> tuple[bool, str]:
+    """Kiểm tra nhanh: Chrome debug-port có mở và có tab VPS không."""
+    cfg = load_config()
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False, "Thiếu playwright — pip install playwright"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(cfg["cdp_url"], timeout=5000)
+            page = _find_vps_page(browser, cfg["page_url_contains"])
+            n_tabs = sum(len(c.pages) for c in browser.contexts)
+            browser.close()
+            if page is None:
+                return False, (f"Nối được Chrome ({n_tabs} tab) nhưng KHÔNG có tab "
+                               f"chứa '{cfg['page_url_contains']}' — hãy mở SmartPro "
+                               f"trong đúng cửa sổ Chrome đó")
+            return True, f"OK — thấy tab VPS: {page.url[:70]}"
+    except Exception as e:
+        return False, (f"Không nối được {cfg['cdp_url']}: {type(e).__name__}. "
+                       f"Chrome phải chạy bằng Chay_Chrome_AutoTrade.bat")
+
+
+def _fill_ticket(page, cfg: dict, side: str, qty: int, price: float | None) -> str | None:
+    """Điền phiếu lệnh. Trả None nếu ổn, chuỗi lỗi nếu thiếu selector/element."""
+    sel = cfg["selectors"]
+    need = ["symbol_input", "qty_input",
+            "long_button" if side == "LONG" else "short_button"]
+    missing = [k for k in need if not sel.get(k)]
+    if missing:
+        return f"Chưa cấu hình selector: {', '.join(missing)} (chạy inspect_vps.py)"
+
+    side_btn = sel["long_button"] if side == "LONG" else sel["short_button"]
+    try:
+        page.click(side_btn, timeout=4000)
+        page.fill(sel["symbol_input"], cfg["symbol"], timeout=4000)
+        if price is not None and sel.get("price_input"):
+            page.fill(sel["price_input"], f"{price:.1f}", timeout=4000)
+        page.fill(sel["qty_input"], str(qty), timeout=4000)
+        return None
+    except Exception as e:
+        return f"Điền phiếu lỗi: {type(e).__name__}: {str(e)[:120]}"
+
+
+def _submit(page, cfg: dict) -> str | None:
+    sel = cfg["selectors"]
+    if not sel.get("submit_button"):
+        return "Chưa cấu hình selector submit_button"
+    try:
+        page.click(sel["submit_button"], timeout=4000)
+        if sel.get("confirm_button"):
+            try:
+                page.click(sel["confirm_button"], timeout=4000)
+            except Exception:
+                pass                     # nhiều khi không có hộp thoại xác nhận
+        return None
+    except Exception as e:
+        return f"Bấm đặt lệnh lỗi: {type(e).__name__}: {str(e)[:120]}"
+
+
+# ── API chính ────────────────────────────────────────────────────────────────
+
+def submit_signal(side: str, strong: bool, price: float | None = None,
+                  in_session: bool = True) -> tuple[bool, str]:
+    """Xử lý 1 tín hiệu theo chính sách: MẠNH → đặt tự động, thường → điền sẵn.
+
+    Trả (đã_thao_tác_browser, mô_tả). Mọi nhánh đều ghi log.
+    """
+    cfg = load_config()
+    tag = "⭐MẠNH" if strong else "thường"
+
+    if not cfg.get("enabled"):
+        _log(f"⏸️ {side} ({tag}) — auto trade đang TẮT, bỏ qua")
+        return False, "Auto trade đang tắt"
+    if not in_session:
+        _log(f"⛔ {side} ({tag}) — ngoài giờ giao dịch, bỏ qua")
+        return False, "Ngoài giờ giao dịch"
+    if _orders_today() >= int(cfg.get("max_orders_per_day", 6)):
+        _log(f"⛔ {side} ({tag}) — chạm trần {cfg['max_orders_per_day']} lệnh/ngày")
+        return False, "Chạm trần lệnh/ngày"
+
+    qty = min(1, int(cfg.get("max_qty", 1))) if strong else int(cfg.get("max_qty", 1))
+    qty = max(1, min(qty, int(cfg.get("max_qty", 1))))
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _log("❌ Thiếu playwright")
+        return False, "Thiếu playwright"
+
+    with _LOCK:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(cfg["cdp_url"], timeout=5000)
+                page = _find_vps_page(browser, cfg["page_url_contains"])
+                if page is None:
+                    _log(f"❌ {side} ({tag}) — không thấy tab VPS")
+                    browser.close()
+                    return False, "Không thấy tab VPS trong Chrome debug"
+
+                err = _fill_ticket(page, cfg, side, qty, price)
+                if err:
+                    shot = _shot(page, "fill_err")
+                    _log(f"❌ {side} ({tag}) — {err} · ảnh {shot}")
+                    browser.close()
+                    return False, err
+
+                # Lệnh thường: dừng ở điền sẵn — người dùng tự bấm
+                if not strong:
+                    shot = _shot(page, "prefill")
+                    _log(f"📝 ĐIỀN SẴN {side} x{qty} (thường) — chờ người dùng bấm "
+                         f"· ảnh {shot}")
+                    browser.close()
+                    return True, f"Đã điền sẵn {side} x{qty} — bạn bấm xác nhận"
+
+                # Lệnh MẠNH: đặt tự động (trừ khi dry-run)
+                if cfg.get("dry_run", True):
+                    shot = _shot(page, "dryrun")
+                    _log(f"🧪 DRY-RUN {side} x{qty} (MẠNH) — đã điền, KHÔNG bấm "
+                         f"· ảnh {shot}")
+                    browser.close()
+                    return True, f"DRY-RUN: đã điền {side} x{qty}, không bấm"
+
+                err = _submit(page, cfg)
+                if err:
+                    shot = _shot(page, "submit_err")
+                    _log(f"❌ {side} (MẠNH) — {err} · ảnh {shot}")
+                    browser.close()
+                    return False, err
+
+                _bump_orders_today()
+                shot = _shot(page, "submitted")
+                _log(f"✅ ĐÃ ĐẶT {side} x{qty} (MẠNH, lệnh thứ {_orders_today()} "
+                     f"hôm nay) · ảnh {shot}")
+                browser.close()
+                return True, f"ĐÃ ĐẶT {side} x{qty}"
+        except Exception as e:
+            _log(f"❌ {side} ({tag}) — {type(e).__name__}: {str(e)[:150]}")
+            return False, f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def submit_signal_async(side: str, strong: bool, price: float | None = None,
+                        in_session: bool = True) -> None:
+    """Bản chạy nền — gọi từ engine, không chặn render (như _send_telegram_async)."""
+    threading.Thread(target=submit_signal,
+                     args=(side, strong, price, in_session), daemon=True).start()

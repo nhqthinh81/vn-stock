@@ -559,3 +559,27 @@ tìm **đại lượng phân biệt được chúng** (ở đây: phân bố s�
 hai vẫn đúng, nhưng phải biết cái nào đã thật sự xảy ra — nếu không sẽ báo cáo
 sai cho user và không biết bản sửa nào mới thực sự có tác dụng.
 
+## 25. Tự động hoá thực thi lệnh — thiết kế theo giai đoạn, không nhảy thẳng
+
+**Bối cảnh:** User muốn bot tự bấm lệnh trên VPS SmartPro vì đọc tin nhắn
+Telegram rồi vào tay không kịp — đúng, vì backtest đo edge tại giá đóng nến
+tín hiệu, độ trễ vài phút ăn hết phần lớn +0,45đ/lệnh.
+
+**Quyết định thiết kế:** không xây thẳng "tự động hoàn toàn". Hệ thống vừa
+trải qua ba sự cố (journal hỏng do 2 cửa sổ, spam Telegram, mất file) — ở chế
+độ tin nhắn một bug là cảnh báo sai; ở chế độ tự động một bug là TIỀN THẬT bị
+đặt lặp lại. Rủi ro không đối xứng.
+
+**Cách làm:** 5 lớp an toàn ĐỘC LẬP (không lớp nào dựa vào lớp khác đúng):
+công tắc tổng mặc định tắt, dry-run mặc định bật, trần cứng bền trên đĩa, giờ
+phiên, thiếu selector thì dừng ở bước điền không bao giờ đoán bấm nút nào.
+Chính sách theo tín hiệu: chỉ tự động lệnh ⭐ MẠNH (~1/ngày, edge đã kiểm
+chứng thống kê), lệnh thường chỉ điền sẵn — người vẫn là lớp gác cuối cho phần
+rủi ro chưa chứng minh được ngoài mẫu.
+
+**Rule phòng tránh:** khi một yêu cầu chuyển từ "gợi ý" sang "hành động có hậu
+quả tiền tệ/không thể hoàn tác", thêm bậc thang an toàn thay vì làm đúng y yêu
+cầu ở mức tối đa ngay. Nói rõ với user cái gì đã kiểm chứng (logic quyết định,
+qua test giả lập) và cái gì CHƯA (hành vi thật với Chrome/sàn thật) — đừng để
+"đã viết xong code" bị hiểu nhầm thành "đã sẵn sàng chạy tiền thật".
+

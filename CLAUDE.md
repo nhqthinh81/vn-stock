@@ -1172,3 +1172,41 @@ sau ~2-3 tháng trước khi cân nhắc bất kỳ thay đổi hành vi nào.
 cách tới VWAP, dấu mh đồng pha, bền vững 2 nến, nghỉ sau SL, cầu dao thua K
 lệnh/ngày — tất cả đều giảm tổng lợi nhuận so với v4 chuẩn (+844đ).
 
+### Đặt lệnh tự động VPS SmartPro — `vn_invest/auto_trader.py` (Phase 28)
+User yêu cầu bám trình duyệt đăng nhập sẵn để bù độ trễ đọc-tin-nhắn-rồi-vào-tay.
+Nối qua Chrome DevTools Protocol (`--remote-debugging-port=9222`, profile
+riêng `Chay_Chrome_AutoTrade.bat`) — KHÔNG đụng cookie/session của trình
+duyệt chính người dùng đang dùng.
+
+**Chính sách theo tín hiệu** (quyết định của user 26/08/2026, không phải mặc
+định kỹ thuật): ⭐ MẠNH → đặt lệnh tự động; tín hiệu thường → chỉ **điền sẵn**
+phiếu, người dùng tự bấm. Đây là ngoại lệ hợp lý của luật "không lọc tín hiệu
+thường" (Phase 27) — ở auto-trade cái bị giới hạn là vốn/rủi ro thực thi,
+không phải tín hiệu.
+
+```python
+_LOCK = threading.Lock()   # 1 lệnh browser tại 1 thời điểm
+submit_signal(side, strong, price, in_session)   # đồng bộ, dùng cho test
+submit_signal_async(...)                          # gọi từ engine, không chặn render
+```
+
+⚠️ **5 lớp an toàn, mỗi lớp tự chặn được, không phụ thuộc lớp khác:**
+`enabled=False` mặc định · `dry_run=True` mặc định (điền + chụp màn hình,
+KHÔNG bấm) · `max_qty` / `max_orders_per_day` (bộ đếm bền trên đĩa, theo ngày)
+· chỉ trong giờ giao dịch · thiếu bất kỳ selector nào thì dừng ở bước điền,
+không bao giờ bấm nhầm nút lạ.
+
+⚠️ Module **không import streamlit** — gọi được từ thread nền như
+`_send_telegram_async`. Cấu hình đọc/ghi qua `data/autotrade_config.json`
+(nguồn sự thật duy nhất, vì thread không đọc được `session_state`).
+
+Selector phiếu lệnh phải dò bằng `inspect_vps.py` (chỉ đọc DOM, không bấm gì)
+rồi điền tay vào config — không đoán theo tên class, sàn đổi giao diện là chết
+im lặng nếu không kiểm bằng nút "🔌 Kiểm tra kết nối" trong panel.
+
+Test: `scratchpad/test_autotrader.py` — giả lập Chrome bằng fake object, kiểm
+tách bạch từng lớp an toàn (tắt → thiếu selector → thường=điền sẵn →
+MẠNH+dry-run=điền không bấm → MẠNH+live=bấm thật → ngoài phiên → chạm trần).
+20/20 đạt. Chưa kiểm chứng với Chrome/SmartPro thật — CẦN dry-run thực tế
+trước khi tắt dry_run.
+
