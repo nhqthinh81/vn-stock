@@ -1247,3 +1247,23 @@ Playwright cần `WindowsProactorEventLoopPolicy` để spawn subprocess driver
 gọi từ thread nền (`threading.Thread`) — gọi từ script `python -c` rời thì
 không dính, dễ gây hiểu nhầm "code đúng, chỉ app mới lỗi". Xem `lessons.md` 26.
 
+### Phiên VPS tự đăng xuất sau 720 phút — phát hiện + cảnh báo (Phase 28e)
+Chrome vẫn mở không có nghĩa phiên còn đăng nhập. `_session_alive(page)` kiểm
+2 mức tin cậy: có ô mật khẩu hiện hữu → chắc chắn hết hạn; thiếu
+`#right_stock_cd` (phiếu lệnh) nhưng không có mật khẩu → nghi ngờ (có thể hết
+hạn HOẶC đang ở màn hình khác trong app), báo cả hai khả năng thay vì khẳng
+định sai.
+
+```python
+check_session()      # noi Chrome + tim tab + kiem tra phien, dung cho nut bam tay
+```
+`submit_signal()` gọi `_session_alive()` **trước** cả kiểm tra mã hợp đồng cũ
+— phiên chết thì không đụng gì tới `select_option`/`fill` (tránh điền vào
+đúng trang đăng nhập).
+
+⚠️ **Kiểm tra định kỳ chạy ĐỒNG BỘ trong `_live_panel_body`, không qua
+thread** — vì cần đọc/ghi `session_state` và gọi `_send_telegram_async`. Mỗi
+~60 phút khi auto-trade đang bật; cảnh báo Telegram chỉ gửi **1 lần** khi vừa
+phát hiện chết (so `ps_at_session_ok` cũ, tránh spam mỗi giờ trong lúc chờ
+đăng nhập lại). Panel có nút "🔍 Kiểm tra phiên đăng nhập" riêng để bấm tay.
+

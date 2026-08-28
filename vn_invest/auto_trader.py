@@ -209,6 +209,68 @@ def check_connection() -> tuple[bool, str]:
                        f"Chrome phải chạy bằng Chay_Chrome_AutoTrade.bat")
 
 
+def _session_alive(page) -> tuple[bool, str]:
+    """Kiểm tra phiên đăng nhập VPS còn sống + đang ở đúng màn hình đặt lệnh.
+
+    Phiên SmartPro tự đăng xuất sau 720 phút — nếu không phát hiện, bot vẫn
+    tưởng đã nối được Chrome (đúng — Chrome vẫn mở) nhưng thật ra đang điền
+    vào trang đăng nhập, không có tác dụng gì và không báo lỗi rõ ràng.
+
+    Hai mức tin cậy:
+      1. Có trường mật khẩu HIỆN HỮU trên trang → gần như chắc chắn phiên đã
+         hết hạn (màn hình khác trong app SmartPro không có trường này).
+      2. Không có (2) nhưng thiếu `#right_stock_cd` (phiếu lệnh) → có thể đã
+         hết hạn HOẶC cửa sổ đang ở màn hình khác — không phân biệt được từ
+         bên ngoài nên báo cả hai khả năng thay vì khẳng định sai.
+    """
+    try:
+        has_pwd = page.evaluate(
+            "() => { const el = document.querySelector('input[type=\"password\"]'); "
+            "return !!(el && el.offsetParent !== null); }"
+        )
+    except Exception as e:
+        return False, f"Không đọc được trang: {type(e).__name__}"
+    if has_pwd:
+        return False, ("Phiên đăng nhập VPS đã HẾT HẠN (thấy ô mật khẩu trên trang). "
+                       "Đăng nhập lại trong cửa sổ Chrome đặt lệnh tự động.")
+    try:
+        has_ticket = page.evaluate("() => !!document.getElementById('right_stock_cd')")
+    except Exception as e:
+        return False, f"Không đọc được trang: {type(e).__name__}"
+    if not has_ticket:
+        return False, ("Không thấy phiếu lệnh phái sinh trên trang — có thể phiên đã "
+                       "hết hạn, hoặc cửa sổ đang ở màn hình khác. Mở lại "
+                       "smartpro.vps.com.vn/v1/ và vào tab Giao dịch phái sinh.")
+    return True, "OK"
+
+
+def check_session() -> tuple[bool, str]:
+    """Kiểm tra đầy đủ: nối được Chrome + có tab VPS + phiên còn sống.
+
+    Dùng cho cả nút bấm tay trong panel lẫn kiểm tra định kỳ tự động trong
+    engine (mỗi ~60 phút khi auto-trade đang bật) — xem `_render_autotrade_panel`
+    và hook trong `_live_panel_body`.
+    """
+    ok, msg = check_connection()
+    if not ok:
+        return False, msg
+    cfg = load_config()
+    _ensure_win_proactor_policy()
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(cfg["cdp_url"], timeout=5000)
+            page = _find_vps_page(browser, cfg["page_url_contains"])
+            if page is None:
+                browser.close()
+                return False, "Mất tab VPS giữa chừng"
+            alive, sess_msg = _session_alive(page)
+            browser.close()
+            return alive, ("Phiên VPS còn sống — sẵn sàng giao dịch" if alive else sess_msg)
+    except Exception as e:
+        return False, f"Lỗi kiểm tra phiên: {type(e).__name__}: {str(e)[:100]}"
+
+
 def _verify_symbol_price(page, cfg: dict, our_price: float | None) -> str | None:
     """Chặn đặt lệnh nhầm hợp đồng đã cũ — mã VN30F1M nội bộ đổi HÀNG THÁNG.
 
@@ -325,6 +387,13 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                     _log(f"❌ {side} ({tag}) — không thấy tab VPS")
                     browser.close()
                     return False, "Không thấy tab VPS trong Chrome debug"
+
+                alive, sess_msg = _session_alive(page)
+                if not alive:
+                    shot = _shot(page, "session_dead")
+                    _log(f"⛔ {side} ({tag}) — {sess_msg} · ảnh {shot}")
+                    browser.close()
+                    return False, sess_msg
 
                 err = _verify_symbol_price(page, cfg, price)
                 if err:

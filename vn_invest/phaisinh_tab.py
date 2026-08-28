@@ -1362,6 +1362,8 @@ def render_phaisinh_tab():
         "ps_last_closed":     None, # lệnh vừa đóng — để hiện banner nhận biết
         "ps_is_owner":        False,# có giữ quyền ghi không (xem _claim_ownership)
         "ps_took_over_at":    None, # thời điểm tiếp quản từ phiên khác
+        "ps_at_session_ok":       None, # None=chưa kiểm; True/False=lần kiểm gần nhất
+        "ps_at_last_session_chk": None, # thời điểm kiểm phiên VPS gần nhất
     }
     # Nạp sở thích giao diện TRƯỚC khi tạo widget. Widget có `key` sẽ lấy giá trị
     # từ session_state nếu key đã tồn tại — nên không truyền `value=` nữa, kẻo
@@ -1524,7 +1526,7 @@ def _render_autotrade_panel():
     nhất, vì auto_trader chạy trong thread riêng không đọc được session_state.
     """
     from .auto_trader import (load_config as _cfg_load, save_config as _cfg_save,
-                              check_connection, read_log_tail, _orders_today)
+                              check_connection, check_session, read_log_tail, _orders_today)
 
     cfg = _cfg_load()
     _on, _dry = bool(cfg.get("enabled")), bool(cfg.get("dry_run", True))
@@ -1547,7 +1549,7 @@ def _render_autotrade_panel():
                        "`python inspect_vps.py` rồi gửi kết quả cho Claude. "
                        "Trước đó mọi lệnh chỉ ghi log, không thao tác gì.")
 
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2 = st.columns([1, 1])
         _new_on  = c1.toggle("Bật auto trade", value=_on, key="at_on")
         _new_dry = c2.toggle("Dry-run (điền, không bấm)", value=_dry, key="at_dry")
         if _new_on != _on or _new_dry != _dry:
@@ -1561,8 +1563,23 @@ def _render_autotrade_panel():
             st.error("⚠️ **CHẾ ĐỘ TIỀN THẬT** — lệnh ⭐ MẠNH sẽ được đặt "
                      "không cần xác nhận.")
 
-        if c3.button("🔌 Kiểm tra kết nối", key="at_check"):
+        # Phiên SmartPro tự đăng xuất sau 720 phút — kết quả kiểm tra ĐỊNH KỲ
+        # (mỗi ~60 phút, chạy tự động trong engine khi auto-trade đang bật)
+        # hiện ở đây để không phải chờ tín hiệu mới biết phiên còn sống không.
+        _sess_ok  = st.session_state.get("ps_at_session_ok")
+        _sess_chk = st.session_state.get("ps_at_last_session_chk")
+        if _sess_ok is False and _sess_chk is not None:
+            st.error(f"⛔ Phiên VPS có vấn đề (kiểm tra lúc {_sess_chk:%H:%M}) — "
+                     f"auto-trade sẽ TỪ CHỐI mọi lệnh cho tới khi bạn đăng nhập lại.")
+
+        cc1, cc2 = st.columns([1, 1])
+        if cc1.button("🔌 Kiểm tra kết nối", key="at_check"):
             _ok, _msg = check_connection()
+            (st.success if _ok else st.error)(_msg)
+        if cc2.button("🔍 Kiểm tra phiên đăng nhập", key="at_check_session"):
+            _ok, _msg = check_session()
+            st.session_state["ps_at_session_ok"] = _ok
+            st.session_state["ps_at_last_session_chk"] = pd.Timestamp.now()
             (st.success if _ok else st.error)(_msg)
 
         _lines = read_log_tail(12)
@@ -1866,6 +1883,34 @@ def _live_panel_body():
                 # 1 lần/giây, nên tin nhắn bị gửi lại tới ~60 lần mỗi phút cho
                 # tới khi có nến mới. Bỏ lỡ 1 nến còn hơn spam 60 tin.
                 st.session_state["ps_last_time"] = last_time
+
+                # Kiểm tra định kỳ phiên đăng nhập VPS (mỗi ~60 phút, chỉ khi
+                # auto-trade đang bật) — phiên SmartPro tự hết hạn sau 720 phút.
+                # Chạy ĐỒNG BỘ (không qua thread nền) vì cần đọc/ghi session_state
+                # và gọi _send_telegram_async; tần suất thấp nên độ trễ vài giây
+                # không đáng kể so với chu kỳ nến 1 phút.
+                try:
+                    from .auto_trader import load_config as _at_cfg3, \
+                        check_session as _at_check_sess
+                    if _at_cfg3().get("enabled"):
+                        _last_chk = st.session_state.get("ps_at_last_session_chk")
+                        _now_ts = pd.Timestamp.now()
+                        if _last_chk is None or (_now_ts - _last_chk).total_seconds() >= 3600:
+                            st.session_state["ps_at_last_session_chk"] = _now_ts
+                            _sess_ok, _sess_msg = _at_check_sess()
+                            _was_ok = st.session_state.get("ps_at_session_ok")
+                            st.session_state["ps_at_session_ok"] = _sess_ok
+                            # Chỉ báo Telegram 1 lần khi VỪA phát hiện chết — tránh
+                            # spam mỗi giờ trong lúc chờ user đăng nhập lại.
+                            if not _sess_ok and _was_ok is not False:
+                                _send_telegram_async(
+                                    f"⚠️ <b>#VN30F1M Auto-trade: phiên VPS có vấn đề</b>\n"
+                                    f"{_tg_escape(_sess_msg)}"
+                                )
+                except Exception as _sess_e:
+                    st.session_state["ps_errors"].insert(
+                        0, f"[auto_trade] kiểm tra phiên: {type(_sess_e).__name__}: {_sess_e}")
+
                 closed_df   = _closed_bars(df_1m, 400)
                 has_closed  = closed_df is not None and len(closed_df) >= 2
                 closed_ts   = closed_df.index[-1] if has_closed else None
