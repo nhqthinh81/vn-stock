@@ -20,6 +20,17 @@ if errorlevel 1 (
     pip install -r requirements.txt
 )
 
+REM Chrome dat lenh tu dong (tab Phai Sinh) — chi mo neu chua co cong 9222
+REM dang lang nghe, tranh mo trung cua so Chrome cung profile.
+netstat -ano | findstr /R /C:":9222 .*LISTENING" >nul
+if errorlevel 1 (
+    echo Dang mo Chrome dat lenh tu dong...
+    start "" "%~dp0Chay_Chrome_AutoTrade.bat"
+) else (
+    echo Chrome dat lenh tu dong da dang chay ^(cong 9222^).
+)
+echo.
+
 echo Dang khoi dong dashboard...
 echo Truy cap: http://localhost:8501
 echo.
