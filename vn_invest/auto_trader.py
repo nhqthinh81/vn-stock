@@ -97,6 +97,29 @@ def _alert_session_dead(msg: str) -> None:
     )
 
 
+# Cảnh báo khi phiếu lệnh SmartPro bị để sai chế độ (Lệnh điều kiện / Stop Loss
+# thay vì Lệnh thường) — cú bấm LONG/SHORT lúc đó tạo LỆNH ĐIỀU KIỆN chứ không
+# phải lệnh vào, và có thể bị VPS từ chối âm thầm. Cooldown riêng 15 phút.
+_TICKET_ALERT_COOLDOWN_SEC = 900
+_last_ticket_alert_ts = 0.0
+_TICKET_ALERT_LOCK = threading.Lock()
+
+
+def _alert_ticket_mode(msg: str) -> None:
+    global _last_ticket_alert_ts
+    with _TICKET_ALERT_LOCK:
+        now = time.time()
+        if now - _last_ticket_alert_ts < _TICKET_ALERT_COOLDOWN_SEC:
+            return
+        _last_ticket_alert_ts = now
+    _tg_send(
+        f"⛔ <b>#VN30F1M Auto-trade: PHIẾU LỆNH SAI CHẾ ĐỘ</b>\n"
+        f"{_tg_esc(msg)}\n"
+        f"⚡ Đã TỪ CHỐI đặt lệnh để tránh tạo lệnh điều kiện ngoài ý muốn. "
+        f"Vào cửa sổ Chrome bấm 'Lệnh thường' rồi bot chạy lại bình thường."
+    )
+
+
 # Cảnh báo khi chạm trần lỗ ngày — chỉ gửi 1 lần/ngày (không cần cooldown theo
 # giây như session-dead, vì kill-switch chỉ "chạm" một lần rồi đứng yên tới
 # hết ngày; so theo NGÀY để rerun app cùng ngày không gửi lại).
@@ -427,6 +450,108 @@ def _verify_symbol_price(page, cfg: dict, our_price: float | None) -> str | None
     return None
 
 
+def _ticket_mode(page) -> tuple[str, str]:
+    """('normal'|'condition'|'unknown', nhãn người đọc).
+
+    Phiếu SmartPro có bộ chọn 'Lệnh thường' / 'Lệnh điều kiện' — cái đang chọn
+    mang class 'select-active'. Nếu phiếu bị để ở 'Lệnh điều kiện / Stop Loss'
+    (ví dụ sau khi bắt request SL/TP thủ công), cú bấm LONG/SHORT tạo LỆNH ĐIỀU
+    KIỆN chứ không phải lệnh vào, và có thể bị VPS từ chối âm thầm. Phải kiểm
+    TRƯỚC khi điền phiếu — xem sự cố lệnh ma ngày 03/09/2026.
+    """
+    try:
+        r = page.evaluate(
+            "() => {"
+            " const n = document.querySelector('#select_normal_order');"
+            " const c = document.querySelector('#select_condition_order');"
+            " if (!n && !c) return {m:'unknown', l:'khong thay bo chon Lenh thuong/Lenh dieu kien'};"
+            " const na = !!(n && n.classList.contains('select-active'));"
+            " const ca = !!(c && c.classList.contains('select-active'));"
+            " let sub = '';"
+            " const s = document.querySelector('#right_stock_cd_code');"
+            " if (s) sub = (s.innerText || '').trim();"
+            " if (na && !ca) return {m:'normal', l:'Lenh thuong'};"
+            " if (ca && !na) return {m:'condition', l:'Lenh dieu kien' + (sub ? ' / ' + sub : '')};"
+            " return {m:'unknown', l:'khong xac dinh (normal=' + na + ' cond=' + ca + ')'};"
+            "}"
+        )
+        return r.get("m", "unknown"), r.get("l", "")
+    except Exception as e:
+        return "unknown", f"loi doc che do phieu: {type(e).__name__}"
+
+
+def _read_position(page) -> tuple[str, int]:
+    """Đọc bảng vị thế phái sinh (table.tbl-status-danhmuc) → (chiều, số HĐ).
+
+    chiều ∈ {'LONG','SHORT','NONE'}. Cột 'Vị thế' là số có dấu: '-1' = short 1,
+    '1'/'+1' = long 1, '-' hoặc rỗng = phẳng.
+    """
+    try:
+        raw = page.evaluate(
+            "() => {"
+            " const t = document.querySelector('table.tbl-status-danhmuc');"
+            " if (!t) return null;"
+            " for (const tr of t.querySelectorAll('tr')) {"
+            "  const c = [...tr.querySelectorAll('td')].map(x => (x.innerText||'').trim());"
+            "  if (c.length >= 2 && c[0] && c[0].length > 3) return c[1];"
+            " }"
+            " return null;"
+            "}"
+        )
+    except Exception:
+        return "NONE", 0
+    if raw is None:
+        return "NONE", 0
+    raw = str(raw).replace(",", "").replace("+", "").strip()
+    if raw in ("", "-", "0"):
+        return "NONE", 0
+    try:
+        v = int(float(raw))
+    except ValueError:
+        return "NONE", 0
+    return ("LONG", v) if v > 0 else ("SHORT", -v) if v < 0 else ("NONE", 0)
+
+
+def _newest_order_sig(page) -> str:
+    """Chữ ký (số hiệu | giờ) của lệnh mới nhất trong #order_normal — để phát
+    hiện lệnh vừa vào. '' nếu chưa có lệnh nào / không đọc được."""
+    try:
+        return page.evaluate(
+            "() => {"
+            " const t = document.getElementById('order_normal');"
+            " if (!t) return '';"
+            " const rows = [...t.querySelectorAll('tr')];"
+            " for (let i = 1; i < rows.length; i++) {"
+            "  const c = [...rows[i].querySelectorAll('td')].map(x => (x.innerText||'').trim());"
+            "  if (c.length && /\\d/.test(c[0])) return c[0] + '|' + (c[1] || '');"
+            " }"
+            " return '';"
+            "}"
+        ) or ""
+    except Exception:
+        return ""
+
+
+def _read_error_popup(page) -> str | None:
+    """Thông báo lỗi đang hiện (bootbox / toast-error) — KHÔNG tính hộp thoại
+    'đăng nhập lại' (đã có `_session_alive` lo). None nếu không có."""
+    try:
+        return page.evaluate(
+            "() => {"
+            " const b = document.querySelector('.bootbox');"
+            " if (b && (b.offsetWidth || b.offsetHeight)) {"
+            "  const t = (b.innerText || '').trim();"
+            "  if (t && !/dang nhap lai|đăng nhập lại/i.test(t)) return t.slice(0, 200);"
+            " }"
+            " const te = document.querySelector('.toast-error, .toast-danger, #toast-container .toast-error');"
+            " if (te && (te.offsetWidth || te.offsetHeight)) return (te.innerText || '').trim().slice(0, 200);"
+            " return null;"
+            "}"
+        )
+    except Exception:
+        return None
+
+
 def _fill_ticket(page, cfg: dict, side: str, qty: int, price: float | None) -> str | None:
     """Điền phiếu lệnh — KHÔNG đụng nút LONG/SHORT.
 
@@ -452,22 +577,51 @@ def _fill_ticket(page, cfg: dict, side: str, qty: int, price: float | None) -> s
         return f"Điền phiếu lỗi: {type(e).__name__}: {str(e)[:120]}"
 
 
-def _submit(page, cfg: dict, side: str) -> str | None:
-    """Bấm nút LONG/SHORT — ở VPS đây LÀ hành động gửi lệnh, không phải chọn chiều."""
+def _submit(page, cfg: dict, side: str) -> tuple[bool, str]:
+    """Bấm nút LONG/SHORT (ở VPS = gửi lệnh) rồi XÁC NHẬN lệnh đã vào sàn.
+
+    Trả (đã_xác_nhận, mô_tả). KHÔNG còn coi 'click không lỗi = thành công' —
+    phải thấy lệnh mới trong #order_normal HOẶC vị thế đổi, hoặc đọc được thông
+    báo lỗi rõ ràng. Hết 6s không có tín hiệu nào → coi là THẤT BẠI (caller
+    không bump bộ đếm, không log '✅'). Xem sự cố lệnh ma ngày 03/09/2026:
+    phiếu ở chế độ Stop Loss → bấm SHORT không lỗi nhưng lệnh không tới VPS,
+    bot vẫn log '✅ ĐÃ ĐẶT' và tăng bộ đếm.
+    """
     sel = cfg["selectors"]
     side_btn = sel.get("long_button") if side == "LONG" else sel.get("short_button")
     if not side_btn:
-        return f"Chưa cấu hình selector nút {side}"
+        return False, f"Chưa cấu hình selector nút {side}"
+
+    sig0 = _newest_order_sig(page)
+    pos0 = _read_position(page)
     try:
         page.click(side_btn, timeout=4000)
-        if sel.get("confirm_button"):
-            try:
-                page.click(sel["confirm_button"], timeout=4000)
-            except Exception:
-                pass                     # nhiều khi không bật "Xác nhận trước khi đặt lệnh"
-        return None
     except Exception as e:
-        return f"Bấm gửi lệnh lỗi: {type(e).__name__}: {str(e)[:120]}"
+        return False, f"Bấm nút {side} lỗi: {type(e).__name__}: {str(e)[:120]}"
+
+    # Modal "Xác nhận trước khi đặt lệnh" (nếu tài khoản bật) — bấm nếu nó hiện.
+    # Không bật thì bỏ qua; chốt cuối là bước xác minh kết quả bên dưới.
+    cbtn = sel.get("confirm_button")
+    if cbtn:
+        try:
+            page.wait_for_selector(cbtn, state="visible", timeout=1500)
+            page.click(cbtn, timeout=2500)
+        except Exception:
+            pass
+
+    deadline = time.time() + 6.0
+    while time.time() < deadline:
+        err = _read_error_popup(page)
+        if err:
+            return False, f"VPS báo lỗi: {err}"
+        if _newest_order_sig(page) not in ("", sig0):
+            return True, "thấy lệnh mới trong sổ lệnh"
+        pos_now = _read_position(page)
+        if pos_now != pos0:
+            return True, f"vị thế đổi {pos0[0]}x{pos0[1]} → {pos_now[0]}x{pos_now[1]}"
+        time.sleep(0.4)
+    return False, ("KHÔNG xác nhận được lệnh đã vào sàn sau 6s (sổ lệnh không có "
+                   "lệnh mới, vị thế không đổi) — kiểm tra VPS thủ công")
 
 
 # ── API chính ────────────────────────────────────────────────────────────────
@@ -556,9 +710,19 @@ def _place_sltp(page, cfg: dict, position_side: str, qty: int,
     if not result or not result.get("sent"):
         err = (result or {}).get("err", "không rõ lỗi")
         return False, f"KHÔNG gửi được request: {err}"
+
+    txt = str(result.get("text") or "")
+    # rc:0 + HTTP 200 KHÔNG có nghĩa VPS chấp nhận: body vẫn có thể mang mã lỗi
+    # FOS-xxxx (03/09/2026 gặp FOS-6012 'Vượt quá khối lượng có thể mua' cả 3
+    # lần mà hàm này vẫn trả True). Coi mọi FOS-<số> trong response là TỪ CHỐI.
+    import re as _re
+    mcode = _re.search(r'"code"\s*:\s*"(FOS-[^"]+)"', txt)
+    if mcode or _re.search(r'FOS-\d', txt):
+        code = mcode.group(1) if mcode else "FOS-?"
+        return False, f"VPS TỪ CHỐI lệnh SL/TP (mã {code}) — {txt[:200]}"
     tp_note = tp_s if tp_price is not None else "(không đặt — v4 không TP mặc định)"
     return True, (f"SL={sl_s} TP={tp_note} — HTTP {result.get('status')} — "
-                  f"phản hồi: {str(result.get('text'))[:200]}")
+                  f"phản hồi: {txt[:200]}")
 
 
 def submit_signal(side: str, strong: bool, price: float | None = None,
@@ -623,6 +787,17 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                     browser.close()
                     return False, sess_msg
 
+                mode, mlabel = _ticket_mode(page)
+                if mode != "normal":
+                    shot = _shot(page, "ticket_mode")
+                    msg = (f"Phiếu lệnh VPS đang ở chế độ '{mlabel}', không phải "
+                           f"'Lệnh thường' — TỪ CHỐI đặt lệnh (tránh tạo lệnh điều "
+                           f"kiện ngoài ý muốn). Bấm 'Lệnh thường' trong cửa sổ Chrome.")
+                    _log(f"⛔ {side} ({tag}) — {msg} · ảnh {shot}")
+                    _alert_ticket_mode(msg)
+                    browser.close()
+                    return False, msg
+
                 err = _verify_symbol_price(page, cfg, price)
                 if err:
                     shot = _shot(page, "stale_symbol")
@@ -654,34 +829,44 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                     browser.close()
                     return True, f"DRY-RUN: đã điền {side} x{qty}, không bấm"
 
-                err = _submit(page, cfg, side)
-                if err:
+                ok_sub, sub_msg = _submit(page, cfg, side)
+                if not ok_sub:
                     shot = _shot(page, "submit_err")
-                    _log(f"❌ {side} ({tag}) — {err} · ảnh {shot}")
+                    _log(f"⚠️ {side} ({tag}) — KHÔNG XÁC NHẬN lệnh vào sàn: {sub_msg} "
+                         f"· ảnh {shot} — bộ đếm KHÔNG tăng, kiểm tra VPS.")
                     browser.close()
-                    return False, err
+                    return False, sub_msg
 
                 _bump_orders_today()
                 shot = _shot(page, "submitted")
                 _log(f"✅ ĐÃ ĐẶT {side} x{qty} ({tag}, lệnh thứ {_orders_today()} "
-                     f"hôm nay) · ảnh {shot}")
+                     f"hôm nay — {sub_msg}) · ảnh {shot}")
 
                 # Đặt SL/TP sàn ngay sau khi lệnh vào vừa khớp — mirror đúng
                 # SL/TP của vị thế ảo (sl_price/tp_price truyền từ điểm gọi).
                 # Lỗi ở bước này KHÔNG được coi là lỗi mở lệnh (vị thế THẬT đã
                 # mở) — chỉ log cảnh báo riêng, người dùng tự đặt SL tay nếu cần.
+                # CHỈ gửi khi ĐỌC ĐƯỢC vị thế thật đúng chiều — tránh lệnh điều
+                # kiện trần trụi (order 83020 ngày 03/09 tự mở vị thế, lỗ -1,34tr).
                 sltp_note = ""
                 if sl_price is not None:
-                    ok_sltp, msg_sltp = _place_sltp(page, cfg, side, qty, price,
-                                                     sl_price, tp_price)
-                    shot2 = _shot(page, "sltp")
-                    if ok_sltp:
-                        _log(f"🛡️ SL/TP {side} — {msg_sltp} · ảnh {shot2}")
-                        sltp_note = " + đã gửi SL/TP sàn (kiểm tra lại trên VPS)"
+                    pos_side, pos_qty = _read_position(page)
+                    if pos_side != side:
+                        _log(f"⚠️ SL/TP {side} — BỎ QUA: bảng vị thế đọc được "
+                             f"'{pos_side} x{pos_qty}' ≠ chiều vừa đặt ({side}). "
+                             f"Không gửi lệnh điều kiện khi chưa chắc có vị thế nền.")
+                        sltp_note = " — chưa đặt SL/TP sàn (chưa xác nhận được vị thế)"
                     else:
-                        _log(f"⚠️ SL/TP {side} — KHÔNG gửi được: {msg_sltp} · ảnh {shot2} — "
-                             f"vị thế THẬT vẫn mở nhưng KHÔNG có SL sàn, cân nhắc đặt tay.")
-                        sltp_note = " nhưng KHÔNG đặt được SL/TP sàn — cân nhắc đặt tay"
+                        ok_sltp, msg_sltp = _place_sltp(page, cfg, side, qty, price,
+                                                         sl_price, tp_price)
+                        shot2 = _shot(page, "sltp")
+                        if ok_sltp:
+                            _log(f"🛡️ SL/TP {side} — {msg_sltp} · ảnh {shot2}")
+                            sltp_note = " + đã gửi SL/TP sàn (kiểm tra lại trên VPS)"
+                        else:
+                            _log(f"⚠️ SL/TP {side} — KHÔNG gửi được: {msg_sltp} · ảnh {shot2} — "
+                                 f"vị thế THẬT vẫn mở nhưng KHÔNG có SL sàn, cân nhắc đặt tay.")
+                            sltp_note = " nhưng KHÔNG đặt được SL/TP sàn — cân nhắc đặt tay"
 
                 browser.close()
                 return True, f"ĐÃ ĐẶT {side} x{qty}{sltp_note}"
@@ -785,6 +970,37 @@ def close_position(position_side: str, qty: int = 1,
                     browser.close()
                     return False, sess_msg
 
+                mode, mlabel = _ticket_mode(page)
+                if mode != "normal":
+                    shot = _shot(page, "close_ticket_mode")
+                    msg = (f"Phiếu lệnh VPS đang ở chế độ '{mlabel}', không phải "
+                           f"'Lệnh thường' — KHÔNG đóng tự động. ⚠️ VỊ THẾ THẬT VẪN "
+                           f"CÒN MỞ, bấm 'Lệnh thường' rồi đóng tay/để bot thử lại.")
+                    _log(f"⛔ ĐÓNG {position_side} — {msg} · ảnh {shot}")
+                    _alert_ticket_mode(msg)
+                    browser.close()
+                    return False, msg
+
+                # Đọc vị thế THẬT trước khi gửi lệnh đóng — đóng bằng cách đặt lệnh
+                # ngược chiều, nên nếu VPS không thực sự có vị thế đúng chiều thì
+                # lệnh "đóng" sẽ MỞ một vị thế ngược trần trụi (sự cố order 184790
+                # ngày 03/09: engine đóng SHORT ảo trong khi TK thật phẳng → nằm
+                # LONG 1 qua đêm).
+                pos_side, pos_qty = _read_position(page)
+                if pos_side != position_side:
+                    shot = _shot(page, "close_no_position")
+                    if pos_side == "NONE":
+                        msg = ("VPS KHÔNG có vị thế nào đang mở — KHÔNG gửi lệnh "
+                               "đóng (tránh mở vị thế ngược trần trụi). Kiểm tra "
+                               "tay nếu bạn tin có vị thế thật.")
+                    else:
+                        msg = (f"Vị thế thật trên VPS là '{pos_side} x{pos_qty}', "
+                               f"khác chiều engine muốn đóng ('{position_side}') — "
+                               f"KHÔNG tự đóng, kiểm tra tay.")
+                    _log(f"⛔ ĐÓNG {position_side} — {msg} · ảnh {shot}")
+                    browser.close()
+                    return False, msg
+
                 err = _verify_symbol_price(page, cfg, price)
                 if err:
                     shot = _shot(page, "close_stale_symbol")
@@ -808,17 +1024,18 @@ def close_position(position_side: str, qty: int = 1,
                     browser.close()
                     return True, f"DRY-RUN: đã điền lệnh đóng {position_side} x{qty}"
 
-                err = _submit(page, cfg, close_side)
-                if err:
+                ok_sub, sub_msg = _submit(page, cfg, close_side)
+                if not ok_sub:
                     shot = _shot(page, "close_submit_err")
-                    _log(f"❌ ĐÓNG {position_side} — {err} · ảnh {shot} — "
-                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ, cần tự đóng tay.")
+                    _log(f"⚠️ ĐÓNG {position_side} — KHÔNG XÁC NHẬN lệnh đóng vào "
+                        f"sàn: {sub_msg} · ảnh {shot} — ⚠️ VỊ THẾ THẬT CÓ THỂ VẪN "
+                        f"CÒN MỞ, kiểm tra VPS + đóng tay.")
                     browser.close()
-                    return False, err
+                    return False, sub_msg
 
                 shot = _shot(page, "close_submitted")
                 _log(f"✅ ĐÃ ĐÓNG vị thế {position_side} x{qty} "
-                    f"(lệnh {close_side}) · ảnh {shot}")
+                    f"(lệnh {close_side} — {sub_msg}) · ảnh {shot}")
                 browser.close()
                 return True, f"ĐÃ ĐÓNG {position_side} x{qty}"
         except Exception as e:

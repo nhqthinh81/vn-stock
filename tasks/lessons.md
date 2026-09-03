@@ -704,3 +704,51 @@ trước lúc nào engine sẽ tự gửi lệnh. Nếu cần điều tra/dò DO
 đang bật: (1) xin user tạm đặt `enabled=false` trước, hoặc (2) dùng một cửa sổ
 Chrome/profile RIÊNG (không phải cổng 9222 mà `Chay_Chrome_AutoTrade.bat` đang
 dùng) để tránh đụng độ, dù phải đăng nhập lại phiên trong cửa sổ debug đó.
+
+## 30. Bot đặt lệnh: "click không lỗi" KHÔNG bằng "lệnh đã vào sàn" — phải xác nhận bằng nguồn độc lập
+
+**Lỗi gặp (03/09/2026):** `autotrade_log.txt` ghi ~9 dòng "✅ ĐÃ ĐẶT"/"✅ ĐÃ ĐÓNG"
+trong ngày, `autotrade_state.json` đếm 5 lệnh — nhưng sổ lệnh THẬT trên VPS chỉ có
+**5 lệnh** (2 vòng khớp + 1 lệnh điều kiện bị hủy). Phần lớn hành động bot log là
+"thành công" thực ra KHÔNG tới VPS. Tệ hơn: lệnh 184790 lúc 14:25 (`close_position`
+đóng vị thế ẢO trong khi TK thật phẳng) đã **mở một vị thế LONG trần trụi** nằm qua đêm.
+
+**Nguyên nhân:**
+1. Phiếu lệnh SmartPro bị để ở chế độ **"Lệnh điều kiện / Stop Loss"** (do thao
+   tác tay lúc bắt request SL/TP). `_submit()` bấm `#btn_long`/`#btn_short` mà
+   KHÔNG kiểm chế độ phiếu → nút đó lúc này tạo LỆNH ĐIỀU KIỆN, không phải lệnh vào.
+2. Sức mua = 0 HĐ (ký quỹ bị lệnh điều kiện treo giữ) → VPS từ chối.
+3. `_submit()` bấm nút xác nhận trong `try/except: pass` → **nuốt lỗi**, `return None`
+   = thành công. Bot `_bump_orders_today()` + log "✅".
+4. `_place_sltp()` trả `(True, …)` với MỌI HTTP 200 dù body chứa `"code":"FOS-6012"`
+   ("Vượt quá khối lượng có thể mua"). `rc:0` + HTTP 200 ≠ VPS chấp nhận.
+5. `close_position()` gửi lệnh ngược chiều để đóng, nhưng không đọc vị thế thật
+   trước → khi TK phẳng, lệnh "đóng" = lệnh MỞ trần trụi.
+
+**Cách tái hiện trước khi vá:** fake browser (`scratchpad/test_autotrader_fixes.py`)
+— `FakePage(mode="condition")` → `submit_signal` phải trả `(False, …)` và KHÔNG
+bump counter; `_newest_order_sig`/`_read_position` không đổi → `_submit` phải trả
+`(False, …)`; `sltp_text` chứa `FOS-6012` → `_place_sltp` phải `(False, …)`;
+`close_position` khi `_read_position()`="NONE" → phải HỦY, không bấm nút. 33/33 pass.
+Sau đó chạy `_ticket_mode`/`_read_position`/`_newest_order_sig` trên trang VPS
+THẬT (chỉ đọc, bot đã park) để xác minh selector đúng DOM thật.
+
+**Cách vá:**
+- `_ticket_mode(page)` đọc `#select_normal_order.select-active` — guard TRƯỚC khi
+  điền phiếu trong cả `submit_signal` và `close_position`; ≠ normal → HỦY + cảnh báo,
+  KHÔNG tự bấm UI reset (không tin selector chuyển chế độ khi chưa cần).
+- `_submit()` trả `(bool, str)` — sau khi bấm phải thấy lệnh mới trong `#order_normal`
+  HOẶC `Vị thế` (`table.tbl-status-danhmuc`) đổi HOẶC đọc được `.bootbox`/`.toast-error`.
+  Hết 6s không có gì → THẤT BẠI. Caller chỉ bump counter + log "✅" khi `True`.
+- `_place_sltp()` — `re.search(r'FOS-\d', response)` → `(False, …)`.
+- Chỉ đặt SL/TP sàn sau khi `_read_position()` xác nhận có vị thế đúng chiều.
+- `close_position()` — `_read_position()` ≠ chiều cần đóng (NONE / ngược) → HỦY.
+
+**Rule phòng tránh:** mọi bot tự động thao tác qua UI web (không có API xác nhận)
+PHẢI xác minh kết quả bằng một nguồn ĐỘC LẬP với thao tác vừa làm — sổ lệnh, bảng
+vị thế, thông báo lỗi trên trang — chứ KHÔNG được coi "gọi hàm/`click()` không ném
+exception" là bằng chứng thành công. Và với lệnh ĐÓNG (đặt lệnh ngược chiều): luôn
+đọc vị thế thật trước, vì "đóng khi không có gì để đóng" = "mở vị thế ngược trần trụi".
+Ngoài ra: nhiều instance Streamlit chạy song song (cửa sổ dự phòng Phase 25–26) đều
+ghi `autotrade_config.json` từ `session_state` riêng → giằng co `enabled`. Muốn park
+bot chắc chắn để điều tra: **kill hết tiến trình Streamlit**, đừng chỉ sửa file.

@@ -1290,3 +1290,56 @@ bậc với backtest 14%). Hồi quy test_lock/test_takeover/test_spam/render đ
       auto_all_signals=true` — sẽ tự bắn thật ngay lệnh kế tiếp sau restart.
 - [ ] Revoke GitHub PAT đã dùng để push (`ghp_5eTa...`) — nhắc lại, chưa xác
       nhận user đã làm.
+
+## Phase 28j — Vá lỗ hổng đặt lệnh + đối chiếu VPS thật (03/09/2026 chiều)
+
+### Đối chiếu tài khoản thật (đọc CDP, bot đã park)
+- **Không có API PnL** → đọc thẳng `assetPanel` / `table.tbl-status-danhmuc` / `#order_normal`.
+- Thực tế hôm nay chỉ **5 lệnh** khớp trên VPS, KHÔNG phải ~13 như `autotrade_log`
+  ghi ("✅ ĐÃ ĐẶT"/"✅ ĐÃ ĐÓNG" ở 09:42, 10:17, 10:44, 11:03, 11:07, 11:09,
+  11:31 phần lớn KHÔNG tới VPS).
+- Cuối phiên (14:25) bot code cũ gọi `close_position("SHORT")` đóng vị thế ẢO #41
+  trong khi TK thật đang phẳng → lệnh 184790 LONG @1959.50 **mở vị thế trần trụi**.
+  Kết thúc ngày: **LONG 1 mồ côi**, lỗ thực hiện −1.200.000đ, lãi tạm +400.000đ,
+  nằm qua đêm (market đóng).
+
+### Nguyên nhân lệnh ma (2 ảnh 09:03 vs 09:42)
+- Phiếu lệnh VPS bị để ở chế độ **"Lệnh điều kiện / Stop Loss"** (thao tác tay lúc
+  bắt request `_place_sltp`). `_submit()` bấm `#btn_long`/`#btn_short` không kiểm
+  chế độ → tạo lệnh điều kiện; sức mua 0 HĐ → VPS từ chối; `except: pass` ở nút
+  xác nhận nuốt lỗi → trả `None` = "thành công" → `_bump_orders_today()` + log "✅".
+- `_place_sltp()` trả `(True, …)` với mọi HTTP 200 dù body có `code:"FOS-6012"`.
+
+### Đã vá `vn_invest/auto_trader.py`
+1. `_ticket_mode(page)` — đọc `#select_normal_order.select-active`. Guard trong
+   `submit_signal()` + `close_position()`: chế độ ≠ normal → HỦY + log ⛔ +
+   `_alert_ticket_mode()` (Telegram, cooldown 15′). **Không tự bấm UI** (quyết định user).
+2. `_submit()` đổi trả `(bool, str)` — sau khi bấm phải XÁC NHẬN: lệnh mới trong
+   `#order_normal` (`_newest_order_sig`) hoặc `Vị thế` đổi (`_read_position`), hoặc
+   đọc `.bootbox`/`.toast-error` (`_read_error_popup`). Hết 6s → `(False, …)`.
+   Nút xác nhận `#acceptCreateOrderNew` giờ dùng `wait_for_selector` + `click`
+   (vẫn nuốt lỗi timeout — không bật xác nhận thì bỏ qua — nhưng chốt là bước
+   verify). Caller chỉ `_bump_orders_today()` + log "✅ ĐÃ ĐẶT" khi `True`.
+3. `_place_sltp()` — response chứa `FOS-\d` → `(False, …)`.
+4. `submit_signal()` — chỉ gọi `_place_sltp` sau khi `_read_position()` xác nhận
+   có vị thế đúng chiều (tránh lệnh điều kiện trần trụi).
+5. `close_position()` — thêm guard: `_read_position()` ≠ `position_side` (NONE
+   hoặc ngược chiều) → HỦY, không gửi lệnh (tránh sự cố 184790).
+
+Selector chốt (dò DOM thật 03/09): `#select_normal_order` / `#select_condition_order`
+`.select-active` · `#right_stock_cd_code` (sub-type) · `table.tbl-status-danhmuc`
+(cột Vị thế: "-1"=short1, "1"=long1) · `#order_normal` (hàng dữ liệu đầu = mới nhất).
+
+Test offline `scratchpad/test_autotrader_fixes.py` — fake browser, **33/33 PASS**.
+Helper mới chạy trên trang VPS thật (chỉ đọc): `_ticket_mode→('normal',…)`,
+`_read_position→('LONG',1)`, `_newest_order_sig→'184790|14:25:03'` — khớp DOM thật.
+
+### CÒN LẠI
+- [ ] **Đóng vị thế LONG 1 mồ côi** — market mở 09:00 mai. Bot (code mới) sẽ KHÔNG
+      tự đụng vào nó vì `ps_state.position=null` → không có lệnh đóng nào fire;
+      `close_position` guard mới cũng chặn. Phải đóng TAY trên VPS.
+- [ ] Kiểm chứng full-flow thật với code mới — sau khi user bật lại
+      `enabled=true` + restart Streamlit, quan sát lệnh vào đầu tiên.
+- [ ] Cân nhắc: cửa sổ app thứ 2/3 (dự phòng) ghi đè `autotrade_config.json` —
+      3 instance Streamlit đang chạy song song gây giằng co `enabled`. Đã kill hết.
+- [ ] Revoke GitHub PAT (`ghp_5eTa...`) — vẫn chưa xác nhận.
