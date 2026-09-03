@@ -679,3 +679,28 @@ khoá liên quan (`/ext|finger|device|track/i`) và so trực tiếp GIÁ TRỊ 
 số đã bắt được trong request thật. Ưu tiên đọc thẳng biến đã tính sẵn hơn là
 tự tính lại — kể cả khi có một thư viện "đúng tên" trông như câu trả lời hiển
 nhiên.
+
+## 29. Script chẩn đoán của Claude nối CÙNG cổng CDP với bot đang live-trade — đụng lệnh thật
+
+**Lỗi gặp:** trong lúc điều tra `extInfo`/`window.Fingerprint` (03/09/2026), tôi tự
+chạy nhiều script Playwright `connect_over_cdp("http://127.0.0.1:9222")` — ĐÚNG
+cổng debug mà `auto_trader.py` đang dùng để tự gửi lệnh thật (`enabled=true,
+dry_run=false` lúc đó). Cùng thời điểm, engine tự gửi 1 lệnh SHORT thật (log ghi
+"✅ ĐÃ ĐẶT" — tức code đã gọi `page.click()` không lỗi) nhưng thực tế lệnh KHÔNG
+tới VPS. `_LOCK` trong `auto_trader.py` chỉ khoá các lệnh gọi NỘI BỘ module đó
+với nhau — không chặn được một tiến trình Python HOÀN TOÀN KHÁC (script debug
+của tôi) cũng đang thao tác cùng trang qua CDP song song.
+
+**Nguyên nhân:** CDP cho phép nhiều client kết nối đồng thời vào cùng 1 trang —
+không có khoá nào ở tầng trình duyệt ngăn 2 phiên Playwright khác nhau cùng
+`click()`/`evaluate()` lên cùng DOM cùng lúc. `page.click()` phía tôi hay phía
+bot có thể đã tranh chấp focus/state của trang, khiến cú click thật không đăng
+ký được dù API không báo lỗi.
+
+**Rule phòng tránh:** KHÔNG được tự kết nối CDP debug port (9222) bằng bất kỳ
+script chẩn đoán/điều tra nào trong lúc `data/autotrade_config.json` đang
+`enabled=true` — bất kể có real trade đang chờ hay không, vì không thể biết
+trước lúc nào engine sẽ tự gửi lệnh. Nếu cần điều tra/dò DOM khi auto-trade
+đang bật: (1) xin user tạm đặt `enabled=false` trước, hoặc (2) dùng một cửa sổ
+Chrome/profile RIÊNG (không phải cổng 9222 mà `Chay_Chrome_AutoTrade.bat` đang
+dùng) để tránh đụng độ, dù phải đăng nhập lại phiên trong cửa sổ debug đó.
