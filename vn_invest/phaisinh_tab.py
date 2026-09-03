@@ -1552,16 +1552,38 @@ def _render_autotrade_panel():
         c1, c2 = st.columns([1, 1])
         _new_on  = c1.toggle("Bật auto trade", value=_on, key="at_on")
         _new_dry = c2.toggle("Dry-run (điền, không bấm)", value=_dry, key="at_dry")
-        if _new_on != _on or _new_dry != _dry:
+
+        _all = bool(cfg.get("auto_all_signals"))
+        _new_all = st.toggle(
+            "Tự gửi CẢ tín hiệu thường (không chỉ ⭐ MẠNH)", value=_all, key="at_all",
+            help="Tắt (mặc định): chỉ ⭐ MẠNH tự gửi, tín hiệu thường chỉ điền sẵn. "
+                 "Bật: mọi tín hiệu đều tự gửi — tín hiệu thường lịch sử chỉ "
+                 "+0,285đ/lệnh, biên rất mỏng so với phí 0,25đ."
+        )
+        _cap0 = int(cfg.get("max_daily_loss_vnd", 0) or 0)
+        _new_cap = st.number_input(
+            "Trần lỗ trong ngày (VND) — 0 = tắt", min_value=0, step=100_000,
+            value=_cap0, key="at_cap",
+            help="Chạm/vượt trần → từ chối MỌI lệnh auto tới hết ngày, kể cả "
+                 "⭐ MẠNH. Tính từ vị thế bot đang theo dõi (ước lượng, có thể "
+                 "lệch PnL thật của tài khoản do trượt giá)."
+        )
+        if (_new_on != _on or _new_dry != _dry or _new_all != _all
+                or _new_cap != _cap0):
             if _new_on and not _new_dry and not _sel_ok:
                 st.error("Không thể tắt dry-run khi chưa cấu hình selector.")
             else:
                 cfg["enabled"], cfg["dry_run"] = _new_on, _new_dry
+                cfg["auto_all_signals"] = _new_all
+                cfg["max_daily_loss_vnd"] = int(_new_cap)
                 _cfg_save(cfg)
                 st.rerun()
         if _on and not _dry:
-            st.error("⚠️ **CHẾ ĐỘ TIỀN THẬT** — lệnh ⭐ MẠNH sẽ được đặt "
-                     "không cần xác nhận.")
+            _scope = "MỌI tín hiệu (kể cả thường)" if _all else "lệnh ⭐ MẠNH"
+            st.error(f"⚠️ **CHẾ ĐỘ TIỀN THẬT** — {_scope} sẽ được đặt "
+                     "không cần xác nhận."
+                     + (f" Trần lỗ ngày: {_cap0:,.0f}đ." if _cap0 > 0 else
+                        " ⚠️ CHƯA đặt trần lỗ ngày."))
 
         # Phiên SmartPro tự đăng xuất sau 720 phút — kết quả kiểm tra ĐỊNH KỲ
         # (mỗi ~60 phút, chạy tự động trong engine khi auto-trade đang bật)

@@ -96,6 +96,62 @@ def _alert_session_dead(msg: str) -> None:
         f"đăng nhập lại ngay để không bỏ lỡ lệnh tiếp theo."
     )
 
+
+# Cảnh báo khi chạm trần lỗ ngày — chỉ gửi 1 lần/ngày (không cần cooldown theo
+# giây như session-dead, vì kill-switch chỉ "chạm" một lần rồi đứng yên tới
+# hết ngày; so theo NGÀY để rerun app cùng ngày không gửi lại).
+_last_loss_alert_day: str | None = None
+_LOSS_ALERT_LOCK = threading.Lock()
+
+
+def _alert_daily_loss_cap(loss_vnd: float, cap_vnd: float) -> None:
+    global _last_loss_alert_day
+    today = datetime.now().strftime("%Y-%m-%d")
+    with _LOSS_ALERT_LOCK:
+        if _last_loss_alert_day == today:
+            return
+        _last_loss_alert_day = today
+    _tg_send(
+        f"🛑 <b>#VN30F1M Auto-trade: CHẠM TRẦN LỖ NGÀY</b>\n"
+        f"Lỗ ước tính hôm nay: {loss_vnd:,.0f}đ (trần {cap_vnd:,.0f}đ)\n"
+        f"⚡ Đã TỰ ĐỘNG NGỪNG đặt lệnh mới cho tới hết ngày hôm nay. "
+        f"Số ước tính lấy từ vị thế theo dõi của bot — có thể lệch với "
+        f"PnL thật của tài khoản, kiểm tra lại trên VPS."
+    )
+
+# 1 điểm VN30F1M = 100.000đ/hợp đồng — PHẢI khớp _PT_VALUE_VND trong
+# phaisinh_tab.py. Trùng lặp có chủ đích: import module đó ở đây (dù chỉ lấy
+# 1 hằng số) rủi ro vòng lặp vì phaisinh_tab import auto_trader ngược lại;
+# hằng số này cố định theo quy chế HNX, gần như không bao giờ đổi.
+_PT_VALUE_VND = 100_000
+
+
+def _today_realized_loss_vnd(qty: int) -> float:
+    """Ước lượng lỗ THỰC HIỆN (đã đóng) hôm nay, quy ra VND.
+
+    Lấy từ journal của vị thế ẢO mà engine luôn theo dõi (dù auto-trade bật
+    hay tắt) — dùng làm PROXY cho hiệu quả thực tế, KHÔNG phải PnL thật của
+    tài khoản VPS. Có thể lệch do trượt giá, giá khớp thật khác giá lý
+    thuyết, hoặc một số lệnh không đặt được vì lỗi kỹ thuật/phiên chết. Đây
+    là GIỚI HẠN AN TOÀN (kill-switch), không phải báo cáo kế toán.
+
+    Import `load_trades` cục bộ trong hàm (không phải đầu file) — tránh vòng
+    lặp: `daily_report.py` import `phaisinh_tab.py` ở cấp module, mà
+    `phaisinh_tab.py` lại import `auto_trader.py` (module này) bên trong hàm.
+    Import trễ đảm bảo `phaisinh_tab` đã nạp xong trước khi cần tới.
+    """
+    from datetime import date
+    try:
+        from .daily_report import load_trades
+        trades = load_trades(day=date.today())
+    except Exception:
+        return 0.0
+    if trades is None or trades.empty:
+        return 0.0
+    net_points = float(trades["net"].sum())
+    return max(0.0, -net_points) * _PT_VALUE_VND * max(1, qty)
+
+
 _DEFAULT_CFG = {
     "enabled": False,             # công tắc tổng — false thì mọi lệnh chỉ ghi log
     "dry_run": True,              # true: điền + chụp màn hình, KHÔNG bấm nút đặt
@@ -104,6 +160,14 @@ _DEFAULT_CFG = {
     "symbol": "VN30F1M",
     "max_qty": 1,
     "max_orders_per_day": 6,
+    # true: cả tín hiệu THƯỜNG cũng tự bấm gửi (không chỉ điền sẵn) — mặc định
+    # false vì nhóm thường chỉ +0,285đ/lệnh lịch sử, biên rất mỏng so phí 0,25đ.
+    "auto_all_signals": False,
+    # Trần lỗ THỰC HIỆN trong ngày (VND) — chạm/vượt thì TỪ CHỐI mọi lệnh auto
+    # mới cho tới hết ngày, bất kể tín hiệu gì. 0 = tắt (không giới hạn).
+    # Tính từ PnL vị thế ẢO trong journal (xem _today_realized_loss_vnd) —
+    # đây là ƯỚC LƯỢNG, không phải PnL thật của tài khoản.
+    "max_daily_loss_vnd": 0,
     # Mã hợp đồng NỘI BỘ của VPS cho VN30F1M — KHÔNG phải "VN30F1M".
     # Xác nhận 28/08/2026 qua 3 nguồn độc lập: (1) option đang selected sẵn
     # trong #right_stock_cd, (2) dòng "active" trong bảng theo dõi phái sinh,
@@ -410,12 +474,14 @@ def _submit(page, cfg: dict, side: str) -> str | None:
 
 def submit_signal(side: str, strong: bool, price: float | None = None,
                   in_session: bool = True) -> tuple[bool, str]:
-    """Xử lý 1 tín hiệu theo chính sách: MẠNH → đặt tự động, thường → điền sẵn.
+    """Xử lý 1 tín hiệu theo chính sách: MẠNH (hoặc mọi tín hiệu nếu bật
+    `auto_all_signals`) → đặt tự động; còn lại → chỉ điền sẵn.
 
     Trả (đã_thao_tác_browser, mô_tả). Mọi nhánh đều ghi log.
     """
     cfg = load_config()
     tag = "⭐MẠNH" if strong else "thường"
+    full_submit = strong or bool(cfg.get("auto_all_signals"))
 
     if not cfg.get("enabled"):
         _log(f"⏸️ {side} ({tag}) — auto trade đang TẮT, bỏ qua")
@@ -429,6 +495,18 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
 
     qty = min(1, int(cfg.get("max_qty", 1))) if strong else int(cfg.get("max_qty", 1))
     qty = max(1, min(qty, int(cfg.get("max_qty", 1))))
+
+    # Trần lỗ trong ngày — chỉ chặn khi SẮP TỰ GỬI THẬT (full_submit); lệnh chỉ
+    # điền sẵn không tự bấm nên không cần chặn (người dùng vẫn tự quyết được).
+    _cap = int(cfg.get("max_daily_loss_vnd", 0) or 0)
+    if full_submit and _cap > 0:
+        _loss = _today_realized_loss_vnd(qty)
+        if _loss >= _cap:
+            _log(f"⛔ {side} ({tag}) — CHẠM TRẦN LỖ NGÀY: đã lỗ ước tính "
+                f"{_loss:,.0f}đ ≥ trần {_cap:,.0f}đ — từ chối mọi lệnh auto "
+                f"tới hết ngày")
+            _alert_daily_loss_cap(_loss, _cap)
+            return False, f"Chạm trần lỗ ngày ({_loss:,.0f}đ ≥ {_cap:,.0f}đ)"
 
     try:
         from playwright.sync_api import sync_playwright
@@ -469,18 +547,19 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                     browser.close()
                     return False, err
 
-                # Lệnh thường: dừng ở điền sẵn — người dùng tự bấm
-                if not strong:
+                # Không thuộc diện tự gửi (không MẠNH và auto_all_signals tắt):
+                # dừng ở điền sẵn — người dùng tự bấm.
+                if not full_submit:
                     shot = _shot(page, "prefill")
-                    _log(f"📝 ĐIỀN SẴN {side} x{qty} (thường) — chờ người dùng bấm "
+                    _log(f"📝 ĐIỀN SẴN {side} x{qty} ({tag}) — chờ người dùng bấm "
                          f"· ảnh {shot}")
                     browser.close()
                     return True, f"Đã điền sẵn {side} x{qty} — bạn bấm xác nhận"
 
-                # Lệnh MẠNH: đặt tự động (trừ khi dry-run)
+                # Thuộc diện tự gửi: đặt tự động (trừ khi dry-run)
                 if cfg.get("dry_run", True):
                     shot = _shot(page, "dryrun")
-                    _log(f"🧪 DRY-RUN {side} x{qty} (MẠNH) — đã điền, KHÔNG bấm "
+                    _log(f"🧪 DRY-RUN {side} x{qty} ({tag}) — đã điền, KHÔNG bấm "
                          f"· ảnh {shot}")
                     browser.close()
                     return True, f"DRY-RUN: đã điền {side} x{qty}, không bấm"
@@ -488,13 +567,13 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                 err = _submit(page, cfg, side)
                 if err:
                     shot = _shot(page, "submit_err")
-                    _log(f"❌ {side} (MẠNH) — {err} · ảnh {shot}")
+                    _log(f"❌ {side} ({tag}) — {err} · ảnh {shot}")
                     browser.close()
                     return False, err
 
                 _bump_orders_today()
                 shot = _shot(page, "submitted")
-                _log(f"✅ ĐÃ ĐẶT {side} x{qty} (MẠNH, lệnh thứ {_orders_today()} "
+                _log(f"✅ ĐÃ ĐẶT {side} x{qty} ({tag}, lệnh thứ {_orders_today()} "
                      f"hôm nay) · ảnh {shot}")
                 browser.close()
                 return True, f"ĐÃ ĐẶT {side} x{qty}"

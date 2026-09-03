@@ -1294,3 +1294,31 @@ phát hiện chết (so `ps_at_session_ok` cũ, tránh spam mỗi giờ trong l�
 động, thời hạn tính tuyệt đối kể từ lúc đăng nhập. Đăng nhập 1 lần buổi sáng
 rồi để cửa sổ mở xuyên ngày sẽ chết đúng ~12 tiếng sau, lặp lại đều mỗi ngày —
 không phải lỗi, không sửa được từ code, chỉ phát hiện + báo được (xem `lessons.md` 27).
+
+### Trần lỗ ngày + tự gửi mọi tín hiệu — kill-switch tiền thật (Phase 28h)
+User yêu cầu 03/09/2026: mở auto-trade cho MỌI tín hiệu (không chỉ ⭐ MẠNH),
+giới hạn lỗ 1.000.000đ/ngày. Đây là lần đầu `dry_run=False` thật trong phiên.
+
+```python
+"auto_all_signals": False,   # true: thường CŨNG tự gửi, không chỉ điền sẵn
+"max_daily_loss_vnd": 0,     # 0=tắt; chạm/vượt -> từ chối MỌI lệnh tới hết ngày
+full_submit = strong or bool(cfg.get("auto_all_signals"))   # thay cho `strong` don doc
+_today_realized_loss_vnd(qty)   # uoc luong tu journal vi the AO — KHONG phai PnL that
+```
+
+⚠️ **PnL dùng để so trần là ƯỚC LƯỢNG**, lấy từ journal vị thế ảo mà engine
+luôn theo dõi (dù auto-trade bật hay tắt) — không phải PnL thật của tài khoản
+VPS (không có API đọc PnL thật). Có thể lệch do trượt giá, giá khớp thật khác
+giá lý thuyết, hoặc lệnh không đặt được vì lỗi kỹ thuật. Đây là kill-switch an
+toàn, không phải sổ sách kế toán — vẫn cần đối chiếu tay với tài khoản thật.
+
+⚠️ Trần lỗ kiểm tra **trước khi đụng browser** (cùng nhóm với `max_orders_per_day`)
+— chạm trần thì không tốn thời gian nối Chrome, và gửi cảnh báo Telegram
+**đúng 1 lần/ngày** (so theo ngày lịch, không phải cooldown theo giây như
+`_alert_session_dead`).
+
+⚠️ `_PT_VALUE_VND = 100_000` khai báo TRÙNG trong `auto_trader.py` (bản gốc ở
+`phaisinh_tab.py`) — cố ý, tránh import module đó ở đây (rủi ro vòng lặp vì
+`phaisinh_tab` import `auto_trader` ngược lại bên trong hàm). Hằng số cố định
+theo quy chế HNX nên trùng lặp này an toàn, không phải logic cần đồng bộ liên tục.
+
