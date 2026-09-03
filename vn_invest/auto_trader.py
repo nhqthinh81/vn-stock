@@ -27,7 +27,10 @@ import json
 import os
 import sys
 import threading
+import time
 from datetime import datetime
+
+from .alerter import send_telegram as _tg_send, tg_escape as _tg_esc
 
 
 def _ensure_win_proactor_policy() -> None:
@@ -62,6 +65,36 @@ _LOG_FILE   = os.path.join(_APP_DIR, "data", "autotrade_log.txt")
 _SHOT_DIR   = os.path.join(_APP_DIR, "data", "autotrade_shots")
 
 _LOCK = threading.Lock()          # 1 lệnh browser tại 1 thời điểm là đủ
+
+# Cảnh báo Telegram khi phiên VPS chết TẠI THỜI ĐIỂM có tín hiệu thật (đường
+# phản ứng tức thời) — khác với quét định kỳ ~60 phút bên phaisinh_tab.py (đường
+# quan sát thụ động, chạy dù không có tín hiệu nào). Hai đường bổ sung cho nhau:
+# đường này báo ngay khi một lệnh THẬT vừa bị bỏ lỡ; đường kia vẫn cảnh báo
+# ngay cả những lúc không có tín hiệu nào fire trong hàng giờ.
+_SESSION_ALERT_COOLDOWN_SEC = 900   # 15 phút — tránh spam khi nhiều tín hiệu
+_last_session_alert_ts = 0.0        # module-level, đủ dùng trong 1 tiến trình
+_SESSION_ALERT_LOCK = threading.Lock()
+
+
+def _alert_session_dead(msg: str) -> None:
+    """Gửi Telegram khi phát hiện phiên VPS chết ngay lúc đang cố đặt lệnh.
+
+    Có cooldown riêng (15 phút) — độc lập với `_TG_DEDUP_SEC` (chặn tin trùng
+    HỆT nội dung) vì tin nhắn ở đây có thể khác nhau tuỳ mức tin cậy phát hiện
+    (`_session_alive`), nên so nội dung y hệt không đủ chặn spam.
+    """
+    global _last_session_alert_ts
+    with _SESSION_ALERT_LOCK:
+        now = time.time()
+        if now - _last_session_alert_ts < _SESSION_ALERT_COOLDOWN_SEC:
+            return
+        _last_session_alert_ts = now
+    _tg_send(
+        f"⛔ <b>#VN30F1M Auto-trade: BỎ LỠ lệnh do phiên VPS hết hạn</b>\n"
+        f"{_tg_esc(msg)}\n"
+        f"⚡ Vừa có tín hiệu cần đặt lệnh nhưng KHÔNG thực hiện được — "
+        f"đăng nhập lại ngay để không bỏ lỡ lệnh tiếp theo."
+    )
 
 _DEFAULT_CFG = {
     "enabled": False,             # công tắc tổng — false thì mọi lệnh chỉ ghi log
@@ -418,6 +451,7 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                 if not alive:
                     shot = _shot(page, "session_dead")
                     _log(f"⛔ {side} ({tag}) — {sess_msg} · ảnh {shot}")
+                    _alert_session_dead(sess_msg)
                     browser.close()
                     return False, sess_msg
 

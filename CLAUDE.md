@@ -1200,6 +1200,25 @@ không bao giờ bấm nhầm nút lạ.
 `_send_telegram_async`. Cấu hình đọc/ghi qua `data/autotrade_config.json`
 (nguồn sự thật duy nhất, vì thread không đọc được `session_state`).
 
+### Cảnh báo Telegram khi phiên VPS chết — 2 đường bổ sung nhau (Phase 28g)
+```python
+_alert_session_dead(msg)   # goi tu submit_signal() khi _session_alive() False
+_SESSION_ALERT_COOLDOWN_SEC = 900   # 15 phut — rieng biet, KHONG dung chung
+                                     # voi _TG_DEDUP_SEC (chan tin TRUNG NOI DUNG)
+```
+Dùng thẳng `alerter.send_telegram()` — module đó đã không phụ thuộc streamlit
+từ trước (lý do `tg_escape`/`fmt_vn` cũng đặt ở đó), nên **không** tạo bản sao
+gửi-Telegram riêng trong `auto_trader.py`.
+
+Hai đường cảnh báo phiên chết bổ sung nhau, không thay thế:
+| Đường | Kích hoạt | Ưu điểm |
+|---|---|---|
+| `_alert_session_dead()` trong `submit_signal()` | Ngay khi có tín hiệu THẬT cần đặt lệnh | Biết ngay một lệnh vừa bị bỏ lỡ |
+| Quét định kỳ trong `_live_panel_body()` (Phase 28e) | Mỗi ~60 phút, kể cả không có tín hiệu | Vẫn cảnh báo dù nhiều giờ không có tín hiệu nào fire |
+
+Cooldown 15 phút dùng biến module-level (`_last_session_alert_ts`), không cần
+bền trên đĩa — chỉ cần sống trong 1 tiến trình đang chạy.
+
 Selector phiếu lệnh phải dò bằng `inspect_vps.py` (chỉ đọc DOM, không bấm gì)
 rồi điền tay vào config — không đoán theo tên class, sàn đổi giao diện là chết
 im lặng nếu không kiểm bằng nút "🔌 Kiểm tra kết nối" trong panel.
