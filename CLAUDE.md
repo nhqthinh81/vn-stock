@@ -1249,10 +1249,14 @@ không dính, dễ gây hiểu nhầm "code đúng, chỉ app mới lỗi". Xem 
 
 ### Phiên VPS tự đăng xuất sau 720 phút — phát hiện + cảnh báo (Phase 28e)
 Chrome vẫn mở không có nghĩa phiên còn đăng nhập. `_session_alive(page)` kiểm
-2 mức tin cậy: có ô mật khẩu hiện hữu → chắc chắn hết hạn; thiếu
-`#right_stock_cd` (phiếu lệnh) nhưng không có mật khẩu → nghi ngờ (có thể hết
-hạn HOẶC đang ở màn hình khác trong app), báo cả hai khả năng thay vì khẳng
-định sai.
+4 mức theo thứ tự nhanh/chắc → chậm/mơ hồ: URL đã chứa `login=true` → hộp
+thoại `.bootbox` "đăng nhập lại" (bootbox thật của `loginConfirm()` trong
+`app.js`, đứng CHE DOM chứ chưa xoá — phải kiểm TRƯỚC nội dung trang) → ô mật
+khẩu hiện hữu → thiếu `#right_stock_cd` (phiếu lệnh, có thể hết hạn HOẶC đang
+ở màn hình khác — báo cả hai khả năng thay vì khẳng định sai). Xác nhận
+03/09/2026 bằng cách bắt được đúng session chết thật trên tài khoản đang chạy:
+modal còn che nên DOM phiếu lệnh vẫn còn nguyên — kiểm tra chỉ đọc nội dung
+trang (không kiểm modal) sẽ báo "còn sống" SAI trong đúng trạng thái này.
 
 ```python
 check_session()      # noi Chrome + tim tab + kiem tra phien, dung cho nut bam tay
@@ -1266,4 +1270,8 @@ thread** — vì cần đọc/ghi `session_state` và gọi `_send_telegram_asyn
 ~60 phút khi auto-trade đang bật; cảnh báo Telegram chỉ gửi **1 lần** khi vừa
 phát hiện chết (so `ps_at_session_ok` cũ, tránh spam mỗi giờ trong lúc chờ
 đăng nhập lại). Panel có nút "🔍 Kiểm tra phiên đăng nhập" riêng để bấm tay.
-
+⚠️ **Hết hạn 720 phút KHÔNG có bộ đếm ngược phía trình duyệt** — đọc thẳng
+`Common/js/app.js` thật: không có heartbeat/ping nào giữ phiên sống bằng hoạt
+động, thời hạn tính tuyệt đối kể từ lúc đăng nhập. Đăng nhập 1 lần buổi sáng
+rồi để cửa sổ mở xuyên ngày sẽ chết đúng ~12 tiếng sau, lặp lại đều mỗi ngày —
+không phải lỗi, không sửa được từ code, chỉ phát hiện + báo được (xem `lessons.md` 27).

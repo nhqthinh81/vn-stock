@@ -216,13 +216,39 @@ def _session_alive(page) -> tuple[bool, str]:
     tưởng đã nối được Chrome (đúng — Chrome vẫn mở) nhưng thật ra đang điền
     vào trang đăng nhập, không có tác dụng gì và không báo lỗi rõ ràng.
 
-    Hai mức tin cậy:
-      1. Có trường mật khẩu HIỆN HỮU trên trang → gần như chắc chắn phiên đã
-         hết hạn (màn hình khác trong app SmartPro không có trường này).
-      2. Không có (2) nhưng thiếu `#right_stock_cd` (phiếu lệnh) → có thể đã
+    Xác nhận 03/09/2026 bằng cách đọc `Common/js/app.js` thật của SmartPro:
+    hết hạn được server phát hiện qua lỗi AJAX `FOException.InvalidSessionException`
+    / `NotLoginException`, xử lý bởi `loginConfirm()` — hiện hộp thoại "Hệ thống
+    yêu cầu đăng nhập lại!", xoá cookie, rồi chuyển hướng sang `?login=true`.
+    KHÔNG có bộ đếm ngược phía trình duyệt (không tìm thấy heartbeat/ping nào
+    giữ phiên sống bằng hoạt động) — hạn 720 phút là tuyệt đối kể từ lúc đăng
+    nhập, không gia hạn được. Cookie phiên (`ASP.NET_SessionId`) đặt cờ HttpOnly
+    nên không đọc được bằng `document.cookie` — không dùng làm tín hiệu được.
+
+    Bốn mức tin cậy, kiểm tra theo thứ tự nhanh → chậm:
+      1. URL đã chứa `login=true` → chắc chắn đã bị chuyển hướng sang đăng nhập.
+      2. Hộp thoại "đăng nhập lại" (bootbox của chính `loginConfirm()`) đang hiện.
+      3. Có trường mật khẩu HIỆN HỮU trên trang → gần như chắc chắn hết hạn.
+      4. Không có (1-3) nhưng thiếu `#right_stock_cd` (phiếu lệnh) → có thể đã
          hết hạn HOẶC cửa sổ đang ở màn hình khác — không phân biệt được từ
          bên ngoài nên báo cả hai khả năng thay vì khẳng định sai.
     """
+    try:
+        if "login=true" in (page.url or ""):
+            return False, ("Phiên VPS đã HẾT HẠN — trang đã chuyển sang màn hình đăng "
+                           "nhập. Đăng nhập lại trong cửa sổ Chrome đặt lệnh tự động.")
+    except Exception:
+        pass
+    try:
+        has_dialog = page.evaluate(
+            "() => { const b = document.querySelector('.bootbox'); "
+            "return !!(b && b.innerText && b.innerText.includes('đăng nhập lại')); }"
+        )
+    except Exception as e:
+        return False, f"Không đọc được trang: {type(e).__name__}"
+    if has_dialog:
+        return False, ("Phiên VPS đã HẾT HẠN — trang đang hiện hộp thoại 'Hệ thống "
+                       "yêu cầu đăng nhập lại!'. Đăng nhập lại trong cửa sổ Chrome.")
     try:
         has_pwd = page.evaluate(
             "() => { const el = document.querySelector('input[type=\"password\"]'); "

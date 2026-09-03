@@ -623,3 +623,38 @@ một số FastAPI setup) đều có nguy cơ này. Luôn kiểm tra process-wid
 loop policy trước khi debug sâu hơn — dấu hiệu nhận biết là `NotImplementedError`
 trỏ thẳng tới `_make_subprocess_transport` trong traceback.
 
+## 27. Modal chờ xác nhận có thể để nguyên DOM cũ phía sau — kiểm tra dialog trước, không chỉ nội dung trang
+
+**Bối cảnh:** User hỏi "Chrome hay bị timeout theo quy định của VPS, kiểm tra
+xác nhận". Đào `Common/js/app.js` thật của SmartPro: hết hạn phiên được server
+phát hiện qua lỗi AJAX, xử lý bởi `loginConfirm()` — hiện `bootbox.alert()` với
+nội dung "Hệ thống yêu cầu đăng nhập lại!", và chỉ xoá cookie + chuyển hướng
+sang `?login=true` **trong callback khi user bấm OK**.
+
+**Lỗ hổng phát hiện được (trên phiên thật, không phải giả lập):** trong lúc
+hộp thoại còn đứng chờ bấm OK, `#right_stock_cd` (phiếu lệnh) và mọi phần tử
+khác của trang **vẫn còn nguyên trong DOM** — chỉ bị modal che phủ trực quan.
+`_session_alive()` bản đầu (chỉ tìm ô mật khẩu / kiểm tra thiếu phiếu lệnh) báo
+**"còn sống" SAI** trong trạng thái này, vì cả hai điều kiện nó tìm đều không
+đúng: không có ô mật khẩu, phiếu lệnh vẫn còn.
+
+**Cách vá:** kiểm tra sự tồn tại của chính hộp thoại `.bootbox` với nội dung
+"đăng nhập lại" — đây là tín hiệu tách biệt hoàn toàn khỏi cấu trúc trang bình
+thường, không phụ thuộc trang đã điều hướng hay chưa. Đặt kiểm tra này ở mức ưu
+tiên cao (ngay sau kiểm tra URL `login=true`), trước cả kiểm tra mật khẩu/phiếu
+lệnh.
+
+**Đã thử và loại bỏ:** đọc cookie `JSESSION`/`USER` qua `document.cookie` —
+cookie phiên thật (`ASP.NET_SessionId`) đặt cờ `HttpOnly` nên JS trang không
+đọc được (đúng thiết kế bảo mật, không phải lỗi). Dùng
+`page.context.cookies()` của Playwright thì đọc được tên cookie (bypass được
+HttpOnly ở tầng CDP) nhưng tên cookie trong `app.js` (`JSESSION`, `USER`)
+không khớp cookie thật đang dùng (`ASP.NET_SessionId`) — kết luận: đừng dựa
+vào tên hằng số đọc được trong mã nguồn JS làm chân lý, phải đối chiếu với
+cookie thật trên phiên đang chạy.
+
+**Rule phòng tránh:** khi kiểm tra "trang có ở trạng thái X không" bằng cách dò
+phần tử DOM, đừng chỉ kiểm tra NỘI DUNG trang (phiếu lệnh còn/mất, ô nhập nào
+xuất hiện) — kiểm tra cả LỚP HIỂN THỊ TRÊN CÙNG (modal/dialog đang che) trước,
+vì nhiều luồng xử lý lỗi chỉ che phủ bằng modal chứ chưa dỡ bỏ DOM bên dưới.
+
