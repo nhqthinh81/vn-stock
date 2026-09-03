@@ -472,8 +472,98 @@ def _submit(page, cfg: dict, side: str) -> str | None:
 
 # ── API chính ────────────────────────────────────────────────────────────────
 
+def _place_sltp(page, cfg: dict, position_side: str, qty: int,
+                cur_price: float | None, sl_price: float | None,
+                tp_price: float | None) -> tuple[bool, str]:
+    """Đặt Stop Loss / Take Profit THẬT trên sàn (lệnh điều kiện) ngay sau khi
+    lệnh vào vừa khớp — khớp tự động tại VPS, không phụ thuộc bot còn chạy
+    (tắt máy, mất mạng, Streamlit crash... vị thế thật vẫn được sàn bảo vệ).
+
+    Định dạng request xác nhận SỐNG 03/09/2026: bắt lưu lượng mạng thật lúc
+    user tự đặt SL/TP qua giao diện (lệnh SHORT thật, VPS xác nhận "chờ
+    khớp"). Gửi lại request đó bằng `fetch()` NGAY TRONG trang (không phải
+    từ Python) — cookie phiên (`ASP.NET_SessionId`) đặt cờ HttpOnly, không
+    đọc được từ ngoài, nhưng `fetch()` cùng-origin từ trong trang tự động
+    kèm cookie đó mà không cần biết giá trị.
+
+    `session`/`user` đọc SỐNG từ `global.sid`/`global.user`. `extInfo` đọc
+    SỐNG từ `window.Fingerprint` — biến toàn cục VPS tự tính sẵn, đúng định
+    dạng "<số thiết bị>|<user agent>" (khớp y hệt request thật đã bắt được).
+    Đã thử `FingerprintJS.load()` cho ra visitorId KHÁC — không cùng cơ chế,
+    không dùng.
+
+    `position_side`: chiều VỊ THẾ vừa mở ("LONG"/"SHORT") — payload `side`
+    của VPS là chiều VỊ THẾ (không phải chiều lệnh), xác nhận qua thao tác
+    thật của user ("tôi đặt short nhé" → side='S').
+
+    `tp_price=None` → gửi TP rỗng (chỉ đặt SL sàn) — v4 mặc định KHÔNG có
+    take-profit (xem CLAUDE.md, quyết định có nghiên cứu hậu thuẫn). Hàm này
+    chỉ MIRROR đúng vị thế ảo (`pos["sl"]`/`pos.get("tp")` từ điểm gọi),
+    không tự quyết định chính sách TP.
+
+    Trả (đã_gửi_được_qua_mạng, response_thô) — KHÔNG tự khẳng định VPS đã
+    CHẤP NHẬN lệnh (chưa bắt được mẫu response lỗi thật để biết chắc schema
+    báo lỗi) — response thô luôn được log/trả về để xác minh bằng mắt, giống
+    cách `_submit()`/`close_position()` đã làm (log + chụp màn hình).
+    """
+    vps_side = "S" if position_side == "SHORT" else "B"
+    sl_s = f"{sl_price:.1f}" if sl_price is not None else "0"
+    tp_s = f"{tp_price:.1f}" if tp_price is not None else "0"
+    price_s = f"{cur_price:.1f}" if cur_price else ""
+    try:
+        result = page.evaluate(
+            """
+            async ([sym, side, qty, price, sl, tp]) => {
+                try {
+                    const acctEl = document.getElementById('right_account');
+                    const acct = acctEl ? acctEl.value : null;
+                    const sid = (typeof global !== 'undefined') ? global.sid : null;
+                    const usr = (typeof global !== 'undefined') ? global.user : null;
+                    if (!acct || !sid || !usr) {
+                        return {sent:false, err:'khong doc duoc accountNo/session/user song'};
+                    }
+                    const body = {
+                        group: 'O', session: sid, user: usr,
+                        extInfo: window.Fingerprint || '', language: 'vi',
+                        data: {
+                            cmd: 'co.sltp.order.new', accountNo: acct, pin: '',
+                            channel: 'H', placedPrice: price, priceType: 'LO',
+                            side: side, quantity: qty, stopOrderType: 'sl_tp',
+                            symbol: sym, spread: '', triggerType: 'price',
+                            stopLossPrice: sl, takeProfitPrice: tp,
+                            stopLossAmount: '0', takeProfitAmount: '0',
+                        },
+                    };
+                    const resp = await fetch('/handler/core_ext.vpbs', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                        credentials: 'same-origin',
+                    });
+                    const text = await resp.text();
+                    return {sent: true, http_ok: resp.ok, status: resp.status,
+                            text: text.slice(0, 500)};
+                } catch (e) {
+                    return {sent:false, err: String(e)};
+                }
+            }
+            """,
+            [cfg["symbol_code"], vps_side, str(qty), price_s, sl_s, tp_s],
+        )
+    except Exception as e:
+        return False, f"Lỗi gọi trang: {type(e).__name__}: {str(e)[:150]}"
+
+    if not result or not result.get("sent"):
+        err = (result or {}).get("err", "không rõ lỗi")
+        return False, f"KHÔNG gửi được request: {err}"
+    tp_note = tp_s if tp_price is not None else "(không đặt — v4 không TP mặc định)"
+    return True, (f"SL={sl_s} TP={tp_note} — HTTP {result.get('status')} — "
+                  f"phản hồi: {str(result.get('text'))[:200]}")
+
+
 def submit_signal(side: str, strong: bool, price: float | None = None,
-                  in_session: bool = True) -> tuple[bool, str]:
+                  in_session: bool = True, sl_price: float | None = None,
+                  tp_price: float | None = None) -> tuple[bool, str]:
     """Xử lý 1 tín hiệu theo chính sách: MẠNH (hoặc mọi tín hiệu nếu bật
     `auto_all_signals`) → đặt tự động; còn lại → chỉ điền sẵn.
 
@@ -575,15 +665,170 @@ def submit_signal(side: str, strong: bool, price: float | None = None,
                 shot = _shot(page, "submitted")
                 _log(f"✅ ĐÃ ĐẶT {side} x{qty} ({tag}, lệnh thứ {_orders_today()} "
                      f"hôm nay) · ảnh {shot}")
+
+                # Đặt SL/TP sàn ngay sau khi lệnh vào vừa khớp — mirror đúng
+                # SL/TP của vị thế ảo (sl_price/tp_price truyền từ điểm gọi).
+                # Lỗi ở bước này KHÔNG được coi là lỗi mở lệnh (vị thế THẬT đã
+                # mở) — chỉ log cảnh báo riêng, người dùng tự đặt SL tay nếu cần.
+                sltp_note = ""
+                if sl_price is not None:
+                    ok_sltp, msg_sltp = _place_sltp(page, cfg, side, qty, price,
+                                                     sl_price, tp_price)
+                    shot2 = _shot(page, "sltp")
+                    if ok_sltp:
+                        _log(f"🛡️ SL/TP {side} — {msg_sltp} · ảnh {shot2}")
+                        sltp_note = " + đã gửi SL/TP sàn (kiểm tra lại trên VPS)"
+                    else:
+                        _log(f"⚠️ SL/TP {side} — KHÔNG gửi được: {msg_sltp} · ảnh {shot2} — "
+                             f"vị thế THẬT vẫn mở nhưng KHÔNG có SL sàn, cân nhắc đặt tay.")
+                        sltp_note = " nhưng KHÔNG đặt được SL/TP sàn — cân nhắc đặt tay"
+
                 browser.close()
-                return True, f"ĐÃ ĐẶT {side} x{qty}"
+                return True, f"ĐÃ ĐẶT {side} x{qty}{sltp_note}"
         except Exception as e:
             _log(f"❌ {side} ({tag}) — {type(e).__name__}: {str(e)[:150]}")
             return False, f"{type(e).__name__}: {str(e)[:80]}"
 
 
 def submit_signal_async(side: str, strong: bool, price: float | None = None,
-                        in_session: bool = True) -> None:
+                        in_session: bool = True, sl_price: float | None = None,
+                        tp_price: float | None = None) -> None:
     """Bản chạy nền — gọi từ engine, không chặn render (như _send_telegram_async)."""
     threading.Thread(target=submit_signal,
-                     args=(side, strong, price, in_session), daemon=True).start()
+                     args=(side, strong, price, in_session, sl_price, tp_price),
+                     daemon=True).start()
+
+
+def _prefill_close(page, cfg: dict, position_side: str, qty: int) -> str | None:
+    """Gọi thẳng hàm `ClosePosition()` THẬT của VPS để điền đúng phiếu đóng.
+
+    Phát hiện 03/09/2026 bằng cách đọc `ClosePosition.toString()` từ trình
+    duyệt đang chạy: click vào số vị thế (ô "-1"/"+1" trong bảng Tài sản) gọi
+    `ClosePosition(symbol, type, vol, true)` — hàm này KHÔNG tự gửi lệnh, chỉ
+    điền `#right_stock_cd`/`#right_price`/`#sohopdong` (dùng giá thị trường
+    tra từ `reciprocalStock`/`multiStock`, không phải giá limit tay) và BẬT
+    đúng nút chiều lệnh cần bấm — kiến trúc giống hệt `_fill_ticket()` đã xây
+    cho lệnh mở. Dùng lại chính hàm JS của VPS thay vì tự mô phỏng tra giá
+    market — đảm bảo hành vi giống hệt một cú click thật của người dùng.
+
+    `position_side`: chiều VỊ THẾ ĐANG GIỮ ("LONG"/"SHORT") — hàm tự suy ra
+    `type` cho VPS (chiều LỆNH cần đặt để đóng, ngược lại vị thế):
+      đang giữ SHORT → cần MUA để đóng → type='B' → nút LONG được bật
+      đang giữ LONG  → cần BÁN để đóng → type='S' → nút SHORT được bật
+    """
+    vps_type = "B" if position_side == "SHORT" else "S"
+    try:
+        ok = page.evaluate(
+            "([sym, typ, vol]) => { "
+            "if (typeof ClosePosition !== 'function') return false; "
+            "ClosePosition(sym, typ, String(vol), true); return true; }",
+            [cfg["symbol_code"], vps_type, qty],
+        )
+    except Exception as e:
+        return f"Gọi ClosePosition() lỗi: {type(e).__name__}: {str(e)[:120]}"
+    if not ok:
+        return ("Không thấy hàm ClosePosition() trên trang — VPS có thể đã đổi "
+                "giao diện, chạy lại dò DOM trước khi tin cơ chế này")
+    return None
+
+
+def close_position(position_side: str, qty: int = 1,
+                   price: float | None = None) -> tuple[bool, str]:
+    """Đóng vị thế THẬT trên VPS — dùng khi engine ảo quyết định thoát lệnh.
+
+    `position_side`: chiều VỊ THẾ ĐANG GIỮ (không phải chiều lệnh sẽ đặt để
+    đóng — hàm tự suy ra qua `_prefill_close`). Trả (đã_thao_tác_browser, mô_tả).
+
+    Cố ý KHÔNG áp `max_orders_per_day` / `max_daily_loss_vnd` — hai trần đó
+    giới hạn RỦI RO MỚI (mở thêm vị thế), còn đóng lệnh làm GIẢM rủi ro đang
+    có. Chặn đóng vì "chạm trần" sẽ giữ một vị thế thua lỗ mở mãi — đúng thứ
+    trần lỗ được sinh ra để tránh.
+
+    Dùng chung `dry_run`/`enabled` với `submit_signal()` vì đây là một phần
+    của CÙNG vị thế mà auto-trade đã mở — không có công tắc tách riêng.
+    """
+    cfg = load_config()
+    close_side = "SHORT" if position_side == "LONG" else "LONG"   # chiều LỆNH
+
+    if not cfg.get("enabled"):
+        _log(f"⏸️ ĐÓNG {position_side} — auto trade đang TẮT. "
+            f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ, cần tự đóng tay trên VPS.")
+        return False, "Auto trade đang tắt — vị thế thật CHƯA được đóng tự động"
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _log("❌ Thiếu playwright — vị thế thật vẫn còn mở")
+        return False, "Thiếu playwright"
+    _ensure_win_proactor_policy()
+
+    with _LOCK:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(cfg["cdp_url"], timeout=5000)
+                page = _find_vps_page(browser, cfg["page_url_contains"])
+                if page is None:
+                    _log(f"❌ ĐÓNG {position_side} — không thấy tab VPS. "
+                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ.")
+                    browser.close()
+                    return False, "Không thấy tab VPS — vị thế thật vẫn còn mở"
+
+                alive, sess_msg = _session_alive(page)
+                if not alive:
+                    shot = _shot(page, "close_session_dead")
+                    _log(f"⛔ ĐÓNG {position_side} — {sess_msg} · ảnh {shot} — "
+                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ, cần tự đóng tay.")
+                    _alert_session_dead(
+                        f"KHÔNG ĐÓNG ĐƯỢC vị thế {position_side} đang mở — {sess_msg} "
+                        f"— vị thế thật vẫn còn mở, cần tự đóng tay trên VPS."
+                    )
+                    browser.close()
+                    return False, sess_msg
+
+                err = _verify_symbol_price(page, cfg, price)
+                if err:
+                    shot = _shot(page, "close_stale_symbol")
+                    _log(f"⛔ ĐÓNG {position_side} — {err} · ảnh {shot} — "
+                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ.")
+                    browser.close()
+                    return False, err
+
+                err = _prefill_close(page, cfg, position_side, qty)
+                if err:
+                    shot = _shot(page, "close_fill_err")
+                    _log(f"❌ ĐÓNG {position_side} — {err} · ảnh {shot} — "
+                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ.")
+                    browser.close()
+                    return False, err
+
+                if cfg.get("dry_run", True):
+                    shot = _shot(page, "close_dryrun")
+                    _log(f"🧪 DRY-RUN ĐÓNG {position_side} x{qty} — đã điền, "
+                        f"KHÔNG bấm · ảnh {shot}")
+                    browser.close()
+                    return True, f"DRY-RUN: đã điền lệnh đóng {position_side} x{qty}"
+
+                err = _submit(page, cfg, close_side)
+                if err:
+                    shot = _shot(page, "close_submit_err")
+                    _log(f"❌ ĐÓNG {position_side} — {err} · ảnh {shot} — "
+                        f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ, cần tự đóng tay.")
+                    browser.close()
+                    return False, err
+
+                shot = _shot(page, "close_submitted")
+                _log(f"✅ ĐÃ ĐÓNG vị thế {position_side} x{qty} "
+                    f"(lệnh {close_side}) · ảnh {shot}")
+                browser.close()
+                return True, f"ĐÃ ĐÓNG {position_side} x{qty}"
+        except Exception as e:
+            _log(f"❌ ĐÓNG {position_side} — {type(e).__name__}: {str(e)[:150]} — "
+                f"⚠️ VỊ THẾ THẬT VẪN CÒN MỞ, cần tự đóng tay.")
+            return False, f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def close_position_async(position_side: str, qty: int = 1,
+                         price: float | None = None) -> None:
+    """Bản chạy nền — gọi từ engine, không chặn render."""
+    threading.Thread(target=close_position,
+                     args=(position_side, qty, price), daemon=True).start()

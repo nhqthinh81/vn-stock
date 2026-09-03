@@ -1322,3 +1322,56 @@ toàn, không phải sổ sách kế toán — vẫn cần đối chiếu tay v�
 `phaisinh_tab` import `auto_trader` ngược lại bên trong hàm). Hằng số cố định
 theo quy chế HNX nên trùng lặp này an toàn, không phải logic cần đồng bộ liên tục.
 
+### Đóng lệnh tự động + SL/TP sàn thật (Phase 28i, 03/09/2026)
+
+**Đóng lệnh**: `close_position()` dùng lại `ClosePosition()` — hàm JS THẬT của
+VPS (phát hiện qua `.toString()` từ trình duyệt đang chạy, gọi khi bấm số
+lượng vị thế trong bảng Tài sản). Hàm chỉ ĐIỀN phiếu + BẬT đúng nút chiều —
+`_submit()` mới thực sự gửi, dùng lại y hệt cơ chế lệnh mở. Nối vào 2 điểm
+thoát lệnh trong `phaisinh_tab.py` (thoát bình thường qua `_check_position_exit()`
+và thoát vì dữ liệu dừng). Cố ý KHÔNG áp `max_orders_per_day`/`max_daily_loss_vnd`
+— hai trần đó giới hạn RỦI RO MỚI, đóng lệnh làm GIẢM rủi ro đang có.
+
+**SL/TP sàn thật**: `_place_sltp()` gửi `cmd: "co.sltp.order.new"` tới
+`/handler/core_ext.vpbs` ngay sau khi lệnh vào vừa khớp thật — SL/TP tồn tại
+TRÊN SÀN, không phụ thuộc bot còn chạy (tắt máy, mất mạng, Streamlit crash…
+vị thế thật vẫn được bảo vệ). Định dạng request xác nhận SỐNG bằng cách bắt
+lưu lượng mạng thật lúc user tự đặt SL/TP qua giao diện (lệnh SHORT thật, VPS
+xác nhận "chờ khớp").
+
+```python
+# Goi fetch() NGAY TRONG trang (page.evaluate async), KHONG tu Python:
+# cookie phien (ASP.NET_SessionId) dat co HttpOnly, khong doc duoc tu ngoai,
+# nhung fetch() cung-origin tu trong trang tu dong kem cookie do.
+session = global.sid          # doc SONG, 36 ky tu
+user    = global.user
+extInfo = window.Fingerprint  # DA dung dinh dang "<so thiet bi>|<user agent>"
+side    = "S" if position_side == "SHORT" else "B"   # chieu VI THE, khong phai chieu lenh
+```
+
+⚠️ **`window.Fingerprint` (khác `window.FingerprintJS`)** là biến toàn cục
+VPS tự tính sẵn, đã đúng định dạng `extInfo` — đọc thẳng, không cần tính lại.
+Đã thử gọi `FingerprintJS.load()` (thư viện chuẩn) cho ra `visitorId` KHÁC
+hoàn toàn — không phải cùng cơ chế, KHÔNG dùng.
+
+⚠️ **`tp_price=None` → gửi `takeProfitPrice: "0"`** (không đặt TP sàn) — v4
+mặc định KHÔNG có take-profit (quyết định có nghiên cứu hậu thuẫn, xem mục
+"Engine v4" phía trên). `_place_sltp()` chỉ MIRROR đúng SL/TP của vị thế ảo
+(`pos["sl"]`/`pos.get("tp")`), không tự quyết định chính sách TP.
+
+⚠️ **`_place_sltp()` chỉ xác nhận ĐÃ GỬI qua mạng, KHÔNG khẳng định VPS ĐÃ
+CHẤP NHẬN** — chưa bắt được mẫu response lỗi thật nên chưa biết chắc schema
+báo lỗi phía server. Response thô luôn log + chụp màn hình để xác minh bằng
+mắt, giống `_submit()`/`close_position()`. Lỗi ở bước SL/TP KHÔNG được coi là
+lỗi mở lệnh — vị thế THẬT đã mở dù SL/TP sàn có đặt được hay không, chỉ log
+cảnh báo riêng.
+
+⚠️ **CHƯA kiểm chứng full-flow thật** (chưa có vị thế thật nào mở lại kể từ
+khi viết `_place_sltp()`) — 23/23 test offline (`test_close_position.py` +
+`test_sltp.py`) đều đạt bằng fake browser, nhưng lệnh sàn THẬT đầu tiên cần
+quan sát trực tiếp (như đã làm với `_prefill_close`/lệnh SHORT thật) trước
+khi tin tưởng hoàn toàn. Config hiện tại (`data/autotrade_config.json`,
+gitignored) đã `enabled=true, dry_run=false, auto_all_signals=true` — code
+mới chỉ có hiệu lực SAU KHI RESTART tiến trình Streamlit (module đã nạp vào
+`sys.modules`, sửa file không tự áp dụng — xem lesson đã gặp về tiến trình cũ).
+

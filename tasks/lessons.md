@@ -658,3 +658,24 @@ phần tử DOM, đừng chỉ kiểm tra NỘI DUNG trang (phiếu lệnh còn/
 xuất hiện) — kiểm tra cả LỚP HIỂN THỊ TRÊN CÙNG (modal/dialog đang che) trước,
 vì nhiều luồng xử lý lỗi chỉ che phủ bằng modal chứ chưa dỡ bỏ DOM bên dưới.
 
+
+## 28. Fingerprint dùng trong request nội bộ — đừng đoán, tìm biến toàn cục tính sẵn
+
+**Lỗi tưởng gặp:** cần replicate request `extInfo` của VPS gồm
+`"<số fingerprint>|<user agent>"`, thử gọi `FingerprintJS.load().then(fp=>fp.get())`
+(API chuẩn của thư viện FingerprintJS v3 thấy trong `window.FingerprintJS`) —
+ra một `visitorId` khác hoàn toàn với số đã bắt được trong request thật
+(`3101237078`). Nếu tin luôn giá trị này sẽ gửi sai `extInfo`, không biết chắc
+server có validate field này hay chỉ log audit.
+
+**Nguyên nhân:** trang có SẴN một biến toàn cục riêng `window.Fingerprint`
+(viết hoa khác `FingerprintJS`) do chính VPS tự tính và cache, đã đúng định
+dạng cần dùng — không phải kết quả của thư viện fingerprint chuẩn.
+
+**Rule phòng tránh:** khi cần một giá trị "thiết bị/fingerprint" xuất hiện
+trong request thật đã bắt được, đừng vội gọi API chuẩn của thư viện cùng tên
+tìm thấy trong `window` — trước tiên liệt kê TOÀN BỘ biến `window.*` khớp từ
+khoá liên quan (`/ext|finger|device|track/i`) và so trực tiếp GIÁ TRỊ với
+số đã bắt được trong request thật. Ưu tiên đọc thẳng biến đã tính sẵn hơn là
+tự tính lại — kể cả khi có một thư viện "đúng tên" trông như câu trả lời hiển
+nhiên.

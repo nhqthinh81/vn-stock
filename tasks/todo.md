@@ -1270,3 +1270,23 @@ Kiểm chứng: test_strong.py — 405 thời điểm cắt dữ liệu thật q
 `_get_rule_signal`: nhãn nhất quán nội bộ, reason khớp cờ, tỷ lệ mạnh 9% (khớp
 bậc với backtest 14%). Hồi quy test_lock/test_takeover/test_spam/render đều đạt.
 
+
+## Phase 28i — Đóng lệnh tự động + SL/TP sàn thật (03/09/2026)
+
+- [x] `close_position()`: dùng lại `ClosePosition()` JS thật của VPS, nối vào
+      2 điểm thoát lệnh (`_check_position_exit()` + thoát vì dữ liệu dừng).
+      Cố ý KHÔNG áp trần lệnh/ngày hay trần lỗ/ngày (đóng lệnh = giảm rủi ro).
+      Test: `test_close_position.py` 22/22.
+- [x] `_place_sltp()`: đặt SL/TP điều kiện THẬT trên sàn (`cmd: co.sltp.order.new`)
+      ngay sau khi lệnh vào khớp — SL tồn tại độc lập với bot còn chạy hay
+      không. Định dạng request xác nhận SỐNG bằng bắt lưu lượng mạng thật lúc
+      user tự đặt tay (lệnh SHORT thật, VPS xác nhận "chờ khớp"). `extInfo`
+      lấy từ `window.Fingerprint` (đọc thẳng, không phải `FingerprintJS.load()`
+      — đã thử, ra giá trị khác). Mirror đúng SL/TP vị thế ảo, không tự thêm TP.
+      Test: `test_sltp.py` 18/18.
+- [ ] **CHƯA kiểm chứng full-flow thật** — cần quan sát trực tiếp lần vào lệnh
+      thật đầu tiên sau khi restart Streamlit (module chỉ nạp code mới sau
+      restart). Config hiện tại đã `enabled=true, dry_run=false,
+      auto_all_signals=true` — sẽ tự bắn thật ngay lệnh kế tiếp sau restart.
+- [ ] Revoke GitHub PAT đã dùng để push (`ghp_5eTa...`) — nhắc lại, chưa xác
+      nhận user đã làm.

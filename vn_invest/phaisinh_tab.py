@@ -1878,6 +1878,20 @@ def _live_panel_body():
             st.session_state["ps_position"] = None
             _save_ps_state()
 
+            # Đóng vị thế THẬT nếu đang auto-trade. `_px` ở đây là giá CUỐI
+            # CÙNG BIẾT ĐƯỢC từ nguồn dữ liệu đã dừng — có thể lệch xa giá
+            # thị trường thật lúc này. `_verify_symbol_price()` bên trong
+            # close_position() sẽ tự so giá trang thật với `_px` và TỪ CHỐI
+            # nếu lệch quá xa, đúng lúc cần thận trọng nhất (dữ liệu đã hỏng).
+            try:
+                from .auto_trader import load_config as _at_cfg4, \
+                    close_position_async as _at_close2
+                if _at_cfg4().get("enabled"):
+                    _at_close2(_stuck["side"], price=_px)
+            except Exception as _at_e2:
+                st.session_state["ps_errors"].insert(
+                    0, f"[auto_trade] đóng (dữ liệu dừng): {type(_at_e2).__name__}: {_at_e2}")
+
     # ── Cache trend (tính lại khi mtime đổi) ─────────────────────────────────
     cur_mtime_val = st.session_state["ps_last_mtime"]
     if cur_mtime_val != st.session_state["ps_trend_mtime"] and df_1m is not None:
@@ -1993,6 +2007,22 @@ def _live_panel_body():
                         }
                         st.session_state["ps_position"] = None
                         _save_ps_state()
+
+                        # Đóng vị thế THẬT trên VPS nếu đang auto-trade — dùng
+                        # exit_px (giá thị trường THẬT, không phải giá cũ)
+                        # cho _verify_symbol_price(). Cố ý KHÔNG chặn bởi
+                        # max_orders_per_day/max_daily_loss_vnd (xem chú thích
+                        # close_position()) — đóng lệnh làm giảm rủi ro.
+                        try:
+                            from .auto_trader import load_config as _at_cfg5, \
+                                close_position_async as _at_close
+                            if _at_cfg5().get("enabled"):
+                                _at_close(pos["side"], price=exit_px)
+                        except Exception as _at_e3:
+                            st.session_state["ps_errors"].insert(
+                                0, f"[auto_trade] đóng lệnh: "
+                                   f"{type(_at_e3).__name__}: {_at_e3}")
+
                         pos, closed_now = None, True
                     else:
                         # Tín hiệu ngược chiều lệnh đang giữ — chỉ báo MỘT lần cho
@@ -2124,7 +2154,8 @@ def _live_panel_body():
                             submit_signal_async as _at_submit
                         if _at_cfg().get("enabled"):
                             _at_submit(ai_signal, bool(_rd.get("strong")),
-                                       price=pos["entry"], in_session=in_session)
+                                       price=pos["entry"], in_session=in_session,
+                                       sl_price=pos["sl"], tp_price=pos.get("tp"))
                     except Exception as _at_e:
                         st.session_state["ps_errors"].insert(
                             0, f"[auto_trade] {type(_at_e).__name__}: {_at_e}")
