@@ -15,3 +15,5 @@ pygwalker>=0.4.0
 yfinance>=0.2.40
 # Dat lenh tu dong VPS (tab Phai Sinh) - vn_invest/auto_trader.py
 playwright>=1.45.0
+# Test - chay bang `pytest` tu root project
+pytest>=8.0.0
