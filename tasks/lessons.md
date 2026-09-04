@@ -752,3 +752,32 @@ exception" là bằng chứng thành công. Và với lệnh ĐÓNG (đặt lệ
 Ngoài ra: nhiều instance Streamlit chạy song song (cửa sổ dự phòng Phase 25–26) đều
 ghi `autotrade_config.json` từ `session_state` riêng → giằng co `enabled`. Muốn park
 bot chắc chắn để điều tra: **kill hết tiến trình Streamlit**, đừng chỉ sửa file.
+
+## 30. Task Scheduler "AmiBroker AutoExplore" treo 7+ ngày liên tục — mtime file đánh lừa
+
+**Lỗi gặp:** User quan sát "app đứng", vị thế ảo mở lúc 14:14 nhưng không bao giờ
+đóng được, không có tín hiệu mới. Kiểm tra `vn30f1m_1min.csv`: mtime file rất mới
+(vừa ghi lại vài giây trước) nhưng nến CUỐI CÙNG bên trong lại là từ nhiều giờ
+trước — đúng mẫu "mtime mới + nến cũ" đã ghi trong CLAUDE.md (nguồn dữ liệu
+AmiBroker đã dừng, KHÔNG phải AFL chưa chạy).
+
+**Nguyên nhân gốc:** Task Scheduler "AmiBroker AutoExplore" (`wscript.exe
+E:\AmiBroker\AutoExplore.vbs`, trigger lúc mở máy) có `LastRunTime` là
+**28/08/2026** — hơn 1 tuần trước — nhưng `LastTaskResult` vẫn báo "đang chạy"
+(0x00041301). Tiến trình `wscript.exe` tương ứng (PID khớp đúng CreationDate
+28/08) vẫn tồn tại, treo liên tục suốt hơn 1 tuần, không bao giờ thoát. AmiBroker
+vẫn "sống" đủ để AFL Explorer thỉnh thoảng ghi lại file (mtime mới) nhưng dữ liệu
+thực tế bên trong không tiến lên — có thể do wscript.exe mắc kẹt trong 1 vòng
+lặp/lệnh gọi COM tới AmiBroker mà không bao giờ hoàn tất.
+
+**Cách vá:** `schtasks /Change /TN "AmiBroker AutoExplore" /Disable` (cần quyền
+Administrator — PowerShell thường không đủ quyền, `Access is denied`) +
+`Stop-Process` tiến trình `wscript.exe` treo. Đã tắt hẳn — từ giờ AmiBroker
+KHÔNG tự khởi động lúc mở máy nữa, phải tự mở tay + chạy Explorer tay.
+
+**Rule phòng tránh:** khi nghi ngờ dữ liệu nguồn "đứng" dù file vẫn được ghi mới,
+đừng chỉ tin mtime — đọc NỘI DUNG nến cuối cùng để so với giờ thực tế. Nếu lệch
+xa, kiểm tra Task Scheduler xem có task tự động nào chạy nguồn dữ liệu bị treo
+lâu ngày không (`Get-ScheduledTaskInfo` → `LastRunTime` cũ bất thường so với hôm
+nay + `LastTaskResult` báo "đang chạy" = dấu hiệu treo dài hạn, không phải đang
+chạy bình thường).

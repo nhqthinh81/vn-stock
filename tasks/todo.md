@@ -1359,3 +1359,38 @@ Helper mới chạy trên trang VPS thật (chỉ đọc): `_ticket_mode→('nor
 - [x] Test: `tests/test_phaisinh_shadow.py` 7/7. Toàn bộ `pytest tests/` 20/20.
 - [ ] **Chưa có dữ liệu sống** — chờ vài ngày/tuần chạy thật rồi xem lại bảng
       so sánh trước khi cân nhắc đổi luật thoát lệnh thật.
+
+## Phase 28l — Điều tra "lệnh gộp điều kiện" cho lệnh VÀO (04/09/2026, chưa xong)
+
+User cho biết: lệnh VÀO (mở LONG/SHORT) trên VPS SmartPro **nên** đặt qua panel
+"Lệnh điều kiện / Stop Loss/Take Profit" — đây là lệnh GỘP (vào + SL + TP cùng
+1 lần bấm), không phải chỉ dùng để gắn SL/TP cho vị thế đã có như giả định ban
+đầu của guard `_ticket_mode()` (Phase 28j). Guard hiện tại CHỈ chấp nhận "Lệnh
+thường" — cần thiết kế lại để chấp nhận panel điều kiện làm cơ chế vào lệnh
+CHUẨN, không phải trường hợp cần từ chối.
+
+- [ ] Bắt request thật của lệnh gộp (vào + SL + TP) bằng cách nghe mạng 90s
+      trong lúc user tự đặt lệnh qua panel điều kiện — **PHẢI làm trong phiên
+      giao dịch bình thường, KHÔNG phải khung ATC** (thử lúc 14:23 04/09 gặp
+      ATC, không bắt được request đặt lệnh nào, chỉ có polling `Web.Order.FullAllOrder`).
+      Tạm tắt `enabled` trước khi nghe (đã có sẵn quy trình, xem lesson 29).
+  - Script sẵn dùng lại: `scratchpad/capture_bracket_entry.py` (session cũ, cần
+    viết lại ở scratchpad phiên mới vì thư mục scratchpad theo session).
+- [ ] Sau khi có định dạng request thật: viết `_place_bracket_entry()` (tương tự
+      `_place_sltp()`, POST `co.sltp.order.new` hoặc endpoint tương ứng qua
+      `page.evaluate()` + `fetch()`) và sửa `_ticket_mode()`/`submit_signal()` để
+      CHẤP NHẬN chế độ "Lệnh điều kiện / Stop Loss/Take Profit" làm đường vào
+      lệnh chính, không còn coi đó là lỗi cần HỦY.
+  - Cân nhắc: `_submit()` hiện xác nhận lệnh vào sàn qua `#order_normal` — lệnh
+    điều kiện có thể KHÔNG xuất hiện ở đó ngay (chờ kích hoạt), cần tìm nguồn
+    xác nhận khác (có thể là chính bảng "Danh sách lệnh điều kiện" đã thấy qua
+    ảnh chụp, "Chờ kích hoạt" → "Đã kích hoạt").
+- [ ] Giữ nguyên `close_position()`'s `_ticket_mode()` guard hiện tại (đóng lệnh
+      vẫn nên qua "Lệnh thường" — chưa có lý do đổi phần này).
+
+**Trạng thái tạm dừng 04/09 ~14:40**: `enabled` đã khôi phục về `true` như trước
+khi thử bắt request. Vị thế ảo #44 (LONG, entry 1979,5, mở 14:14) vẫn đang mở,
+chưa có lệnh thật (bị `_ticket_mode()` từ chối từ 14:16 tới nay, phiếu đang kẹt
+ở "Lệnh điều kiện / Stop Loss/Take Profit"). Dữ liệu AmiBroker cũng vừa được xử
+lý riêng (xem lesson 30 — task Task Scheduler treo đã tắt) nên #44 có thể tiếp
+tục đứng yên tới khi có nến mới.
