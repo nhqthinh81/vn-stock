@@ -765,6 +765,38 @@ lệnh thắng thường đạt) chứ không phải lệnh chốt.
 **Chỉ 1 vị thế tại 1 thời điểm** — ràng buộc load-bearing, KHÔNG phải chống spam
 UI. Nới ra là quay lại 105 lệnh/ngày và mất toàn bộ edge (lọc bỏ 93,4% tín hiệu thừa).
 
+### Theo dõi song song "shadow trailing 4×ATR" (thử nghiệm, 04/09/2026)
+
+User quan sát đúng: SL cố định khiến lệnh thắng lớn nhả lại nhiều lời trước khi
+thoát. Re-test `research_trailing2.py` với dữ liệu mới nhất: trailing 4×ATR
+thuần (SL ban đầu 3×ATR như trên, sau đó kéo theo đỉnh/đáy, giữ đến hết phiên,
+KHÔNG trần 30 nến) cho +0,698đ/lệnh, **OOS +0,361 > mốc hiện tại OOS +0,278**.
+Nhưng OOS/IS=0,34 — thấp, cùng dấu hiệu overfit từng bác bỏ ý tưởng này ở lần
+kiểm tra trước. **KHÔNG đổi luật thật** — mở thêm 1 "vị thế ảo" trailing chạy
+song song mỗi lệnh thật, sống ĐỘC LẬP tới khi tự thoát (không bị cắt khi lệnh
+thật đóng sớm hơn), ghi vào `data/shadow_journal_trailing4atr.csv` (cùng schema
+journal thật) để tích luỹ dữ liệu sống trước khi cân nhắc đổi luật.
+
+```python
+_SHADOW_TRAIL_ATR_MULT = 4.0
+_open_shadow_position(side, entry, entry_ts, atr, tid)   # SL ban đầu = y hệt lệnh thật
+_check_shadow_exit(shadow, new_bars, in_session)          # trailing, KHÔNG TP, KHÔNG _HOLD_BARS
+```
+So sánh: `daily_report.build_shadow_comparison()` (tái dùng nguyên `load_trades()`/
+`summarize()` — 2 journal cùng schema, không sửa gì 2 hàm đó) → expander "🔬 So
+sánh" trong `_render_daily_report()`.
+
+⚠️ **Chỉ 1 shadow tại 1 thời điểm** (đơn giản hoá) — nếu 1 shadow đang chạy khi
+có tín hiệu mới, KHÔNG mở shadow thứ hai; lần đó chỉ mất 1 cặp so sánh, không
+ảnh hưởng lệnh thật.
+
+⚠️ **Tính năng chỉ sinh dữ liệu TỪ LÚC BẬT trở đi** — không có kết quả ngay, cần
+vài ngày/tuần chạy thật mới đủ lệnh để bảng so sánh có ý nghĩa.
+
+Test: `tests/test_phaisinh_shadow.py` (SL ban đầu khớp lệnh thật, trailing chỉ
+tightens không nới lỏng, sống độc lập sau khi lệnh thật đóng, journal roundtrip,
+`ps_state.json` roundtrip, không mở shadow thứ 2).
+
 ⚠️ **Gặp tín hiệu NGƯỢC khi đang giữ lệnh thì KHÔNG làm gì cả** — không thoát,
 không đảo. 44,2% số lệnh gặp tình huống này (nhiễu khung 1 phút, không phải đảo
 chiều thật). Đo được: giữ đến hết `+0,356đ/lệnh` (5/5 quý) · thoát sớm `+0,086`

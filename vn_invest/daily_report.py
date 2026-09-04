@@ -16,7 +16,7 @@ from email.message import EmailMessage
 import pandas as pd
 
 from .alerter import fmt_vn                      # dùng chung, chuẩn VN
-from .phaisinh_tab import _FEE_PTS, _PT_VALUE_VND, _JOURNAL_FILE
+from .phaisinh_tab import _FEE_PTS, _PT_VALUE_VND, _JOURNAL_FILE, _SHADOW_JOURNAL_FILE
 
 
 # ── Đọc & ghép cặp lệnh ───────────────────────────────────────────────────────
@@ -179,6 +179,23 @@ def summarize(trades: pd.DataFrame) -> dict:
         "by_side":    by_side,
         "by_reason":  by_reason,
         "equity":     equity.tolist(),
+    }
+
+
+# ── So sánh vị thế ảo trailing 4×ATR (thử nghiệm) với lệnh thật ──────────────
+
+def build_shadow_comparison(day_from: date | None = None,
+                            day_to: date | None = None) -> dict:
+    """So sánh journal THẬT với journal shadow (trailing 4×ATR) trong 1 khoảng
+    ngày. Tái dùng nguyên `load_trades()`/`summarize()` — 2 journal cùng schema
+    v4, chỉ khác file. Ghép theo `tid` để có bảng so sánh từng cặp lệnh.
+    """
+    real   = load_trades(day_from=day_from, day_to=day_to)
+    shadow = load_trades(journal_file=_SHADOW_JOURNAL_FILE, day_from=day_from, day_to=day_to)
+    paired = real.merge(shadow, on="tid", how="outer", suffixes=("_real", "_shadow"))
+    return {
+        "real": real, "shadow": shadow, "paired": paired,
+        "s_real": summarize(real), "s_shadow": summarize(shadow),
     }
 
 

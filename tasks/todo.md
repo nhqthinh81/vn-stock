@@ -1343,3 +1343,19 @@ Helper mới chạy trên trang VPS thật (chỉ đọc): `_ticket_mode→('nor
 - [ ] Cân nhắc: cửa sổ app thứ 2/3 (dự phòng) ghi đè `autotrade_config.json` —
       3 instance Streamlit đang chạy song song gây giằng co `enabled`. Đã kill hết.
 - [ ] Revoke GitHub PAT (`ghp_5eTa...`) — vẫn chưa xác nhận.
+
+## Phase 28k — Theo dõi song song "shadow trailing 4×ATR" (04/09/2026)
+
+- [x] `_open_shadow_position()`/`_check_shadow_exit()` (phaisinh_tab.py) — trailing
+      4×ATR, SL ban đầu giống lệnh thật, sống độc lập tới khi tự thoát.
+- [x] `_save_ps_state()`/`_load_ps_state()`/`_reload_from_disk()` mở rộng thêm
+      key `shadow` — sống qua restart.
+- [x] `_append_journal(entry, file=None)`/`_is_duplicate_of_last(row, file=None)`
+      tổng quát hoá — dùng chung cho journal thật + `data/shadow_journal_trailing4atr.csv`.
+- [x] Hook vào `_live_panel_body()`: mở shadow cùng lúc lệnh thật (nếu chưa có
+      shadow đang chạy), kiểm thoát shadow độc lập mỗi tick.
+- [x] `daily_report.build_shadow_comparison()` + expander "🔬 So sánh" trong
+      `_render_daily_report()`.
+- [x] Test: `tests/test_phaisinh_shadow.py` 7/7. Toàn bộ `pytest tests/` 20/20.
+- [ ] **Chưa có dữ liệu sống** — chờ vài ngày/tuần chạy thật rồi xem lại bảng
+      so sánh trước khi cân nhắc đổi luật thoát lệnh thật.

@@ -27,6 +27,7 @@ data/vps_dom_dump.json
 data/vps_*.html
 data/ps_state.json
 data/ps_ui_pref.json
+data/shadow_journal_trailing4atr.csv
 data/alpha_log.txt
 data/backtest_log.txt
 data/fundamental_cache.json

@@ -72,6 +72,15 @@ _GSHEET_NAME             = "VN30_Trading_Journal"
 _HOLD_BARS    = 30    # giữ tối đa 30 nến 1 phút rồi thoát theo thị giá
 _SL_ATR_MULT  = 3.0   # SL = 3 × ATR14. SL chặt hơn (pivot 10 nến kiểu v3) bị nhiễu quét
 _MIN_SL_PTS   = 1.0   # sàn SL khi ATR quá nhỏ (đầu phiên)
+
+# Theo dõi song song "vị thế ảo trailing 4×ATR" (thử nghiệm, 04/09/2026) — SL
+# ban đầu giống hệt lệnh thật, nhưng SAU ĐÓ kéo theo đỉnh/đáy thay vì cố định,
+# giữ đến hết phiên (KHÔNG có trần _HOLD_BARS). Re-test research_trailing2.py
+# với dữ liệu mới nhất: +0,698đ/lệnh, OOS +0,361đ/lệnh (> mốc hiện tại +0,278)
+# nhưng OOS/IS=0,34 — thấp, cùng dấu hiệu cảnh báo overfit từng dùng để bác bỏ
+# ý tưởng này ở lần kiểm tra trước với dữ liệu cũ hơn. KHÔNG đổi luật thật —
+# chỉ theo dõi song song, tích luỹ dữ liệu sống để so sánh dần theo thời gian.
+_SHADOW_TRAIL_ATR_MULT = 4.0
 _FEE_PTS      = 0.25  # phí + spread + slippage round-trip, quy ra điểm chỉ số
 _MAX_STALE_MIN = 5    # dữ liệu cũ hơn ngần này phút → KHÔNG vào lệnh mới
 # Cổng biến động: bỏ qua giai đoạn thị trường "chết" — khi ATR quá thấp so với
@@ -588,6 +597,14 @@ _PS_STATE_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "ps_state.json"
 )
 
+# Journal RIÊNG cho vị thế ảo trailing 4×ATR (thử nghiệm) — cùng schema
+# _JOURNAL_COLUMNS với journal thật để build_shadow_comparison() tái dùng
+# nguyên load_trades()/summarize() có sẵn, không cần sửa daily_report.py.
+_SHADOW_JOURNAL_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "shadow_journal_trailing4atr.csv"
+)
+
 
 # ── Ghi nhớ tuỳ chọn giao diện qua các lần tải lại ───────────────────────────
 # Tách khỏi ps_state.json: đây là SỞ THÍCH người dùng, vòng đời khác hẳn trạng
@@ -673,13 +690,14 @@ def _reload_from_disk() -> None:
     giờ. Nếu tiếp quản mà không nạp lại: không thấy lệnh phiên kia đang mở ⇒ mở
     thêm lệnh thứ hai, còn lệnh cũ mãi kẹt với dòng MỞ không có ĐÓNG.
     """
-    _pos, _seq = _load_ps_state()
+    _pos, _seq, _shadow = _load_ps_state()
     _log, _max = _restore_log_from_journal()
     if _log:
         st.session_state["ps_log_history"] = _log
     st.session_state["ps_trade_seq"] = max(
         _seq, _max, int(st.session_state.get("ps_trade_seq", 0) or 0))
     st.session_state["ps_position"] = _pos   # kể cả None — phiên kia có thể đã đóng
+    st.session_state["ps_shadow_position"] = _shadow
 
 
 def _claim_ownership() -> tuple[bool, float]:
@@ -724,14 +742,20 @@ def _save_ps_state() -> None:
     import json
     if not _can_trade():
         return                   # phiên chỉ xem không được giành đè trạng thái
-    pos = st.session_state.get("ps_position")
-    data = {"trade_seq": int(st.session_state.get("ps_trade_seq", 0)), "position": None,
+    pos    = st.session_state.get("ps_position")
+    shadow = st.session_state.get("ps_shadow_position")
+    data = {"trade_seq": int(st.session_state.get("ps_trade_seq", 0)),
+            "position": None, "shadow": None,
             "owner": {"token": _session_token(),
                       "heartbeat": pd.Timestamp.now().isoformat()}}
     if pos:
         data["position"] = dict(pos,
                                 entry_ts=pos["entry_ts"].isoformat(),
                                 last_ts=pos["last_ts"].isoformat())
+    if shadow:
+        data["shadow"] = dict(shadow,
+                              entry_ts=shadow["entry_ts"].isoformat(),
+                              last_ts=shadow["last_ts"].isoformat())
     try:
         os.makedirs(os.path.dirname(_PS_STATE_FILE), exist_ok=True)
         with open(_PS_STATE_FILE, "w", encoding="utf-8") as f:
@@ -740,11 +764,12 @@ def _save_ps_state() -> None:
         pass
 
 
-def _load_ps_state() -> tuple[dict | None, int]:
-    """Đọc lại vị thế + bộ đếm. Trả (position | None, trade_seq)."""
+def _load_ps_state() -> tuple[dict | None, int, dict | None]:
+    """Đọc lại vị thế + bộ đếm + vị thế ảo trailing. Trả (position | None,
+    trade_seq, shadow | None)."""
     import json
     if not os.path.exists(_PS_STATE_FILE):
-        return None, 0
+        return None, 0, None
     try:
         with open(_PS_STATE_FILE, encoding="utf-8") as f:
             data = json.load(f)
@@ -753,9 +778,14 @@ def _load_ps_state() -> tuple[dict | None, int]:
             pos = dict(pos,
                        entry_ts=pd.Timestamp(pos["entry_ts"]),
                        last_ts=pd.Timestamp(pos["last_ts"]))
-        return pos, int(data.get("trade_seq", 0))
+        shadow = data.get("shadow")
+        if shadow:
+            shadow = dict(shadow,
+                         entry_ts=pd.Timestamp(shadow["entry_ts"]),
+                         last_ts=pd.Timestamp(shadow["last_ts"]))
+        return pos, int(data.get("trade_seq", 0)), shadow
     except Exception:
-        return None, 0
+        return None, 0, None
 
 
 def _restore_log_from_journal() -> tuple[list, int]:
@@ -888,6 +918,60 @@ def _position_pnl(pos: dict, exit_price: float) -> float:
     return (exit_price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - exit_price)
 
 
+# ── Vị thế ẢO trailing 4×ATR (thử nghiệm, xem chú thích _SHADOW_TRAIL_ATR_MULT)
+# Sống ĐỘC LẬP với vị thế thật sau khi mở — không bị cắt khi lệnh thật đóng sớm
+# hơn, đúng ý "nếu dùng trailing thay vì luật hiện tại thì kết quả sẽ ra sao".
+
+def _open_shadow_position(side: str, entry: float, entry_ts: pd.Timestamp,
+                          atr: float, tid: int) -> dict:
+    """SL ban đầu giống HỆT lệnh thật (_SL_ATR_MULT) — chỉ khác ở chỗ SAU ĐÓ
+    sẽ được kéo theo đỉnh/đáy (`_check_shadow_exit`) thay vì cố định."""
+    risk = max(_SL_ATR_MULT * atr, _MIN_SL_PTS)
+    return {
+        "tid":      tid,
+        "side":     side,
+        "entry":    round(entry, 1),
+        "entry_ts": entry_ts,
+        "last_ts":  entry_ts,
+        "atr":      round(atr, 2),
+        "sl":       round(entry - risk if side == "LONG" else entry + risk, 1),
+        "peak":     round(entry, 1),
+        "bars":     0,
+    }
+
+
+def _check_shadow_exit(shadow: dict, new_bars: pd.DataFrame,
+                       in_session: bool) -> tuple[bool, str, float, object]:
+    """Mirror `_check_position_exit` nhưng SL kéo theo đỉnh/đáy, KHÔNG có trần
+    `_HOLD_BARS`, KHÔNG có TP — giữ đến khi chạm trailing SL hoặc hết phiên.
+    """
+    entry_day = shadow["entry_ts"].date()
+    prev_close, prev_ts = shadow["entry"], shadow["entry_ts"]
+
+    for ts, bar in new_bars.iterrows():
+        if ts.date() != entry_day:
+            return True, "Đóng cuối phiên (shadow)", prev_close, prev_ts
+
+        shadow["bars"]   += 1
+        shadow["last_ts"] = ts
+        high, low, close = float(bar["High"]), float(bar["Low"]), float(bar["Close"])
+        if shadow["side"] == "LONG":
+            shadow["peak"] = max(shadow["peak"], high)
+            shadow["sl"] = max(shadow["sl"], shadow["peak"] - _SHADOW_TRAIL_ATR_MULT * shadow["atr"])
+            if low <= shadow["sl"]:
+                return True, "Chạm trailing SL (shadow)", shadow["sl"], ts
+        else:
+            shadow["peak"] = min(shadow["peak"], low)
+            shadow["sl"] = min(shadow["sl"], shadow["peak"] + _SHADOW_TRAIL_ATR_MULT * shadow["atr"])
+            if high >= shadow["sl"]:
+                return True, "Chạm trailing SL (shadow)", shadow["sl"], ts
+        prev_close, prev_ts = close, ts
+
+    if not in_session and len(new_bars):
+        return True, "Đóng cuối phiên (shadow)", prev_close, prev_ts
+    return False, "", 0.0, None
+
+
 # ── Telegram / journal ────────────────────────────────────────────────────────
 
 # Nhật ký gửi Telegram — module-level vì hàm gửi chạy trong thread riêng, không
@@ -997,8 +1081,12 @@ def _rotate_journal_if_stale(path: str) -> str | None:
         return None
 
 
-def _append_journal(entry: dict):
-    if not _JOURNAL_FILE or not _can_trade():
+def _append_journal(entry: dict, file: str | None = None):
+    """Ghi 1 dòng vào journal. `file=None` → journal THẬT (_JOURNAL_FILE); truyền
+    `_SHADOW_JOURNAL_FILE` để ghi vào journal của vị thế ảo trailing 4×ATR —
+    tái dùng nguyên logic xoay vòng/chống trùng, tránh copy-paste 2 hàm."""
+    file = file or _JOURNAL_FILE
+    if not file or not _can_trade():
         return
     row = pd.DataFrame([{
         "date":   datetime.now().strftime("%Y-%m-%d"),
@@ -1015,26 +1103,27 @@ def _append_journal(entry: dict):
         "reason": entry["reason"],
     }], columns=_JOURNAL_COLUMNS)
     try:
-        moved  = _rotate_journal_if_stale(_JOURNAL_FILE)
+        moved  = _rotate_journal_if_stale(file)
         if moved:
             print(f"[journal] Schema cũ — đã lưu trữ sang: {moved}")
-        exists = os.path.exists(_JOURNAL_FILE)
-        if exists and _is_duplicate_of_last(row):
+        exists = os.path.exists(file)
+        if exists and _is_duplicate_of_last(row, file):
             return                                   # phiên khác vừa ghi đúng dòng này
-        row.to_csv(_JOURNAL_FILE, mode="a" if exists else "w",
+        row.to_csv(file, mode="a" if exists else "w",
                    header=not exists, index=False, quoting=1)  # QUOTE_ALL
     except Exception:
         pass
 
 
-def _is_duplicate_of_last(row: "pd.DataFrame") -> bool:
+def _is_duplicate_of_last(row: "pd.DataFrame", file: str | None = None) -> bool:
     """Dòng sắp ghi có trùng hệt dòng cuối file không?
 
     Hai phiên Streamlit chạy song song cùng thấy một nến mới và cùng ghi một
     bản ghi. Đã quan sát được 6/56 dòng trùng trong journal thực tế.
     """
+    file = file or _JOURNAL_FILE
     try:
-        with open(_JOURNAL_FILE, "rb") as f:
+        with open(file, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             f.seek(max(0, size - 4096))
@@ -1358,6 +1447,7 @@ def render_phaisinh_tab():
         "ps_rule_mtime":      -1,
         "ps_stop_levels":     {},   # Buy Stop / Sell Stop gợi ý
         "ps_position":        None, # vị thế ảo đang mở (chỉ 1 tại 1 thời điểm)
+        "ps_shadow_position": None, # vị thế ảo trailing 4×ATR song song (thử nghiệm)
         "ps_trade_seq":       0,    # bộ đếm mã lệnh trong phiên
         "ps_last_closed":     None, # lệnh vừa đóng — để hiện banner nhận biết
         "ps_is_owner":        False,# có giữ quyền ghi không (xem _claim_ownership)
@@ -1379,13 +1469,15 @@ def render_phaisinh_tab():
     # Tải lại trang → session_state trắng. Khôi phục từ đĩa để không bỏ rơi vị
     # thế đang mở và không đánh trùng mã lệnh. Xem chú thích ở _save_ps_state().
     if _fresh:
-        _pos_disk, _seq_disk = _load_ps_state()
+        _pos_disk, _seq_disk, _shadow_disk = _load_ps_state()
         _log_disk, _max_tid  = _restore_log_from_journal()
         if _log_disk:
             st.session_state["ps_log_history"] = _log_disk
         st.session_state["ps_trade_seq"] = max(_seq_disk, _max_tid)
         if _pos_disk:
             st.session_state["ps_position"] = _pos_disk
+        if _shadow_disk:
+            st.session_state["ps_shadow_position"] = _shadow_disk
 
     st.header("⚡ VN30F1M — Signal Bot v4 (VWAP + MACD histogram)")
 
@@ -1617,7 +1709,7 @@ def _render_daily_report(in_session: bool):
     """
     from datetime import date as _date, timedelta as _td
     from .daily_report import (build_range_report, build_report, email_ready,
-                               send_report_email, fmt_vn)
+                               send_report_email, fmt_vn, build_shadow_comparison)
 
     st.divider()
     with st.expander("📊 Báo cáo lệnh phái sinh", expanded=False):
@@ -1756,6 +1848,54 @@ def _render_daily_report(in_session: bool):
 
         with st.expander("👁️ Xem trước bản HTML sẽ tải/gửi", expanded=False):
             st.components.v1.html(html, height=620, scrolling=True)
+
+        # ── So sánh với vị thế ẢO trailing 4×ATR (thử nghiệm, xem chú thích
+        #    _SHADOW_TRAIL_ATR_MULT) — tích luỹ dần, chưa dùng để đổi luật thật.
+        with st.expander("🔬 So sánh: Trailing 4×ATR (thử nghiệm) vs luật thật",
+                         expanded=False):
+            try:
+                _cmp = build_shadow_comparison(day_from=_d0, day_to=_d1)
+            except Exception as e:
+                st.error(f"Không dựng được so sánh: {type(e).__name__}: {e}")
+                _cmp = None
+            if _cmp is None or not _cmp["s_shadow"].get("n"):
+                st.info(
+                    "Chưa đủ lệnh shadow trong khoảng này để so sánh — tính năng "
+                    "chỉ tích luỹ dữ liệu TỪ LÚC BẬT trở đi, chưa có ngay lập tức. "
+                    "Chờ vài ngày/tuần chạy thật rồi xem lại."
+                )
+            else:
+                sr, ss = _cmp["s_real"], _cmp["s_shadow"]
+                cA, cB = st.columns(2)
+                with cA:
+                    st.markdown("**Luật thật (SL cố định)**")
+                    st.metric("Số lệnh", fmt_vn(sr.get("n", 0)))
+                    st.metric("PnL ròng", f"{fmt_vn(sr.get('pnl_net', 0), 1, signed=True)}đ",
+                              delta=f"TB {fmt_vn(sr.get('avg_net', 0), 2, signed=True)}đ/lệnh")
+                with cB:
+                    st.markdown(f"**Shadow trailing {_SHADOW_TRAIL_ATR_MULT:g}×ATR**")
+                    st.metric("Số lệnh", fmt_vn(ss.get("n", 0)))
+                    st.metric("PnL ròng", f"{fmt_vn(ss.get('pnl_net', 0), 1, signed=True)}đ",
+                              delta=f"TB {fmt_vn(ss.get('avg_net', 0), 2, signed=True)}đ/lệnh")
+                st.caption(
+                    f"So khớp theo mã lệnh (tid) — {len(_cmp['paired'])} dòng ghép, "
+                    "kể cả lệnh chỉ có 1 bên (shadow chưa đóng hoặc bị bỏ qua vì "
+                    "đã có shadow khác đang chạy)."
+                )
+                _pr = _cmp["paired"]
+                st.dataframe(
+                    pd.DataFrame({
+                        "Mã":            _pr["tid"],
+                        "Chiều":         _pr["side_real"].fillna(_pr.get("side_shadow")),
+                        "Vào→Ra (thật)": _pr["entry_real"].map(lambda v: fmt_vn(v, 1) if pd.notna(v) else "—")
+                                         + " → " + _pr["exit_real"].map(lambda v: fmt_vn(v, 1) if pd.notna(v) else "—"),
+                        "PnL thật":      _pr["net_real"].map(lambda v: fmt_vn(v, 2, signed=True) + "đ" if pd.notna(v) else "—"),
+                        "Vào→Ra (shadow)": _pr["entry_shadow"].map(lambda v: fmt_vn(v, 1) if pd.notna(v) else "—")
+                                           + " → " + _pr["exit_shadow"].map(lambda v: fmt_vn(v, 1) if pd.notna(v) else "—"),
+                        "PnL shadow":    _pr["net_shadow"].map(lambda v: fmt_vn(v, 2, signed=True) + "đ" if pd.notna(v) else "—"),
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
 
     # Tự động gửi báo cáo NGÀY — chỉ khi user bật, đã ngoài phiên, chưa gửi hôm nay
     if (st.session_state.get("ps_rep_auto") and not in_session
@@ -2046,6 +2186,34 @@ def _live_panel_body():
                         st.session_state["ps_position"] = pos
                         _save_ps_state()
 
+                # ── 1b) Vị thế ẢO trailing 4×ATR (thử nghiệm, xem chú thích
+                #        _SHADOW_TRAIL_ATR_MULT) — SỐNG ĐỘC LẬP với vị thế thật,
+                #        không bị cắt khi lệnh thật đóng sớm hơn.
+                shadow = st.session_state.get("ps_shadow_position")
+                if shadow and has_closed:
+                    new_bars_sh = closed_df[closed_df.index > shadow["last_ts"]]
+                    do_exit_sh, reason_sh, px_sh, ts_sh = _check_shadow_exit(
+                        shadow, new_bars_sh, in_session
+                    )
+                    if do_exit_sh:
+                        pnl_sh = _position_pnl(shadow, px_sh)
+                        ex_time_sh = (ts_sh.strftime("%Y-%m-%d %H:%M")
+                                     if ts_sh is not None else closed_time)
+                        _append_journal({
+                            "time": ex_time_sh, "ticker": "VN30F1M",
+                            "act": f"ĐÓNG {shadow['side']}", "price": px_sh,
+                            "sl": shadow["sl"], "tp": None, "tp_method": "",
+                            "pnl": f"{pnl_sh:+.1f}",
+                            "tid": shadow["tid"],
+                            "result": "THẮNG" if (pnl_sh - _FEE_PTS) > 0 else "THUA",
+                            "reason": f"{reason_sh} · vào {_fvn(shadow['entry'], 1)} "
+                                      f"· giữ {shadow['bars']} phút",
+                        }, file=_SHADOW_JOURNAL_FILE)
+                        st.session_state["ps_shadow_position"] = None
+                    else:
+                        st.session_state["ps_shadow_position"] = shadow
+                    _save_ps_state()
+
                 # ── 2) LSTM — vẫn tính ở mọi chế độ để panel "Dự báo AI" không
                 #        hiển thị số cũ; chi phí ~30ms và chỉ chạy mỗi nến mới.
                 lstm_sig = "WAIT"
@@ -2144,6 +2312,23 @@ def _live_panel_body():
                     }
                     st.session_state["ps_log_history"].insert(0, log_entry)
                     _append_journal(log_entry)
+
+                    # Mở song song 1 vị thế ẢO trailing 4×ATR (thử nghiệm) để
+                    # tích luỹ dữ liệu so sánh — chỉ khi CHƯA có shadow nào đang
+                    # chạy (giữ đúng quy tắc "1 tại 1 thời điểm", đơn giản hoá:
+                    # bỏ qua cặp so sánh của lần này thay vì theo dõi nhiều shadow).
+                    if not st.session_state.get("ps_shadow_position"):
+                        shadow = _open_shadow_position(
+                            ai_signal, closed_px, closed_ts, _atr_now, tid=_tid)
+                        st.session_state["ps_shadow_position"] = shadow
+                        _append_journal({
+                            "time": closed_time, "ticker": "VN30F1M",
+                            "act": f"MỞ {ai_signal}", "price": shadow["entry"],
+                            "sl": shadow["sl"], "tp": None, "tp_method": "",
+                            "pnl": "—", "tid": _tid, "result": "",
+                            "reason": f"shadow trailing {_SHADOW_TRAIL_ATR_MULT:g}×ATR",
+                        }, file=_SHADOW_JOURNAL_FILE)
+                    _save_ps_state()
 
                     # Đặt lệnh tự động VPS (chính sách MẠNH/thường + mọi trần
                     # an toàn nằm TRONG auto_trader — hook chỉ chuyển tín hiệu).
