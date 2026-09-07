@@ -53,3 +53,8 @@ Thumbs.db
 # Secrets
 .env
 *.env.local
+
+# Durable live trading ledger (local account/order state)
+data/autotrade_live_state.json
+data/autotrade_live_state.tmp
+data/autotrade_live_state.json.lock

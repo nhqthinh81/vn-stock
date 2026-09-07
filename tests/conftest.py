@@ -92,8 +92,14 @@ class FakePage:
         if "tbl-status-danhmuc" in js:
             side, qty = self.sim_position
             return "0" if side == "NONE" else (str(qty) if side == "LONG" else str(-qty))
+        if "account:value('#right_account')" in js:
+            sel, side = arg
+            filled = dict(self.filled)
+            return {"account": "TEST", "symbol": "41I1G9000", "side": side,
+                    "qty": int(filled.get(sel["qty_input"], 1)),
+                    "price": float(filled.get(sel["price_input"], 1981.5))}
         if "order_normal" in js:
-            return f"{1000 + self._order_seq}|09:00" if self._order_seq else ""
+            return [{"id": str(1000 + self._order_seq), "status": "Đã khớp", "matches": True}] if self._order_seq else []
         if "toast-error" in js:
             return self.sim_error_popup
         if "bootbox" in js:
@@ -157,6 +163,8 @@ def at_module(tmp_path, fake_page, monkeypatch):
     là danh sách tin Telegram đã "gửi" (qua `_tg_send` đã monkeypatch).
     """
     import vn_invest.auto_trader as at
+    import vn_invest.autotrade_runtime as runtime
+    monkeypatch.setattr(runtime, "STATE_PATH", tmp_path / "autotrade_live_state.json")
 
     monkeypatch.setattr(at, "_CFG_FILE", str(tmp_path / "cfg.json"))
     monkeypatch.setattr(at, "_STATE_FILE", str(tmp_path / "state.json"))
@@ -173,6 +181,9 @@ def at_module(tmp_path, fake_page, monkeypatch):
     at.save_config(cfg)
 
     monkeypatch.setattr(at, "_today_realized_loss_vnd", lambda qty: 0.0)
+    monkeypatch.setattr(at, "_last_session_alert_ts", 0.0)
+    monkeypatch.setattr(at, "_last_ticket_alert_ts", 0.0)
+    monkeypatch.setattr(at, "_last_loss_alert_day", None)
     sent = []
     monkeypatch.setattr(at, "_tg_send", lambda msg: (sent.append(msg), True)[1])
 

@@ -90,6 +90,8 @@ _MAX_STALE_MIN = 5    # dữ liệu cũ hơn ngần này phút → KHÔNG vào l
 #   không lọc  win 44,8% · +0,356đ/lệnh · OOS +0,280
 #   0,9×median win 46,0% · +0,462đ/lệnh · OOS +0,440   (ít hơn 24% số lệnh)
 _MIN_ATR_RATIO = 0.9
+# 07/09/2026: production previously read the MACD signal column, not histogram.
+# Historical calibration below must be revalidated against the corrected rule.
 # Nguong TIN HIEU MANH: |MACD hist - MACD hist truoc| >= nguong nay x ATR14.
 # Do tren 273 phien (research_v5b): quet 0.06..0.14 don dieu tang toi dinh bang
 # phang 0.09-0.12; tai 0.10 nhom manh (~1 lenh/ngay, ~14% so lenh) dat
@@ -347,10 +349,13 @@ def _get_rule_signal(df_1m: pd.DataFrame) -> tuple[str, str, dict]:
             return "WAIT", "Chưa đủ nến đã đóng", empty
 
         _macd = ta.macd(recent["Close"])
-        if _macd is None or _macd.shape[1] < 3:
+        if _macd is None or "MACDh_12_26_9" not in _macd.columns:
             return "WAIT", "MACD chưa tính được", empty
-        recent["MACD_hist"] = _macd.iloc[:, 2]
+        # Select by name: column 2 is the signal line, not the histogram.
+        recent["MACD_hist"] = _macd["MACDh_12_26_9"]
         recent["VWAP"]      = _calc_vwap(recent)
+        if not np.isfinite(recent[["Close", "MACD_hist", "VWAP"]].tail(2).to_numpy()).all():
+            return "WAIT", "Hai nến cuối thiếu dữ liệu giá/MACD/VWAP hợp lệ", empty
         recent.dropna(subset=["MACD_hist", "VWAP"], inplace=True)
         if len(recent) < 2:
             return "WAIT", "Chưa đủ sau warmup", empty
@@ -387,7 +392,7 @@ def _get_rule_signal(df_1m: pd.DataFrame) -> tuple[str, str, dict]:
         _tag = "⭐ MẠNH · " if _strong else ""
         if above and rising:
             return "LONG",  f"{_tag}Trên VWAP + MACD hist tăng — {ctx}", detail
-        if (not above) and (not rising):
+        if close < vwap and mh < mh_p:
             return "SHORT", f"{_tag}Dưới VWAP + MACD hist giảm — {ctx}", detail
         return "WAIT", f"Chưa đồng pha — {ctx}", detail
 
@@ -1581,6 +1586,21 @@ def _render_telegram_panel():
         else:
             st.caption(f"Bot token `…{token[-6:]}` · chat_id `{chat_id}`")
 
+        from .auto_trader import load_config as _report_cfg, save_config as _save_report_cfg
+        from .vps_telegram import poll as _vps_report, _LAST_ERROR as _report_error
+        _rcfg = _report_cfg()
+        _reports = st.toggle("Báo cáo lệnh thật và lãi/lỗ VPS", value=_rcfg.get('telegram_vps_reports', True), key='ps_vps_reports')
+        if _reports != _rcfg.get('telegram_vps_reports', True):
+            _rcfg['telegram_vps_reports'] = _reports
+            _save_report_cfg(_rcfg)
+            st.rerun()
+        st.caption("Gửi khi sổ lệnh thay đổi; cập nhật lãi/lỗ mỗi 15 phút trong giờ giao dịch và sau phiên. Bao gồm lệnh thủ công/ngoài bot.")
+        if _report_error:
+            st.error(_report_error)
+        if st.button("Gửi trạng thái VPS ngay", disabled=not (token and chat_id and _reports), key='ps_vps_report_now'):
+            _sent, _message = _vps_report(force=True)
+            (st.success if _sent else st.error)(_message)
+
         c1, c2 = st.columns([1, 3])
         if c1.button("Gửi thử", disabled=not (token and chat_id),
                      use_container_width=True, key="ps_tg_test"):
@@ -1628,9 +1648,37 @@ def _render_autotrade_panel():
               "🔴 BẬT — TIỀN THẬT" if _on else "⚪ TẮT")
 
     with st.expander(f"🤖 Đặt lệnh tự động VPS ({_badge})", expanded=False):
+        from .autotrade_runtime import status as _live_status
+        try:
+            _live = _live_status()
+            st.write(f"VPS thực: **{_live['cycle_state']}** · khớp mở {_live['filled']} HĐ")
+            if _live.get('sl') is not None:
+                st.write(f"Giá SL: **{_live['sl']:,.1f}** · TP: **{_live['tp'] if _live.get('tp') is not None else 'tắt'}**")
+            _protection = _live.get('protection')
+            if _protection:
+                st.caption(f"Bảo vệ VPS: SL {_protection['sl_qty']}/{_protection['required_qty']} HĐ · "
+                           + (f"TP {_protection['tp_qty']}/{_protection['required_qty']} HĐ"
+                              if _protection['tp_required'] else 'TP tắt')
+                           + (' · đã đối soát' if _protection['confirmed'] else ' · chờ xác nhận đủ ngưỡng/KL'))
+            if _live.get('stop_guard_message'):
+                st.caption(_live['stop_guard_message'])
+            for _stop in _live.get('normal_stops', []):
+                st.write(f"Stop bảo vệ: **{_stop['side']} {_stop['qty']} HĐ** · "
+                         f"kích hoạt **{_stop['trigger']:,.1f}** · {_stop['state']}")
+            if _live['pnl_vnd'] is not None:
+                st.metric("Lãi/lỗ tài khoản VPS (vm)", f"{_live['pnl_vnd']:,.0f}đ")
+            if _live['loss_latched']:
+                st.error("Đã chạm trần lỗ: khóa mở lệnh đến hết ngày, vẫn quản lý thoát vị thế.")
+            if _live['last_error']:
+                st.error(_live['last_error'])
+            st.caption(f"Đối soát gần nhất: {_live['last_checked'] or 'chưa có'}")
+        except Exception:
+            st.error("Không đọc được sổ lệnh thật; AutoTrade sẽ không gửi thêm lệnh.")
+        st.caption("Loại lệnh: mở kèm SL/TP trên VPS. Các nhánh bảo vệ được sinh khi lệnh gốc khớp.")
         st.caption(
-            "⭐ Lệnh **MẠNH** → đặt tự động · lệnh thường → chỉ **điền sẵn** phiếu, "
-            "bạn bấm xác nhận. Chrome phải chạy bằng `Chay_Chrome_AutoTrade.bat` "
+            ("Mọi tín hiệu hợp lệ được gửi tự động. " if cfg.get('auto_all_signals') else
+             "⭐ MẠNH được gửi tự động; thường chỉ điền phiếu. ") +
+            "Chrome phải chạy bằng `Chay_Chrome_AutoTrade.bat` "
             "và đã đăng nhập SmartPro. "
             f"Trần: {cfg.get('max_qty', 1)} HĐ/lệnh · "
             f"{cfg.get('max_orders_per_day', 6)} lệnh/ngày "
@@ -1649,25 +1697,28 @@ def _render_autotrade_panel():
         _new_all = st.toggle(
             "Tự gửi CẢ tín hiệu thường (không chỉ ⭐ MẠNH)", value=_all, key="at_all",
             help="Tắt (mặc định): chỉ ⭐ MẠNH tự gửi, tín hiệu thường chỉ điền sẵn. "
-                 "Bật: mọi tín hiệu đều tự gửi — tín hiệu thường lịch sử chỉ "
-                 "+0,285đ/lệnh, biên rất mỏng so với phí 0,25đ."
+                 "Bật: mọi tín hiệu hợp lệ đều tự gửi, cùng chịu trần lỗ và kiểm tra vị thế VPS."
         )
+        _new_stop = st.toggle("Stop cắt lỗ cho vị thế lệnh thường đã khớp",
+                              value=cfg.get('normal_stop_enabled', True), key='at_normal_stop',
+                              help="Khi bật gửi thật: bảo vệ mã cấu hình theo giá vốn VPS ± max(3×ATR14, 1 điểm). "
+                                   "Không chồng thêm khi đã có lệnh điều kiện. Tắt không tự hủy Stop còn hiệu lực.")
         _cap0 = int(cfg.get("max_daily_loss_vnd", 0) or 0)
         _new_cap = st.number_input(
             "Trần lỗ trong ngày (VND) — 0 = tắt", min_value=0, step=100_000,
             value=_cap0, key="at_cap",
-            help="Chạm/vượt trần → từ chối MỌI lệnh auto tới hết ngày, kể cả "
-                 "⭐ MẠNH. Tính từ vị thế bot đang theo dõi (ước lượng, có thể "
-                 "lệch PnL thật của tài khoản do trượt giá)."
+            help="Dùng lãi/lỗ tài khoản (vm) do VPS trả về. Chạm trần sẽ khóa mở lệnh "
+                 "đến hết ngày, kể cả sau khởi động lại; vẫn quản lý đóng vị thế thật."
         )
         if (_new_on != _on or _new_dry != _dry or _new_all != _all
-                or _new_cap != _cap0):
+                or _new_cap != _cap0 or _new_stop != cfg.get('normal_stop_enabled', True)):
             if _new_on and not _new_dry and not _sel_ok:
                 st.error("Không thể tắt dry-run khi chưa cấu hình selector.")
             else:
                 cfg["enabled"], cfg["dry_run"] = _new_on, _new_dry
                 cfg["auto_all_signals"] = _new_all
                 cfg["max_daily_loss_vnd"] = int(_new_cap)
+                cfg["normal_stop_enabled"] = _new_stop
                 _cfg_save(cfg)
                 st.rerun()
         if _on and not _dry:
@@ -1684,7 +1735,7 @@ def _render_autotrade_panel():
         _sess_chk = st.session_state.get("ps_at_last_session_chk")
         if _sess_ok is False and _sess_chk is not None:
             st.error(f"⛔ Phiên VPS có vấn đề (kiểm tra lúc {_sess_chk:%H:%M}) — "
-                     f"auto-trade sẽ TỪ CHỐI mọi lệnh cho tới khi bạn đăng nhập lại.")
+                     f"Kiểm tra lại phiên, tài khoản và số tab SmartPro.")
 
         cc1, cc2 = st.columns([1, 1])
         if cc1.button("🔌 Kiểm tra kết nối", key="at_check"):
@@ -1916,6 +1967,14 @@ def _render_daily_report(in_session: bool):
 # ── Nội dung live panel (dùng chung cho cả 2 fragment) ───────────────────────
 def _live_panel_body():
     """Logic signal + hiển thị UI — được gọi từ cả 2 fragment (auto/manual)."""
+    from .auto_trader import load_config as _runtime_config
+    from .autotrade_runtime import ensure_worker
+    _runtime_cfg = _runtime_config()
+    from .vps_telegram import ensure_worker as _ensure_vps_reports
+    if _runtime_cfg.get('telegram_vps_reports', True):
+        _ensure_vps_reports()
+    if _runtime_cfg.get('enabled') and not _runtime_cfg.get('dry_run', True):
+        ensure_worker()
     _owner, _other_age = _claim_ownership()
     if not _owner:
         _left = max(0, _OWNER_TTL_SEC - _other_age)
@@ -1985,6 +2044,13 @@ def _live_panel_body():
         pass
 
     df_1m = st.session_state["ps_df_1m"]
+    if _runtime_cfg.get('normal_stop_enabled', True):
+        from .vps_stop_guard import observe_closed_bars
+        try:
+            observe_closed_bars(_closed_bars(df_1m, 500), _runtime_cfg['symbol_code'])
+        except Exception:
+            pass  # Missing/invalid ATR is reported by the guard; never guess a threshold.
+
 
     # ── Tuổi dữ liệu — chặn giao dịch khi nguồn đã dừng ──────────────────────
     data_age   = _data_age_min(df_1m)
@@ -2026,8 +2092,9 @@ def _live_panel_body():
             try:
                 from .auto_trader import load_config as _at_cfg4, \
                     close_position_async as _at_close2
-                if _at_cfg4().get("enabled"):
-                    _at_close2(_stuck["side"], price=_px)
+                if _at_cfg4().get("enabled") and _stuck.get("auto_signal_id"):
+                    _at_close2(_stuck["side"], qty=_stuck.get("auto_qty", 1), price=_px,
+                               signal_id=_stuck["auto_signal_id"])
             except Exception as _at_e2:
                 st.session_state["ps_errors"].insert(
                     0, f"[auto_trade] đóng (dữ liệu dừng): {type(_at_e2).__name__}: {_at_e2}")
@@ -2119,7 +2186,7 @@ def _live_panel_body():
                         ex_time = (exit_ts.strftime("%Y-%m-%d %H:%M")
                                    if exit_ts is not None else closed_time)
                         _send_telegram_async(
-                            f"{icon} <b>#VN30F1M ĐÓNG {_tg_escape(pos['side'])} "
+                            f"{icon} <b>#VN30F1M MÔ PHỎNG ĐÓNG {_tg_escape(pos['side'])} "
                             f"(lệnh #{pos['tid']})</b>\n"
                             f"{'🟢 THẮNG' if won else '🔴 THUA'}\n"
                             f"📥 Vào: {_fvn(pos['entry'], 1)} → 📤 Ra: {_fvn(exit_px, 1)}\n"
@@ -2156,8 +2223,9 @@ def _live_panel_body():
                         try:
                             from .auto_trader import load_config as _at_cfg5, \
                                 close_position_async as _at_close
-                            if _at_cfg5().get("enabled"):
-                                _at_close(pos["side"], price=exit_px)
+                            if _at_cfg5().get("enabled") and pos.get("auto_signal_id"):
+                                _at_close(pos["side"], qty=pos.get("auto_qty", 1), price=exit_px,
+                                          signal_id=pos["auto_signal_id"])
                         except Exception as _at_e3:
                             st.session_state["ps_errors"].insert(
                                 0, f"[auto_trade] đóng lệnh: "
@@ -2273,6 +2341,9 @@ def _live_panel_body():
                     _tp_r = _TP_R_MULT if st.session_state.get("ps_use_tp") else None
                     pos = _open_position(ai_signal, closed_px, closed_ts, _atr_now,
                                          tid=_tid, tp_r=_tp_r)
+                    pos["auto_signal_id"] = f"{closed_ts.isoformat()}:{ai_signal}"
+                    pos["auto_qty"] = (1 if (st.session_state.get("ps_rule_detail") or {}).get("strong")
+                                       else _runtime_cfg.get("max_qty", 1))
                     st.session_state["ps_position"] = pos
                     _save_ps_state()
                     # Mốc lãi tham chiếu — KHÔNG phải lệnh chốt. Engine cố ý không có
@@ -2285,12 +2356,11 @@ def _live_panel_body():
                     icon = "🚀" if ai_signal == "LONG" else "🔻"
                     _rd = st.session_state.get("ps_rule_detail") or {}
                     _strong_line = (
-                        "⭐ <b>TÍN HIỆU MẠNH</b> — cú tăng tốc MACD thuộc nhóm ~14% "
-                        "mạnh nhất (lịch sử: +1,45đ/lệnh so với +0,29đ nhóm thường)\n"
+                        "⭐ <b>TÍN HIỆU MẠNH</b> — biến thiên MACD histogram/ATR đạt ngưỡng.\n"
                         if _rd.get("strong") else ""
                     )
                     _send_telegram_async(
-                        f"{icon} <b>#VN30F1M MỞ {_tg_escape(ai_signal)} (lệnh #{_tid})</b>\n"
+                        f"{icon} <b>#VN30F1M MÔ PHỎNG MỞ {_tg_escape(ai_signal)} (lệnh #{_tid})</b>\n"
                         + _strong_line +
                         f"📥 Vào: {_fvn(pos['entry'], 1)}  (nến đóng {closed_ts.strftime('%H:%M')})\n"
                         f"🛡️ SL: {_fvn(pos['sl'], 1)}  (rủi ro {_fvn(pos['risk'], 1)}đ = "
@@ -2340,7 +2410,8 @@ def _live_panel_body():
                         if _at_cfg().get("enabled"):
                             _at_submit(ai_signal, bool(_rd.get("strong")),
                                        price=pos["entry"], in_session=in_session,
-                                       sl_price=pos["sl"], tp_price=pos.get("tp"))
+                                       sl_price=pos["sl"], tp_price=pos.get("tp"),
+                                       signal_id=pos["auto_signal_id"], signal_at=closed_ts.isoformat())
                     except Exception as _at_e:
                         st.session_state["ps_errors"].insert(
                             0, f"[auto_trade] {type(_at_e).__name__}: {_at_e}")
