@@ -1394,3 +1394,41 @@ chưa có lệnh thật (bị `_ticket_mode()` từ chối từ 14:16 tới nay,
 ở "Lệnh điều kiện / Stop Loss/Take Profit"). Dữ liệu AmiBroker cũng vừa được xử
 lý riêng (xem lesson 30 — task Task Scheduler treo đã tắt) nên #44 có thể tiếp
 tục đứng yên tới khi có nến mới.
+
+## Phase 28m — Rà soát độc lập bản vá AutoTrade từ phiên OpenAI (08/09/2026)
+
+Phiên OpenAI/Codex (07-08/09) đã xây kiến trúc mới thay thế toàn bộ auto-trade
+DOM-scraping cũ: `vps_broker.py` (đọc/gửi qua API nội bộ VPS, có đối chiếu
+tài khoản SHA-256), `autotrade_runtime.py` (state machine đối soát, khoá file
+cấp OS + Python), `vps_stop_guard.py` (Stop bảo vệ lệnh thường), `vps_telegram.py`
+(báo cáo chỉ đọc). Xem `HANDOFF-AI-VPS-2026-09-08.md` (root) để biết đầy đủ.
+
+- [x] Đọc trực tiếp code (không chỉ tin handoff) — `vps_broker.py`,
+      `autotrade_runtime.py` (đủ 563 dòng), `vps_stop_guard.py`, `vps_telegram.py`,
+      diff `auto_trader.py`/`phaisinh_tab.py`.
+- [x] Chạy lại `pytest tests/` độc lập — **187/187 đạt** (khớp claim "186 passed").
+- [x] Xác minh ĐỘC LẬP claim "MACD dùng nhầm cột signal thay vì histogram":
+      chạy `pandas_ta.macd()` thật, xác nhận thứ tự cột `[MACD, MACDh, MACDs]`
+      — `.iloc[:, 2]` (code cũ) đúng là lấy signal, không phải histogram. Bug
+      THẬT, đã sửa đúng bằng chọn cột theo tên `MACDh_12_26_9`.
+      ⚠️ Hệ quả: mọi ngưỡng calibrate trong CLAUDE.md (`_STRONG_DMH_ATR=0.10`,
+      `_MIN_ATR_RATIO=0.9`...) đã tính trên chỉ báo SAI — cần backtest lại nếu
+      muốn biết ngưỡng có còn tối ưu không (không gấp, bot vẫn chạy được).
+- [x] Đánh giá chung: kiến trúc mới xử lý đúng nhiều lỗi/sự cố đã gặp trước đó
+      trong phiên này (lệnh ma order 184790, tranh chấp đa tiến trình Phase
+      25/26, vấn đề ATC 04/09, SL/TP âm thầm bị từ chối FOS-6012) — chất lượng
+      cao, tự phê bình trung thực trong handoff (không phóng đại).
+- [x] **Phát hiện + vá sự cố vận hành**: Chrome debug-port 9222 giữ đúng
+      cổng nhưng SAI TRANG (SmartOne thay vì SmartPro) suốt 10 ngày liên tục —
+      chính là nguyên nhân worker báo lỗi kết nối liên tục sáng 08/09. Xem
+      lesson 31. Đã đóng tiến trình sai + user tự đăng nhập lại đúng SmartPro.
+- [x] Xây `Kiem_Tra_Chrome_AutoTrade.ps1`/`.bat` + shortcut Desktop — kiểm tra
+      nhanh cổng 9222 có đúng tab SmartPro không trước mỗi phiên (đọc HTTP
+      DevTools endpoint, không cần Playwright).
+- [ ] **Chưa xác nhận full-flow lệnh thật với kiến trúc mới** — hôm nay
+      (08/09, sau khi Chrome đã đúng trang) là lần đầu có cơ hội kiểm chứng.
+      Theo dõi sát tín hiệu đầu tiên trong phiên.
+- [ ] `PermissionError` khi khoá `autotrade_live_state.json.lock` xuất hiện
+      trong log sáng 08/09 — chưa rõ có tái diễn sau khi Chrome đã đúng trang
+      hay không. Nếu còn lặp lại, cần điều tra riêng (nghi ngờ: khoá cũ chưa
+      giải phóng đúng cách từ 1 tiến trình trước đó).

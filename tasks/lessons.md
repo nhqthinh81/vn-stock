@@ -781,3 +781,43 @@ xa, kiểm tra Task Scheduler xem có task tự động nào chạy nguồn dữ
 lâu ngày không (`Get-ScheduledTaskInfo` → `LastRunTime` cũ bất thường so với hôm
 nay + `LastTaskResult` báo "đang chạy" = dấu hiệu treo dài hạn, không phải đang
 chạy bình thường).
+
+## 31. Chrome debug-port giữ đúng cổng nhưng SAI TRANG suốt 10 ngày — không cảnh báo nào bắt được
+
+**Lỗi gặp:** 08/09/2026, worker `autotrade_runtime.py` (bản vá mới từ phiên OpenAI
+07-08/09) liên tục báo lỗi `TimeoutError: connect_over_cdp` + `PermissionError`
+mỗi ~5 giây từ sáng. Kiểm tra tưởng do khoá file (`autotrade_live_state.json.lock`)
+hoặc cấu hình sai — nhưng gốc rễ thật: tiến trình Chrome đang giữ cổng debug
+9222 (PID xác nhận qua `Get-NetTCPConnection -LocalPort 9222`) đã chạy liên tục
+**10 ngày 17 giờ** (từ 28/08), và tiêu đề cửa sổ (`Get-Process | Select
+MainWindowTitle`) là **"SmartOne Web"**, không phải "SmartPro" — nhầm nền tảng.
+
+**Nguyên nhân:** `Chay_Chrome_AutoTrade.bat` dùng `--user-data-dir` RIÊNG + BỀN
+(profile không xoá giữa các lần chạy). Ai đó (rất có thể chính người dùng, điều
+tra thủ công) đã điều hướng đúng cửa sổ debug-port này sang SmartOne tại một
+thời điểm, và vì profile bền + cửa sổ không bao giờ bị đóng, nó cứ ở nguyên
+trạng thái sai suốt 10 ngày. Không có cơ chế nào trong code CŨ kiểm tra "tab
+tìm thấy có ĐÚNG SmartPro không" — `_find_vps_page()` chỉ lọc theo substring
+`"vps.com.vn"` trong URL, mà SmartOne (`smartone.vps.com.vn`) CŨNG khớp substring
+này — nên hàm này có thể ĐÃ từng âm thầm chọn nhầm tab SmartOne trong quá khứ
+mà không ai biết, vì không log rõ URL đầy đủ của tab được chọn.
+
+**Cách vá tạm:** đóng tiến trình Chrome sai (`Stop-Process`), chạy lại
+`Chay_Chrome_AutoTrade.bat`, đăng nhập lại SmartPro. Xây thêm
+`Kiem_Tra_Chrome_AutoTrade.ps1`/`.bat` — đọc `http://127.0.0.1:<port>/json`
+(HTTP endpoint liệt kê tab của Chrome DevTools, KHÔNG cần Playwright) để kiểm
+tra CÓ tab nào URL chứa đúng `smartpro.vps.com.vn` không, cảnh báo rõ nếu không
+kèm liệt kê mọi tab đang mở — chạy TRƯỚC mỗi phiên giao dịch.
+
+**Rule phòng tránh:**
+1. Khi lọc tab theo URL bằng substring, cân nhắc domain con dễ nhầm
+   (`smartone.` vs `smartpro.` cùng gốc `vps.com.vn`) — nên so khớp domain đầy
+   đủ hoặc log rõ URL/tiêu đề tab đã chọn để dễ phát hiện nhầm lẫn sau này.
+2. Với browser profile BỀN dùng cho automation, nên có 1 bước kiểm tra "đúng
+   trang" ĐỘC LẬP, chạy được bất cứ lúc nào (không cần app đang chạy), thay vì
+   chỉ dựa vào log lỗi kết nối chung chung của worker — lỗi timeout/permission
+   không tự nói rõ "sai trang", dễ bị hiểu nhầm thành lỗi khác (khoá file, mất
+   mạng...) và mất thời gian điều tra sai hướng.
+3. Chrome profile bền + cửa sổ không bao giờ đóng có thể "trôi" sang trạng thái
+   sai trong thời gian dài mà không ai biết nếu không có kiểm tra định kỳ chủ
+   động — im lặng không có nghĩa là đúng.
