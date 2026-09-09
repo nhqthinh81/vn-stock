@@ -303,3 +303,36 @@ Kết quả hồi quy cuối: 207 passed (49.73s), git diff --check đạt. Chư
   `VPS-reconcile` spawn lại (nó chỉ chạy khi tab đó render).
 - `lessons.md` mục 33. `data/autotrade_live_state.json` cũ trên ổ sync giờ là file chết —
   xoá được sau khi xác nhận app mới ghi vào đường dẫn local.
+
+### 13.4 Trạng thái cuối phiên 09/09/2026
+
+**Đã commit** (nhánh `phaisinh-v4-hardening`, **chưa push**):
+- `1cb17c2` — gộp bộ phục hồi vị thế qua đêm của Codex + cô lập test khỏi giao dịch
+  thật + chuyển journal khỏi ổ Google Drive + mục "BÁC BỎ day/week/month" trong CLAUDE.md.
+- `bc3a7b0` — sửa bug `REMAIN_QTY` khiến bot tự hủy SL của chính nó (xem `lessons.md` 34).
+
+**Kiểm thử:** 295 passed. App đang chạy bản vá (restart 09/09 ~15:0x, cổng 8501).
+Journal thật nằm ở `%LOCALAPPDATA%\VNInvest\runtime\` — KHÔNG còn dùng `data/`.
+
+**Cấu hình giữ nguyên theo yêu cầu người dùng:** `enabled=true, dry_run=false,
+auto_all_signals=true`, KL 1, `max_orders_per_day=6`, trần lỗ 1.000.000đ,
+`normal_stop_enabled` và `telegram_vps_reports` để mặc định (=true). Người dùng
+từ chối đề xuất hạ `max_orders_per_day` xuống 1 — **không tự ý đổi**.
+
+**Còn tồn, theo thứ tự ưu tiên:**
+1. **Đường THOÁT lệnh chưa một lần thành công.** 08/09 và 09/09 đều bị VPS từ chối.
+   Bug `REMAIN_QTY` giải thích vì sao bot *gọi* thoát, KHÔNG giải thích vì sao VPS
+   *từ chối*. Cần bắt được mã lỗi/phản hồi thật của lệnh thoát bị từ chối.
+2. **Khoá runtime mong manh:** một lời gọi Playwright treo giữ `_THREAD_LOCK`, làm
+   cả `submit_signal` lẫn `request_close` fail `RuntimeError: AutoTrade đang xử lý…`
+   (thấy 09:01, 09:32 ngày 09/09). Chưa có timeout bao quanh lời gọi browser trong khoá.
+   `connect()` dùng `timeout=5000` — quá chặt, đã gây `connect_over_cdp` timeout lặp lại;
+   script chỉ-đọc dùng 30000 thì nối được.
+3. Stop bảo vệ (`vps_stop_guard`) bật nhưng **chưa lần nào đặt được Stop thật**.
+4. `vps_overnight.py` (28 test) chưa lần nào chạy trên vị thế qua đêm thật.
+5. `data/autotrade_live_state.json` + `.tmp` trên ổ sync giờ là file chết — chờ phép xoá.
+6. `auto_trader.save_config()` vẫn `os.replace` trên ổ Google Drive (rủi ro thấp, ghi hiếm).
+
+**Công cụ chỉ đọc để đối soát nhanh:** `scratchpad/ro_snapshot.py` — in vị thế/sổ
+lệnh/điều kiện kèm phán quyết SL dùng chính `protection_coverage()`. Không tick,
+không gửi/hủy lệnh.
