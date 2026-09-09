@@ -217,16 +217,21 @@ def protection_status(cycle, managed, remaining):
             qty=number(c['qty'],'KL điều kiện')
             left=number(c['remaining'],'KL điều kiện còn lại')
             trigger=number(c['trigger'],'giá kích hoạt')
+            # VPS reports REMAIN_QTY = 0 while the branch is still
+            # PENDING_TRIGGER — the child order does not exist yet, so the whole
+            # qty is armed. See vps_stop_guard.protection_coverage for the
+            # incident this caused.
+            armed=qty if left==0 else left
             expected=cycle['sl'] if subtype=='SL' else cycle.get('tp')
             valid=(qty>0 and qty.is_integer() and left.is_integer() and 0<=left<=qty
-                   and c.get('side')==expected_side and expected is not None
+                   and armed>0 and c.get('side')==expected_side and expected is not None
                    and abs(trigger-expected)<0.001)
         except (ValueError,KeyError,TypeError):
             valid=False
         if not valid:
             invalid.append(subtype)
         else:
-            coverage[subtype]+=int(left)
+            coverage[subtype]+=int(armed)
     required=['SL']+(['TP'] if cycle.get('tp') is not None else [])
     confirmed=(not invalid and all(coverage[k]==remaining for k in required)
                and (cycle.get('tp') is not None or coverage['TP']==0))

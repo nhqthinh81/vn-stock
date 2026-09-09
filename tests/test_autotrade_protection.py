@@ -23,7 +23,7 @@ def test_pair_per_partial_fill_aggregates_each_branch(live):
     live.cfg['max_daily_loss_vnd']=2_000_000
     assert enter_pair(live,2)[0]
     rows=live.broker.data['conditions']
-    for row in rows:row.update(qty=1,remaining=1)
+    for row in rows:row.update(qty=1,remaining=0)  # VPS: REMAIN_QTY=0 khi cho kich hoat
     for row in deepcopy(rows):
         row['id']+='second';row['number']+='second'
         rows.append(row)
@@ -51,7 +51,7 @@ def test_missing_tp_waits_then_unwinds_without_second_entry(live):
 
 
 @pytest.mark.parametrize('change',[
-    {'trigger':1974.}, {'side':'B'}, {'remaining':0}, {'remaining':2,'qty':2},
+    {'trigger':1974.}, {'side':'B'}, {'remaining':-1}, {'remaining':2,'qty':2},
     {'remaining':'NaN'}, {'qty':True}, {'status':'PENDING_CANCEL'},
 ])
 def test_wrong_protection_not_reported_as_confirmed(live,change):

@@ -37,8 +37,11 @@ class FakeBroker:
             self.data['orders'].append(order)
             self.data['positions'][0]['net']+=filled*(1 if intent['side']=='LONG' else -1)
             if kind=='entry' and filled:
+                # Real VPS reports REMAIN_QTY = 0 while a condition is still
+                # PENDING_TRIGGER (no child order exists yet). Modelling it as
+                # `filled` here is what hid the coverage bug, so keep it at 0.
                 self.data['conditions'].append(dict(id='SL'+key,number='S'+key,symbol=intent['symbol'],type='sl_tp',
-                    side='S' if intent['side']=='LONG' else 'B',subtype='SL',status='PENDING_TRIGGER',order_status='Pending_New',qty=filled,remaining=filled,
+                    side='S' if intent['side']=='LONG' else 'B',subtype='SL',status='PENDING_TRIGGER',order_status='Pending_New',qty=filled,remaining=0,
                     trigger=intent['sl'],parent=key,parent_number=key,child='null',child_number='null'))
             if kind=='entry' and filled and intent.get('tp') is not None:
                 tp=deepcopy(self.data['conditions'][-1])

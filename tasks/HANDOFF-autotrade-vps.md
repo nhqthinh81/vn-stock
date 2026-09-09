@@ -63,6 +63,7 @@ Journal: `data/autotrade_live_state.json`, file tạm và lock cùng thư mục;
 - So net với khớp mở trừ khớp thoát/SLTP; dữ liệu vị thế chưa đồng bộ không được gây đóng trùng hoặc giải phóng chu kỳ sớm.
 - Hủy phần mở chưa khớp, hủy nhánh bảo vệ chờ, đợi lệnh con và xác nhận hủy, rồi mới gửi thoát phần còn lại.
 - `protection_status`: chỉ đếm subtype SL/TP, kiểm tra chiều/giá/KL; cộng từng nhánh qua nhiều phần khớp. Bật TP thì cả hai nhánh phải đủ, không chỉ thấy một SL là kết luận đã bảo vệ đủ.
+- ⚠️ **`remaining` (= `REMAIN_QTY`) BẰNG 0 với mọi điều kiện đang `PENDING_TRIGGER`** — lệnh con chưa tồn tại. Khối lượng đang bảo vệ là `qty`, không phải `remaining`. Cả `protection_status` lẫn `vps_stop_guard.protection_coverage` dùng `armed = qty if left==0 else left`. Đọc 0 thành "chưa bảo vệ" từng khiến bot tự hủy SL/TP rồi thoát vị thế (sự cố 09/09, xem `lessons.md` mục 34) — ĐỪNG siết lại thành `0<left`.
 - Nhánh thiếu/sai từ phản hồi đầu được chờ đồng bộ 30 giây mặc định rồi yêu cầu thoát có đối soát. Lệnh đã biết biến mất thì giữ khóa, không suy đoán đã hủy.
 - Lưu `protection_fills` để chặn khối lượng lệnh con lùi qua restart.
 - Giới hạn lỗ dùng `vm`, khóa mở mới đến hết ngày, vẫn cho quản lý thoát. Không cộng thêm unrelizeVM hoặc PnL mô phỏng. Không khẳng định vm là lãi/lỗ sau mọi phí hay giới hạn bảo đảm tuyệt đối giá khớp.

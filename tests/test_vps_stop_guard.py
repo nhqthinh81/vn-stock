@@ -18,7 +18,7 @@ def protect(live,monkeypatch):
         if kind=='protect_stop':
             key='stop-'+str(len(b.data['conditions']))
             b.data['conditions'].append(dict(id=key,number=key,symbol=intent['symbol'],type='stop',
-                subtype=None,side='S' if intent['side']=='SHORT' else 'B',qty=intent['qty'],remaining=intent['qty'],
+                subtype=None,side='S' if intent['side']=='SHORT' else 'B',qty=intent['qty'],remaining=0,  # VPS: REMAIN_QTY=0 khi con PENDING_TRIGGER
                 trigger=intent['trigger'],relation=intent['relation'],price_type='MTL',status='PENDING_TRIGGER',
                 order_status='Pending_New',parent='null',parent_number='null',child='null',child_number='null'))
         else:original(kind,intent)
@@ -274,7 +274,7 @@ def test_closed_bars_atr_publication_rejects_bad_data(protect,monkeypatch):
 
 
 
-@pytest.mark.parametrize('change',[{'remaining':0},{'remaining':'NaN'}])
+@pytest.mark.parametrize('change',[{'remaining':'NaN'},{'remaining':-1},{'remaining':2}])
 def test_owned_pending_stop_without_verified_quantity_is_not_protected(protect,change):
     assert rt.tick()[0]
     protect.broker.data['conditions'][0].update(change)
@@ -307,3 +307,59 @@ def test_previous_day_child_id_is_never_matched_to_new_day_order(protect):
     assert current()['state']=='UNKNOWN'
     assert 'không ghép ID sang phiên mới' in rt.status()['stop_guard_message']
     assert len(protect.broker.sent)==count
+
+
+# Hàng dữ liệu THẬT đọc từ VPS lúc 13:52 ngày 09/09/2026 (đã bỏ id/số hiệu thật).
+# REMAIN_QTY = 0 dù lệnh điều kiện đang PENDING_TRIGGER và bảo vệ đủ 1 HĐ —
+# đọc 0 thành "chưa có gì bảo vệ" khiến runtime tự hủy SL/TP của chính nó rồi
+# thoát vị thế; VPS từ chối lệnh thoát và bot đóng băng, để vị thế thật nằm trần.
+def _live_row(**over):
+    row = dict(id='STOP_LIVE', number='n1', symbol='41I1G9000', type='sl_tp',
+               subtype='SL', side='B', qty=1, remaining=0, trigger=1973.4,
+               relation='GTEQ', status='PENDING_TRIGGER', order_status='Pending_New',
+               parent='null', parent_number='null', child='null', child_number='null')
+    row.update(over)
+    return row
+
+
+def test_pending_condition_with_zero_remain_qty_counts_as_protection(protect):
+    """REMAIN_QTY=0 khi chờ kích hoạt nghĩa là CẢ qty đang bảo vệ, không phải 0."""
+    snapshot = protect.broker.snapshot()
+    pos = snapshot['positions'][0]
+    pos.update(net=-1, avg=1971.2, last=1971.3)
+    snapshot['conditions'] = [_live_row()]
+    cover = sg.protection_coverage(snapshot, pos)
+    assert cover['confirmed'], cover
+    assert cover['sl_qty'] == 1 and cover['required_qty'] == 1
+
+
+def test_zero_remain_qty_also_counts_for_standalone_stop(protect):
+    snapshot = protect.broker.snapshot()
+    pos = snapshot['positions'][0]
+    pos.update(net=-1, avg=1971.2, last=1971.3)
+    snapshot['conditions'] = [_live_row(type='stop', subtype=None, price_type='MTL')]
+    assert sg.protection_coverage(snapshot, pos)['confirmed']
+
+
+@pytest.mark.parametrize('bad', [
+    {'remaining': -1},          # âm: dữ liệu hỏng
+    {'remaining': 2},           # nhiều hơn qty: không nhất quán
+    {'remaining': 'NaN'},
+    {'remaining': 0.5},         # không nguyên
+])
+def test_inconsistent_remain_qty_is_still_rejected(protect, bad):
+    snapshot = protect.broker.snapshot()
+    pos = snapshot['positions'][0]
+    pos.update(net=-1, avg=1971.2, last=1971.3)
+    snapshot['conditions'] = [_live_row(**bad)]
+    assert not sg.protection_coverage(snapshot, pos)['confirmed']
+
+
+def test_partial_remain_qty_is_trusted_when_broker_reports_it(protect):
+    """Nếu broker CÓ điền remaining thì tôn trọng nó (khớp một phần)."""
+    snapshot = protect.broker.snapshot()
+    pos = snapshot['positions'][0]
+    pos.update(net=-2, avg=1971.2, last=1971.3)
+    snapshot['conditions'] = [_live_row(qty=2, remaining=1)]
+    cover = sg.protection_coverage(snapshot, pos)
+    assert not cover['confirmed'] and cover['sl_qty'] == 1 and cover['required_qty'] == 2

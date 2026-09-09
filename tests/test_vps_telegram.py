@@ -349,7 +349,7 @@ def test_failed_final_retries_are_bounded_and_wait_five_minutes(report):
 
 
 @pytest.mark.parametrize('change',[
-    {'subtype':'TP'}, {'side':'B'}, {'remaining':0}, {'status':'PENDING_CANCEL'},
+    {'subtype':'TP'}, {'side':'B'}, {'remaining':-1}, {'status':'PENDING_CANCEL'},
     {'qty':2,'remaining':2}, {'trigger':1999.}, {'remaining':'NaN'},
 ])
 def test_pending_condition_does_not_hide_unprotected_position(report,change):

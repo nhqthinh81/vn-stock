@@ -925,3 +925,55 @@ giao dịch cũ → nguy hiểm hơn là để tick() giữ khóa an toàn.
 3. Khi "sửa file bị hỏng lặp lại", kiểm MÔI TRƯỜNG (loại ổ đĩa, sync client, antivirus
    real-time) trước khi nghi logic ghi — `save_state()` ở đây vốn đã đúng chuẩn
    tmp+fsync+replace.
+
+## 34. Bot TỰ HỦY SL của chính nó rồi bỏ vị thế trần — hiểu sai ngữ nghĩa `REMAIN_QTY`
+
+**Lỗi gặp (09/09/2026, tiền thật):** 13:52 bot mở SHORT 1 HĐ VN30F1M kèm bracket
+SL 1973.4 / TP 1957.3. VPS NHẬN bracket. 30 giây sau bot kết luận "SL/TP thiếu
+hoặc sai ngưỡng/KL", **tự hủy cả hai nhánh bảo vệ**, gửi lệnh thoát → VPS TỪ
+CHỐI → chốt chống-gửi-trùng đóng băng bot → **vị thế thật nằm trần, không ai
+quản**. Người dùng phải tự đặt Stop tay. Lặp lại gần như y hệt sự cố 08/09.
+
+**Nguyên nhân gốc:** `vps_broker.py` map `remaining <- x.REMAIN_QTY`. VPS trả
+**`REMAIN_QTY = 0` cho MỌI lệnh điều kiện đang `PENDING_TRIGGER`** — vì lệnh con
+chưa tồn tại, chưa có gì để "còn lại". Nhưng cả hai bộ đếm bảo vệ đều đọc 0
+thành "không có gì bảo vệ":
+
+```python
+# vps_stop_guard.protection_coverage  (cu)
+valid = (... and 0<left<=qty and ...)     # left=0 -> luon False
+if valid: covered += int(left)            # va cong 0
+
+# autotrade_runtime.protection_status    (cu)
+valid = (... 0<=left<=qty ...)            # qua duoc
+coverage[subtype] += int(left)            # nhung cong 0 -> van khong du
+```
+
+⇒ `confirmed` **KHÔNG BAO GIỜ** đúng được. Mà thiết kế lại quy định: bảo vệ
+không xác nhận được → hủy nhánh bảo vệ rồi thoát vị thế. Nên **mỗi lệnh bot mở
+đều tự động bị chính nó gỡ SL và cố thoát**, chỉ 30 giây sau khi vào.
+
+**Vì sao test không bắt được:** fake broker trong test tạo điều kiện với
+`remaining = qty` (hoặc `remaining=1`) — KHÔNG giống VPS thật. Tệ hơn, có 3 test
+*khẳng định* `remaining: 0` nghĩa là chưa được bảo vệ, tức bộ test đang **mã hoá
+chính giả định sai** và bảo vệ nó khỏi bị sửa.
+
+**Cách vá:** ở cả hai hàm, `armed = qty if left == 0 else left`; cộng `armed`,
+và nới điều kiện thành `0 <= left <= qty and armed > 0`. Vẫn từ chối `remaining`
+âm, > qty, không nguyên, NaN. Fake broker đổi sang `remaining=0` cho khớp thật.
+Thêm `tests/test_vps_stop_guard.py` bộ test ghim đúng hàng dữ liệu THẬT bắt được
+lúc 13:52. Xác minh lại trên hàng thật đó: `confirmed=True` cho cả hai hàm.
+
+**Rule phòng tránh:**
+1. Trường số lượng của API môi giới phải được **quan sát trên dữ liệu thật** rồi
+   mới viết điều kiện — `REMAIN_QTY`/`remaining`/`left` với lệnh điều kiện CHƯA
+   kích hoạt hầu như luôn là 0, không phải "khối lượng còn được bảo vệ".
+2. Fake/mock của broker phải **sao chép nguyên trạng thái quan sát được**, kể cả
+   những giá trị trông "vô lý". Mock đẹp hơn thật = test xanh trong khi
+   production hỏng.
+3. Khi một chốt an toàn (`confirmed`) không bao giờ đạt được, hệ quả KHÔNG phải
+   "an toàn hơn" mà là hệ thống liên tục kích hoạt đường xử lý sự cố — ở đây là
+   tự gỡ bảo vệ rồi thoát. Cơ chế fail-safe cần test cho cả nhánh "đạt", không
+   chỉ nhánh "không đạt".
+4. Nghi ngờ một chốt không bao giờ đúng thì kiểm bằng **dữ liệu sản xuất thật**
+   (`Broker.snapshot()` chỉ đọc), đừng tin fake.

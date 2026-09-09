@@ -61,13 +61,20 @@ def protection_coverage(snapshot,position):
         try:
             qty=number(c['qty'],'qty');left=number(c['remaining'],'remaining')
             trigger=number(c['trigger'],'trigger');last=number(position['last'],'last')
+            # VPS maps remaining <- REMAIN_QTY, which is 0 while the condition is
+            # still PENDING_TRIGGER: the child order does not exist yet, so the
+            # size protecting the position is qty. Reading 0 as "nothing armed"
+            # made coverage impossible to confirm, so the runtime cancelled its
+            # own SL/TP and tried to unwind every position it opened. Trust
+            # `remaining` only once the broker actually fills it in.
+            armed=qty if left==0 else left
             valid=(c['id'] not in seen and qty>0 and qty.is_integer() and left.is_integer()
-                   and 0<left<=qty and c['side']==('S' if net>0 else 'B')
+                   and 0<=left<=qty and armed>0 and c['side']==('S' if net>0 else 'B')
                    and last>0 and trigger>0 and (trigger<last if net>0 else trigger>last))
             if c['type']=='stop':
                 valid=valid and c.get('relation')==('LTEQ' if net>0 else 'GTEQ') and c.get('price_type')=='MTL'
             seen.add(c['id'])
-            if valid:covered+=int(left)
+            if valid:covered+=int(armed)
             else:invalid=True
         except (ValueError,KeyError,TypeError):invalid=True
     return dict(confirmed=not invalid and covered==required,sl_qty=covered,required_qty=required)
