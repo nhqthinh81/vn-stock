@@ -4,7 +4,11 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# Read-only reports start on every app entry, regardless of the selected tab.
+from vn_invest.vps_telegram import ensure_worker as ensure_vps_reports
+ensure_vps_reports()
 _api_key = os.getenv("VNSTOCK_API_KEY")
 if _api_key:
     try:

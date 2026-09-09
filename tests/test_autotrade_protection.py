@@ -19,6 +19,8 @@ def test_both_branches_confirmed(live):
 
 
 def test_pair_per_partial_fill_aggregates_each_branch(live):
+    # Synthetic budget permits this reconciliation fixture's large position.
+    live.cfg['max_daily_loss_vnd']=2_000_000
     assert enter_pair(live,2)[0]
     rows=live.broker.data['conditions']
     for row in rows:row.update(qty=1,remaining=1)
@@ -92,6 +94,8 @@ def test_manual_close_cancels_both_branches_before_exit(live):
 
 
 def test_short_pair_uses_buy_protection(live):
+    # Synthetic budget permits this reconciliation fixture's large position.
+    live.cfg['max_daily_loss_vnd']=2_000_000
     assert at.submit_signal('SHORT',True,1981.5,True,1995.,1975.,'short',live.clock[0].isoformat())[0]
     assert rt.status()['protection']['confirmed']
     assert all(c['side']=='B' for c in live.broker.data['conditions'])
@@ -102,6 +106,8 @@ def test_short_pair_uses_buy_protection(live):
 
 
 def test_protective_child_fill_cannot_regress_after_restart(live):
+    # Synthetic budget permits this reconciliation fixture's large position.
+    live.cfg['max_daily_loss_vnd']=2_000_000
     enter_pair(live,2)
     sl=live.broker.data['conditions'][0]
     sl.update(status='TRIGGERED',order_status='Partial_filled',child='child',child_number='child')
@@ -115,3 +121,15 @@ def test_protective_child_fill_cannot_regress_after_restart(live):
     assert not rt.tick()[0]
     assert len(live.broker.sent)==1
     assert rt.active_cycle(rt.load_state())['protection_fills']['child']==1
+
+
+
+def test_missing_bot_protection_is_not_reported_as_managed_safely(live):
+    from vn_invest.vps_stop_guard import reconcile_stops
+    assert live.enter()[0]
+    live.broker.data['conditions'][0]['status']='CANCELED'
+    state=rt.load_state()
+    count=len(live.broker.sent)
+    reconcile_stops(state,live.broker,live.broker.snapshot(),live.cfg,live.clock[0],False)
+    assert 'chưa xác nhận đủ SL/Stop (0/1 HĐ)' in state['stop_guard_message']
+    assert len(live.broker.sent)==count

@@ -58,3 +58,7 @@ Thumbs.db
 data/autotrade_live_state.json
 data/autotrade_live_state.tmp
 data/autotrade_live_state.json.lock
+
+# Local Telegram worker diagnostics
+data/vps_telegram_health.json
+data/vps_telegram_health.json.*.tmp

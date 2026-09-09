@@ -1204,6 +1204,39 @@ sau ~2-3 tháng trước khi cân nhắc bất kỳ thay đổi hành vi nào.
 cách tới VWAP, dấu mh đồng pha, bền vững 2 nến, nghỉ sau SL, cầu dao thua K
 lệnh/ngày — tất cả đều giảm tổng lợi nhuận so với v4 chuẩn (+844đ).
 
+### Đáy/đỉnh khung day/week/month — BÁC BỎ toàn bộ (vòng 5, 09/09/2026)
+
+Đo trên 69.417 nến (11/07/2025–09/09/2026). Baseline harness tái hiện v4:
++0,341đ/lệnh · win 45,7% · 5/5 quý (công bố +0,349đ · 44,9% · 5/5 — lệch 2%).
+
+**Làm mốc SL — bất khả thi vì lệch quy mô.** SL hiện tại trung vị 5,79đ.
+Đáy/đỉnh trong ngày 13,8đ (2,4×) · ngày trước 24,1đ (4,2×) · tuần 59,9đ (10,4×)
+· tháng 121,6đ (21,0×). Quy ra tiền, cổng ngân sách lỗ trong `submit_signal`
+(trần 1tr/ngày) từ chối **68,7% / 82,9% / 91,2% / 95,7%** số tín hiệu — bot gần
+như ngừng giao dịch. Mốc còn nằm SAI PHÍA lúc vào lệnh: ngày 7,4%, tuần 19,1%,
+tháng 21,0%.
+
+**Làm mốc TP — bất khả đạt.** MFE trong 30 nến: trung vị 4,40đ, p90 13,2đ. TP
+tại đỉnh ngày trước (mục tiêu trung vị 15,3đ) chỉ chạm 17,1% số lệnh; tuần 7,1%;
+tháng 3,0%. Và đúng nhóm chạm được lại là đuôi lãi lớn — cắt nó luôn tệ hơn
+(xem "KHÔNG có take-profit mặc định").
+
+**Làm BỘ LỌC bối cảnh (SL vẫn 3×ATR) — không có tín hiệu.**
+- Né vào lệnh khi cách mốc đối diện ≤X điểm, quét X=1..10 trên cả 3 khung: mọi
+  cấu hình đều ≤ baseline về tổng lợi nhuận. Riêng tháng X=4 (+0,361đ, tổng
+  732,2) là *nhiễu*: toàn bộ mức tăng đến từ đúng **9 lệnh** trung bình −4,19đ,
+  trong khi 1 s.e. trên 9 lệnh = 2,43đ (stdev/lệnh 7,29đ). Quét không đơn điệu
+  (X=3 kém, X=4 tốt, X=5 kém, X=6 tốt) — đỉnh nhọn khớp nhiễu.
+- Yêu cầu breakout vượt mốc: tuần +0,155đ (2/5 quý), tháng **−0,028đ** (2/5 quý).
+  Ngày cho +0,395đ/lệnh nhìn có vẻ hơn baseline, nhưng **hoán vị 20.000 lần
+  (lấy ngẫu nhiên 924/2.037 lệnh) cho p = 0,377** — không phân biệt được với
+  chọn ngẫu nhiên. Nó vứt **329,1đ = 47% tổng lợi nhuận** và biến quý 2026Q2 từ
+  +18,3 thành **−73,3**.
+
+Lý do gốc: v4 giữ ≤30 nến 1 phút rồi đóng cuối phiên; đáy/đỉnh day/week/month là
+hình học của khung giữ NHIỀU NGÀY. Muốn dùng các mốc đó thì phải là một engine
+swing riêng, tự chứng minh edge từ đầu — không phải chỉnh sửa v4.
+
 ### Đặt lệnh tự động VPS SmartPro — `vn_invest/auto_trader.py` (Phase 28)
 User yêu cầu bám trình duyệt đăng nhập sẵn để bù độ trễ đọc-tin-nhắn-rồi-vào-tay.
 Nối qua Chrome DevTools Protocol (`--remote-debugging-port=9222`, profile

@@ -135,8 +135,14 @@ _SEND_JS = r'''async ({kind, intent, accountRef}) => {
     if (!r.ok) return {outcome:'UNKNOWN'};
     const j = await r.json();
     // Do not pass raw server errors or credential-bearing request data to logs.
-    if (Number(j.rc) <= 0) return {outcome:'REJECTED'};
-    if (Number(j.rc) !== 1) return {outcome:'UNKNOWN'};
+    // null/false/blank must not become zero and masquerade as a rejection.
+    const raw = j?.rc;
+    if (!(typeof raw === 'number' || (typeof raw === 'string' && /^-?\d+$/.test(raw.trim()))))
+        return {outcome:'UNKNOWN'};
+    const rc = Number(raw);
+    if (!Number.isSafeInteger(rc)) return {outcome:'UNKNOWN'};
+    if (rc <= 0) return {outcome:'REJECTED',response_rc:rc};
+    if (rc !== 1) return {outcome:'UNKNOWN',response_rc:rc};
     return {outcome:'ACK'};
 }'''
 
@@ -170,6 +176,7 @@ class Broker:
         return raw
 
     def snapshot(self, since=None):
+        started = now_vn()
         account = self._read('Web.Portfolio.AccountStatus')
         pos = self._read('Web.Portfolio.PortfolioStatus2')
         ref = account['account_ref']
@@ -197,8 +204,11 @@ class Broker:
             x['state'] = order_state(x)
             x['qty'], x['filled'] = int(float(x['qty'])), int(float(x['filled']))
             x['avg'] = number(x['avg'],'giá khớp') if x['filled'] else 0
+        checked = now_vn()
+        if checked.date() != started.date():
+            raise ValueError('Ngày giao dịch thay đổi trong lúc đọc VPS; cần đọc lại')
         return dict(account_ref=ref,pnl_vnd=number(account['data']['vm'],'lãi/lỗ VPS'),
-                    positions=pos['data'],orders=orders,conditions=conditions,checked_at=now_vn().isoformat())
+                    positions=pos['data'],orders=orders,conditions=conditions,checked_at=checked.isoformat())
 
     def send(self, kind, intent, account_ref):
         try:

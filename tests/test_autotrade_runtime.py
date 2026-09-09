@@ -144,6 +144,8 @@ def test_cancel_timeout_never_closes_or_resends(live):
 
 
 def test_partial_fill_cancel_parent_then_protection_then_close(live):
+    # Synthetic budget permits this reconciliation fixture's large position.
+    live.cfg['max_daily_loss_vnd']=2_000_000
     live.cfg['max_qty']=2
     live.broker.fill_qty=1
     ok,_=at.submit_signal('LONG',False,1981.5,True,1975.,None,'partial',live.clock[0].isoformat())
@@ -309,6 +311,8 @@ def test_triggered_sl_fill_with_stale_position_never_sends_exit(live):
 
 
 def test_partial_exit_canceled_then_only_remaining_quantity(live):
+    # Synthetic budget permits this reconciliation fixture's large position.
+    live.cfg['max_daily_loss_vnd']=2_000_000
     live.cfg['max_qty']=2
     assert at.submit_signal('LONG',False,1981.5,True,1975.,None,'two',live.clock[0].isoformat())[0]
     rt.request_close('LONG',qty=2,signal_id='two')
@@ -359,3 +363,18 @@ def test_live_session_check_reads_server(live,monkeypatch):
     live.broker.fail_read=True
     assert not at.check_session()[0]
     assert not live.broker.sent
+
+
+
+def test_rejected_exit_remains_visible_after_continuous_session(live):
+    assert live.enter()[0]
+    assert rt.request_close('LONG',signal_id='signal-1')[0]
+    rt.tick()  # cancel protection
+    live.broker.outcome='REJECTED'
+    rt.tick()  # broker rejects the exit
+    count=len(live.broker.sent)
+    live.clock[0]=live.clock[0].replace(hour=14,minute=35)
+    assert rt.tick()[0]
+    assert 'Journal ghi REJECTED' in rt.status()['last_error']
+    assert rt.status()['cycle_state']=='CLOSING'
+    assert len(live.broker.sent)==count

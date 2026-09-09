@@ -15,7 +15,25 @@ from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from .vps_broker import connect, now_vn, VN, number
 
-STATE_PATH = Path(__file__).resolve().parent.parent / 'data' / 'autotrade_live_state.json'
+_OLD_DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
+
+
+def runtime_dir() -> Path:
+    """Durable autotrade files live on LOCAL disk, never a synced drive.
+
+    The repo tree here sits on a Google Drive virtual filesystem where
+    os.replace is not atomic: concurrent sync activity concatenates the
+    pre-image tail onto a fresh short write, so save_state() output kept coming
+    back as `Extra data` JSON. Falls back to the in-repo data/ dir off Windows
+    or when no local app-data path is known. Override with VNINVEST_RUNTIME_DIR.
+    """
+    base = os.environ.get('VNINVEST_RUNTIME_DIR') or (
+        os.environ.get('LOCALAPPDATA') if os.name == 'nt' else None)
+    return Path(base) / 'VNInvest' / 'runtime' if base else _OLD_DATA_DIR
+
+
+_DEFAULT_STATE_PATH = runtime_dir() / 'autotrade_live_state.json'
+STATE_PATH = _DEFAULT_STATE_PATH
 _THREAD_LOCK = threading.Lock()
 _WORKER_LOCK = threading.Lock()
 _WORKER = None
@@ -24,7 +42,20 @@ TERMINAL = {'FILLED', 'CANCELED', 'REJECTED', 'NOT_SENT'}
 COND_TERMINAL = {'CANCELED', 'EXPIRED', 'REJECTED'}
 
 
+def _migrate_state_off_synced_drive():
+    """One-time copy of a still-valid journal from the old in-repo data/ dir."""
+    old = _OLD_DATA_DIR / 'autotrade_live_state.json'
+    try:
+        data = json.loads(old.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return  # missing or already corrupted on the synced drive — start fresh
+    if isinstance(data, dict) and data.get('version') == 1 and isinstance(data.get('cycles'), list):
+        save_state(data)
+
+
 def load_state():
+    if not STATE_PATH.exists() and STATE_PATH == _DEFAULT_STATE_PATH and runtime_dir() != _OLD_DATA_DIR:
+        _migrate_state_off_synced_drive()
     if not STATE_PATH.exists():
         days = {}
         legacy = STATE_PATH.with_name('autotrade_state.json')
@@ -131,7 +162,9 @@ def _position(snapshot,symbol):
     return rows[0] if rows else {'symbol':symbol,'net':0,'last':0,'avg':0,'due':None}
 
 
-def _match_intent(intent,orders):
+def _match_intent(intent,orders,trade_date=None):
+    if trade_date and intent.get('submitted_at','')[:10]!=trade_date:
+        return None
     if intent.get('broker_id'):
         matches = [o for o in orders if o['id']==intent['broker_id']]
     else:
@@ -152,6 +185,7 @@ def _match_intent(intent,orders):
         raise ValueError('Khối lượng khớp VPS lùi so với sổ đã lưu')
     intent.update(broker_id=o['id'],broker_number=o['number'],state=o['state'],
                   filled=o['filled'],avg=o['avg'])
+    if trade_date:intent['verified_date']=trade_date
     return o
 
 
@@ -219,6 +253,8 @@ def _dispatch(state,broker,intent):
     save_state(state)
     reply=broker.send(intent['kind'],intent,state['account_ref'])
     intent['state']=reply.get('outcome','UNKNOWN')
+    if type(reply.get('response_rc')) is int:
+        intent['response_rc']=reply['response_rc']  # numeric protocol status only, no server body
     if intent['state'] not in ('ACK','REJECTED','UNKNOWN'):
         intent['state']='UNKNOWN'
     save_state(state)
@@ -226,6 +262,11 @@ def _dispatch(state,broker,intent):
 
 def _cancel(state,cycle,broker,kind,target,typ=None):
     key=kind+':'+target
+    if kind=='cancel_order':
+        legacy=cycle['cancels'].get(key)
+        date=now_vn().date().isoformat()
+        if not legacy or legacy.get('submitted_at','')[:10]!=date:
+            key=kind+':'+date+':'+target
     previous=cycle['cancels'].get(key)
     if previous:
         if previous['state']=='NOT_SENT':
@@ -247,10 +288,14 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
     cycle=active_cycle(state)
     if not cycle:
         return
+    from . import vps_overnight as overnight
+    if cycle['created_at'][:10]<now.date().isoformat():
+        overnight.reconcile(state,cycle,broker,snapshot,cfg,now,allow_actions)
+        return
     entry=cycle['entry']
-    entry_row=_match_intent(entry,snapshot['orders'])
+    entry_row=_match_intent(entry,snapshot['orders'],snapshot['checked_at'][:10])
     for ex in cycle['exits']:
-        row = _match_intent(ex,snapshot['orders'])
+        row = _match_intent(ex,snapshot['orders'],snapshot['checked_at'][:10])
         if ex.get('broker_id') and row is None:
             state['last_error']='Thiếu lệnh thoát đã biết; giữ khóa đối soát'
             save_state(state); return
@@ -340,6 +385,7 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
         cycle.pop('protection_unconfirmed_at',None)
     if net==0 and entry_done:
         cycle.setdefault('close_reason','Vị thế VPS đã phẳng')
+    overnight.checkpoint(cycle,snapshot,now)
     closing=bool(cycle.get('close_reason'))
     cycle['state']='CLOSING' if closing else ('OPEN' if filled else 'OPENING')
     save_state(state)
@@ -373,11 +419,11 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
         if net==0:
             cycle['state']='CLOSED'; cycle['closed_at']=now.isoformat()
             save_state(state); return
+        if cycle['exits'] and cycle['exits'][-1]['state']=='REJECTED':
+            state['last_error']='Journal ghi REJECTED cho yêu cầu thoát; cần đối chiếu trạng thái và lý do trên SmartPro'
+            save_state(state); return
         if not continuous(now):
             state['last_error']='Còn vị thế; chờ phiên liên tục để gửi MTL (không gửi MTL vào ATC)'
-            save_state(state); return
-        if cycle['exits'] and cycle['exits'][-1]['state']=='REJECTED':
-            state['last_error']='VPS từ chối lệnh thoát; cần xử lý trên SmartPro'
             save_state(state); return
         intent={'id':uuid.uuid4().hex,'kind':'exit','symbol':cycle['symbol'],
                 'side':'SHORT' if sign==1 else 'LONG','qty':abs(net),
@@ -423,15 +469,19 @@ def submit(side,strong,price,in_session,sl_price,tp_price,signal_id=None,signal_
     except (TypeError,ValueError):
         return False,'Thời gian tín hiệu không hợp lệ'
     stamp=stamp.replace(tzinfo=VN) if stamp.tzinfo is None else stamp.astimezone(VN)
-    if not -5 <= (now-stamp).total_seconds() <= cfg.get('max_signal_age_seconds',120):
-        return False,'Tín hiệu đã cũ; không gửi bù'
+    # signal_at is when the closed-bar signal became available, not bar open.
+    age=(now-stamp).total_seconds()
+    max_age=cfg.get('max_signal_age_seconds',120)
+    if not -5 <= age <= max_age:
+        return False,f'Tín hiệu đã cũ hoặc chưa hiệu lực; không gửi bù (tuổi {age:.1f}s, giới hạn {max_age}s)'
     key=signal_id or f'{stamp:%Y-%m-%dT%H:%M}:{side}:{price:.1f}'
     try:
         with locked_state() as state, connect(cfg) as broker:
             snapshot=broker.snapshot()
             now=now_vn()
-            if not entry_session(now) or not -5 <= (now-stamp).total_seconds() <= cfg.get('max_signal_age_seconds',120):
-                return False,'Tín hiệu/phiên đã hết hiệu lực trong lúc chờ'
+            age=(now-stamp).total_seconds()
+            if not entry_session(now) or not -5 <= age <= max_age:
+                return False,f'Tín hiệu/phiên đã hết hiệu lực trong lúc chờ (tuổi {age:.1f}s, giới hạn {max_age}s)'
             reconcile(state,broker,snapshot,cfg,now,allow_actions=False)
             if any(c['signal_id']==key for c in state['cycles']):
                 return False,'Tín hiệu đã xử lý — không gửi trùng'
@@ -455,11 +505,22 @@ def submit(side,strong,price,in_session,sl_price,tp_price,signal_id=None,signal_
                 return False,'Chưa xác minh được hạn hợp đồng trên VPS'
             if pos['last']<=0 or abs(pos['last']-price)/price*100>cfg.get('max_price_drift_pct',3):
                 return False,'Giá tín hiệu lệch giá VPS hoặc không có giá hợp lệ'
+            if sign*(pos['last']-sl_price)<=0 or (tp_price is not None and sign*(tp_price-pos['last'])<=0):
+                return False,'Giá VPS đã chạm/vượt SL/TP của tín hiệu; không mở lệnh muộn'
+            # Nominal loss at the limit-entry price; stop slippage/fees can add loss.
+            from .auto_trader import _PT_VALUE_VND
+            cap=int(cfg.get('max_daily_loss_vnd',0) or 0)
+            if cap>0:
+                budget=max(0.,min(float(cap),cap+snapshot['pnl_vnd']))
+                stop_loss=round(abs(price-sl_price)*qty*_PT_VALUE_VND,2)
+                if stop_loss>budget:
+                    return False,(f'Rủi ro tới SL {stop_loss:,.0f}đ vượt ngân sách lỗ còn lại '
+                                  f'{budget:,.0f}đ; chưa gồm phí/trượt giá — không mở lệnh')
             intent={'id':uuid.uuid4().hex,'kind':'entry','symbol':cfg['symbol_code'],'side':side,
                     'qty':qty,'price':round(price,1),'sl':round(sl_price,1),
                     'tp':round(tp_price,1) if tp_price is not None else None,
                     'before_ids':[o['id'] for o in snapshot['orders']],'filled':0}
-            cycle={'signal_id':key,'symbol':intent['symbol'],'side':side,'state':'OPENING',
+            cycle={'signal_id':key,'signal_at':stamp.isoformat(),'symbol':intent['symbol'],'side':side,'state':'OPENING',
                    'sl':intent['sl'],'tp':intent['tp'],'exit_at':_deadline(now,30),
                    'entry':intent,'exits':[],'cancels':{},'created_at':now.isoformat()}
             state['cycles'].append(cycle)
@@ -535,6 +596,8 @@ def status():
                 cycle_state=cycle['state'] if cycle else 'FLAT',last_error=_LAST_ERROR or state.get('last_error',''),
                 side=cycle['side'] if cycle else None,
                 sl=cycle['sl'] if cycle else None,tp=cycle.get('tp') if cycle else None,
+                overnight=bool(cycle and cycle.get('overnight')),
+                overnight_checkpoint_status=cycle.get('overnight_checkpoint_status','') if cycle else '',
                 protection=cycle.get('protection') if cycle else None,
                 stop_guard_message=state.get('stop_guard_message',''),
                 normal_stops=[{'state':g['state'],'qty':g['intent']['qty'],
@@ -544,6 +607,8 @@ def status():
 
 def ensure_worker():
     global _WORKER
+    if os.environ.get('PYTEST_CURRENT_TEST'):
+        return  # never spawn the live Chrome/VPS reconcile thread inside a test process
     with _WORKER_LOCK:
         if _WORKER and _WORKER.is_alive():
             return

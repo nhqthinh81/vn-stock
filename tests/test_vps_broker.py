@@ -128,7 +128,7 @@ def test_http_ok_with_rc_zero_is_rejection(wire):
     replies['co.sltp.order.new']={'rc':0,'data':{'code':'FOS-6012'}}
     r=Broker(page,{}).send('entry',dict(id='i',symbol='S',side='LONG',qty=1,price=100,sl=99,tp=None),
                            hashlib.sha256(b'TEST8').hexdigest())
-    assert r=={'outcome':'REJECTED'}
+    assert r=={'outcome':'REJECTED','response_rc':0}
 
 
 @pytest.mark.parametrize('side,sl,tp,expected',[('LONG',1975.,1995.,'B'),('SHORT',1995.,1975.,'S')])
@@ -166,3 +166,14 @@ def test_invalid_stop_relation_never_posts(wire):
     r=Broker(page,{}).send('protect_stop',dict(side='SHORT',relation='GTEQ',qty=1,trigger=100.,symbol='S'),
                           hashlib.sha256(b'TEST8').hexdigest())
     assert r['outcome']=='UNKNOWN' and not calls
+
+
+
+@pytest.mark.parametrize('response',[{}, {'rc':None}, {'rc':False}, {'rc':True}, {'rc':''}, {'rc':' '}, {'rc':[]}, {'rc':0.5}])
+def test_ambiguous_response_is_not_a_rejection(wire,response):
+    page,calls,replies=wire
+    replies['Web.newOrder']=response
+    result=Broker(page,{}).send('exit',dict(id='i',symbol='S',side='SHORT',qty=1),
+                              hashlib.sha256(b'TEST8').hexdigest())
+    assert result=={'outcome':'UNKNOWN'}
+    assert len(calls)==1

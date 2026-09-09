@@ -271,3 +271,39 @@ def test_closed_bars_atr_publication_rejects_bad_data(protect,monkeypatch):
     frame.iloc[-1,0]=np.nan
     sg.observe_closed_bars(frame,'41I1G9000')
     with pytest.raises(ValueError):sg.stop_distance('41I1G9000',1981.,protect.clock[0],protect.cfg)
+
+
+
+@pytest.mark.parametrize('change',[{'remaining':0},{'remaining':'NaN'}])
+def test_owned_pending_stop_without_verified_quantity_is_not_protected(protect,change):
+    assert rt.tick()[0]
+    protect.broker.data['conditions'][0].update(change)
+    count=len(protect.broker.sent)
+    assert rt.tick(allow_actions=False)[0]
+    assert current()['state']=='UNKNOWN'
+    assert 'chưa xác nhận Stop bảo vệ đủ' in rt.status()['stop_guard_message']
+    assert len(protect.broker.sent)==count
+
+
+@pytest.mark.parametrize('net,side,relation,trigger',[(1,'S','LTEQ',1978.5),(-1,'B','GTEQ',1984.5)])
+def test_stop_coverage_requires_correct_trigger_relation(protect,net,side,relation,trigger):
+    snapshot=protect.broker.snapshot();pos=snapshot['positions'][0];pos['net']=net
+    row=dict(id='stop',symbol=pos['symbol'],type='stop',status='PENDING_TRIGGER',
+             side=side,relation=relation,trigger=trigger,qty=1,remaining=1,price_type='MTL')
+    snapshot['conditions']=[row]
+    assert sg.protection_coverage(snapshot,pos)['confirmed']
+    row['relation']='GTEQ' if relation=='LTEQ' else 'LTEQ'
+    assert not sg.protection_coverage(snapshot,pos)['confirmed']
+
+
+
+def test_previous_day_child_id_is_never_matched_to_new_day_order(protect):
+    rt.tick();rt.tick()
+    trigger(protect,filled=0,state='PENDING')
+    rt.tick(allow_actions=False)
+    count=len(protect.broker.sent)
+    protect.clock[0]+=timedelta(days=1)
+    rt.tick()
+    assert current()['state']=='UNKNOWN'
+    assert 'không ghép ID sang phiên mới' in rt.status()['stop_guard_message']
+    assert len(protect.broker.sent)==count

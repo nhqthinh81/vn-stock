@@ -821,3 +821,107 @@ kèm liệt kê mọi tab đang mở — chạy TRƯỚC mỗi phiên giao dịc
 3. Chrome profile bền + cửa sổ không bao giờ đóng có thể "trôi" sang trạng thái
    sai trong thời gian dài mà không ai biết nếu không có kiểm tra định kỳ chủ
    động — im lặng không có nghĩa là đúng.
+
+## 32. `pytest` lái GIAO DỊCH THẬT — test render tab Phái Sinh sinh worker VPS live, đè journal thật
+
+**Lỗi gặp:** Sau khi Codex thêm module qua đêm (`vps_overnight.py`), 4 test
+`tests/test_vps_overnight.py` thất bại KHÔNG ổn định (flaky) với
+`json.decoder.JSONDecodeError: Extra data` trong `rt.load_state()` — file
+`data/autotrade_live_state.json` THẬT bị nối 2 bản JSON. Chạy riêng file test
+qua đêm: 28/28 đạt. Chạy full suite: 4 fail. Thêm 1 fixture `stat()` vu vơ vào
+conftest là hết fail (đúng kiểu heisenbug do đua luồng).
+
+**Nguyên nhân gốc:** `tests/test_phaisinh_render.py` render THẬT
+`render_phaisinh_tab()` mà KHÔNG cô lập autotrade. `_live_panel_body()` có:
+```python
+if _runtime_cfg.get('enabled') and not _runtime_cfg.get('dry_run', True):
+    ensure_worker()
+```
+`data/autotrade_config.json` thật hiện `enabled=true, dry_run=false` (Phase 28h)
+⇒ render tab = spawn daemon thread `VPS-reconcile`. Thread này:
+1. Sống QUA test đó (daemon), lặp `tick()` mỗi 5s suốt phần còn lại của phiên
+   pytest.
+2. `tick()` → `connect_over_cdp('127.0.0.1:9222')` — nối Chrome/VPS THẬT (chỉ
+   trượt vì cổng debug chưa mở lúc đó).
+3. `save_state()` ghi vào `rt.STATE_PATH` — biến MODULE-GLOBAL. Mỗi test qua đêm
+   `monkeypatch.setattr(rt,'STATE_PATH',tmp_path/...)`; thread nền đọc biến này
+   giữa chừng, dựng `tmp=STATE_PATH.with_suffix('.tmp')` trên ổ C:, rồi
+   `os.replace` lúc monkeypatch vừa được teardown về `G:\...\data\...json` ⇒
+   `OSError [WinError 17] move the file to a different disk drive`, `.tmp` mồ côi
+   còn lại, và hai luồng cùng `open('w')` một `.tmp` ⇒ nội dung ngắn + đuôi bản
+   dài cũ = "Extra data".
+Bằng chứng: `data/autotrade_log.txt` có đúng các dòng lỗi trên, timestamp trùng
+lúc chạy pytest; `data/autotrade_live_state.tmp` mồ côi chứa `account-hash`
+(giá trị của `FakeBroker`).
+
+**Hệ quả nghiêm trọng hơn cả test flaky:** chỉ cần `pytest` trên máy này (khi
+Chrome AutoTrade đang mở) là đủ để worker thật nối phiên VPS live và đối soát/
+ghi đè `data/autotrade_live_state.json` — journal giao dịch thật của người dùng.
+State thật trước phiên đã mất vì các lần chạy pytest trước đó (cả của Codex).
+
+**Cách vá:** `test_phaisinh_render.py` giờ ép cấu hình an toàn TRƯỚC khi render:
+```python
+monkeypatch.setattr(at,'load_config',lambda:{**at._DEFAULT_CFG,'enabled':False,
+    'dry_run':True,'telegram_vps_reports':False})
+monkeypatch.setattr(rt,'STATE_PATH',tmp_path/'autotrade_live_state.json')
+monkeypatch.setattr(rt,'ensure_worker',lambda:None)
+monkeypatch.setattr(tg,'ensure_worker',lambda:None)
+```
+Đã xác minh: render 0 exception, KHÔNG rò thread `VPS-reconcile`; full suite
+287 passed × 3 lần, mtime file thật không đổi.
+
+**Rule phòng tránh:**
+1. Test nào render UI thật (`AppTest`) phải cô lập MỌI side effect: file trạng
+   thái (trỏ tmp), cấu hình (ép disabled), và mọi `ensure_worker()`/spawn thread.
+   `py_compile`/render sạch KHÔNG có nghĩa là hermetic.
+2. `STATE_PATH` là biến module-global + `save_state` chạy được từ nhiều luồng ⇒
+   `monkeypatch` một biến global KHÔNG an toàn khi có thread nền đọc nó. Nếu cần
+   đua luồng thật, truyền path tường minh thay vì vá global.
+3. Bug flaky + "thêm fixture vô hại là hết" = gần như chắc chắn đua luồng do
+   side effect rò từ test trước, KHÔNG phải lỗi logic của test đang fail. Tìm
+   thread/worker rò trước khi soi code test.
+4. Khi một daemon `ensure_worker()` được gọi từ đường render, phải có chốt chặn
+   ngoài `enabled/dry_run` cho môi trường test (biến env, hoặc guard "đang chạy
+   dưới pytest") — hoặc tối thiểu tài liệu hoá rõ rằng render == side effect.
+
+## 33. `data/autotrade_live_state.json` hỏng "Extra data" tái đi tái lại — repo nằm trên ổ ảo Google Drive, `os.replace` KHÔNG nguyên tử
+
+**Lỗi gặp:** `json.decoder.JSONDecodeError: Extra data` khi `load_state()` đọc
+`data/autotrade_live_state.json`. Nội dung file = 1 bản JSON hợp lệ (bản ghi mới,
+ngắn) + đuôi của một bản JSON cũ dài hơn nối vào sau. Xảy ra cả trong `pytest`
+(mục 32) lẫn app production đang chạy bình thường (worker báo cáo Telegram ghi
+state mỗi 30s → 09:40:03 ghi → 09:42:12 tick không đọc được).
+
+**Nguyên nhân gốc:** `Get-Volume G:` → "No MSFT_Volume"; `net use` trống. Đường
+dẫn repo `G:\Other computers\My Computer\BHDN\DHKD\...` chính là namespace backup
+"Computers" của **Google Drive** — một filesystem ảo. `save_state()` dùng
+`os.replace(tmp, STATE_PATH)`; trên Drive File Stream thao tác này **không nguyên
+tử**: driver sync có thể đang giữ file đích mở / ghi lại bản cache của nó, nên
+bản ghi mới (ngắn) đè lên đầu, phần đuôi bản cũ (dài) còn nguyên → "Extra data".
+Ổ `%LOCALAPPDATA%` (C:\Users\...\AppData\Local) là đĩa local thật, `os.replace`
+nguyên tử ở đó.
+
+**Cách vá:** `autotrade_runtime.runtime_dir()` — trả `%LOCALAPPDATA%\VNInvest\runtime`
+(hoặc `$VNINVEST_RUNTIME_DIR`); fallback về `data/` khi không phải Windows.
+`STATE_PATH` (+ `.tmp`, `.lock`, legacy `autotrade_state.json`) và
+`vps_telegram.HEALTH_PATH` chuyển sang đó. `load_state()` migrate một lần: nếu
+file local chưa có mà file cũ trên ổ sync còn PARSE ĐƯỢC + `version==1` thì copy
+sang (không xoá bản cũ — không tự xoá dữ liệu người dùng trên ổ sync). Chốt
+migrate chỉ chạy khi `STATE_PATH == _DEFAULT_STATE_PATH` (test monkeypatch sang
+tmp_path nên không dính). Giữ nguyên hành vi "gặp corrupt thì raise, KHÔNG tự
+sửa" — bản ghi đầu tiên trong file hỏng KHÔNG chắc là bản mới nhất (đã kiểm 2 ca:
+1 ca đầu là mới, 1 ca đầu là cũ), "lấy JSON hợp lệ đầu tiên" có thể cho state
+giao dịch cũ → nguy hiểm hơn là để tick() giữ khóa an toàn.
+
+**Rule phòng tránh:**
+1. Bất kỳ file trạng thái nào cần `os.replace` nguyên tử (journal, lock, checkpoint)
+   PHẢI nằm trên đĩa local thật — KHÔNG đặt trong cây repo nếu repo được Dropbox/
+   OneDrive/Google Drive/iCloud sync. Kiểm nhanh: `Get-Volume <chữ ổ>` không ra
+   kết quả + `net use` trống thường là ổ ảo của sync client.
+2. Cấu hình người dùng chỉnh tay (`data/autotrade_config.json`) và log append
+   (`autotrade_log.txt`) để lại `data/` được — chúng không phụ thuộc replace nguyên
+   tử; nhưng `auto_trader.save_config()` cũng dùng `os.replace` trên `data/` nên
+   vẫn có rủi ro hỏng thấp khi ghi trùng lúc (hiếm, chỉ khi user bật/tắt công tắc).
+3. Khi "sửa file bị hỏng lặp lại", kiểm MÔI TRƯỜNG (loại ổ đĩa, sync client, antivirus
+   real-time) trước khi nghi logic ghi — `save_state()` ở đây vốn đã đúng chuẩn
+   tmp+fsync+replace.
