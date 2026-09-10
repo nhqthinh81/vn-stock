@@ -2164,14 +2164,31 @@ def _live_panel_body():
                 st.session_state["ps_last_time"] = last_time
 
                 # Kiểm tra định kỳ phiên đăng nhập VPS (mỗi ~60 phút, chỉ khi
-                # auto-trade đang bật) — phiên SmartPro tự hết hạn sau 720 phút.
+                # auto-trade đang bật VÀ đang TRONG giờ giao dịch) — phiên
+                # SmartPro tự hết hạn sau 720 phút.
+                #
+                # ⚠️ Chặn theo `in_session` là BẮT BUỘC, không phải cho gọn.
+                # Khối này chạy mỗi khi thấy "nến mới", mà mốc so sánh
+                # `ps_last_time` nằm trong session_state — RIÊNG từng phiên
+                # trình duyệt. Mở/F5 tab lúc 20h thì `ps_last_time` rỗng ⇒ nến
+                # cuối của phiên chiều bị coi là mới ⇒ check chạy ⇒ Chrome đã
+                # đóng từ lâu ⇒ bắn Telegram "phiên VPS có vấn đề" giữa đêm.
+                # Ngoài giờ không có lệnh nào để bỏ lỡ nên cảnh báo đó vô nghĩa;
+                # đường phản ứng tức thời `_alert_session_dead()` trong
+                # `submit_signal()` vốn đã tự chặn theo giờ từ trước.
+                #
+                # ⚠️ Bỏ qua CẢ khối, không chỉ bỏ qua lần gửi Telegram:
+                # `ps_at_session_ok` là chốt "chỉ báo 1 lần". Ngoài giờ mà vẫn
+                # ghi False vào đó thì sáng hôm sau `_was_ok is not False` sai ⇒
+                # NUỐT LUÔN cảnh báo thật lúc 09:00, đúng lúc cần nhất.
+                #
                 # Chạy ĐỒNG BỘ (không qua thread nền) vì cần đọc/ghi session_state
                 # và gọi _send_telegram_async; tần suất thấp nên độ trễ vài giây
                 # không đáng kể so với chu kỳ nến 1 phút.
                 try:
                     from .auto_trader import load_config as _at_cfg3, \
                         check_session as _at_check_sess
-                    if _at_cfg3().get("enabled"):
+                    if in_session and _at_cfg3().get("enabled"):
                         _last_chk = st.session_state.get("ps_at_last_session_chk")
                         _now_ts = pd.Timestamp.now()
                         if _last_chk is None or (_now_ts - _last_chk).total_seconds() >= 3600:

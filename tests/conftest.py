@@ -196,9 +196,18 @@ def ps_module(tmp_path, monkeypatch):
 
     KHÔNG chạm `st.session_state` ở đây — mỗi test tự `monkeypatch.setattr(
     ps.st, "session_state", {...})` vì cần mô phỏng nhiều "phiên" khác nhau.
+
+    ⚠️ Nhiều test lại gán THẲNG `ps.st.session_state = {...}` thay vì
+    monkeypatch. Gán thẳng ghi đè thuộc tính của chính module `streamlit` và
+    SỐNG QUA test — mọi test dựng Streamlit runtime thật (AppTest) chạy sau đó
+    sẽ thấy một dict trần thay cho session state thật và im lặng cho kết quả
+    sai. Fixture khôi phục lại nguyên trạng để không test nào phụ thuộc thứ tự
+    chạy.
     """
     import vn_invest.phaisinh_tab as ps
 
     monkeypatch.setattr(ps, "_PS_STATE_FILE", str(tmp_path / "ps_state.json"))
     monkeypatch.setattr(ps, "_JOURNAL_FILE", str(tmp_path / "journal.csv"))
-    return ps
+    _orig_session_state = ps.st.session_state
+    yield ps
+    ps.st.session_state = _orig_session_state

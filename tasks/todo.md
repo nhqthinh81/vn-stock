@@ -1432,3 +1432,42 @@ cấp OS + Python), `vps_stop_guard.py` (Stop bảo vệ lệnh thường), `vps
       trong log sáng 08/09 — chưa rõ có tái diễn sau khi Chrome đã đúng trang
       hay không. Nếu còn lặp lại, cần điều tra riêng (nghi ngờ: khoá cũ chưa
       giải phóng đúng cách từ 1 tiến trình trước đó).
+
+---
+
+# Telegram bắn cảnh báo ngoài giờ giao dịch (09/09/2026)
+
+**Triệu chứng:** ~20h user nhận tin `⚠️ #VN30F1M Auto-trade: phiên VPS có vấn đề
+— Không nối được http://127.0.0.1:9222`.
+
+**Chẩn đoán (bằng chứng, không đoán):**
+- `vn30_ai_journal.csv` dừng ở 14:30 → engine KHÔNG mở/đóng lệnh sau giờ.
+- `alert_watcher` gửi lần cuối 01/09, `scan_result.csv` không đổi từ 26/08.
+- Nguồn thật: khối quét phiên VPS trong `_live_panel_body()` nằm trong nhánh
+  "có nến mới". Mốc `ps_last_time` sống trong session_state — RIÊNG từng phiên
+  trình duyệt. Mở/F5 tab buổi tối ⇒ mốc rỗng ⇒ nến 14:45 bị coi là mới ⇒ check
+  chạy ⇒ Chrome đã tắt ⇒ Telegram giữa đêm.
+
+**Đã sửa:** bọc khối đó trong `if in_session` (bỏ qua CẢ khối, không chỉ bỏ qua
+lần gửi — xem ghi chú `ps_at_session_ok` trong CLAUDE.md).
+
+- [x] Test hồi quy `tests/test_phaisinh_session_alert_hours.py` — render THẬT
+      qua AppTest, đã xác nhận **đỏ trên code cũ** (tái hiện đúng tin nhắn user
+      nhận) và xanh sau khi sửa. Kiểm cả 2 mặt: ngoài giờ không bắn, trong giờ
+      vẫn bắn đúng 1 lần.
+- [x] Vá rò rỉ `ps.st.session_state` trong fixture `ps_module` (`tests/conftest.py`):
+      nhiều test gán thẳng dict trần vào module streamlit, sống qua test và làm
+      mọi test AppTest chạy sau đó im lặng cho kết quả sai.
+- [x] Toàn bộ 297 test đạt.
+
+## Việc còn tồn (phát hiện trong lúc điều tra, CHƯA sửa)
+
+- [ ] **`vps_telegram.automatic_paused()` không có cận trên giờ.** Sau 14:45,
+      nếu hôm đó chưa chốt "báo cáo cuối phiên" thì nó cho gửi ở BẤT KỲ giờ nào
+      tới nửa đêm (đo được: 16:00/20:30/23:50 đều `paused=False`). Mở app lúc
+      20h vào ngày app không chạy lúc 14:45 sẽ nhận 1 tin "VPS · LỆNH THẬT &
+      LÃI/LỖ" giữa tối. Cần user quyết mốc dừng (đề xuất: bỏ báo cáo chốt phiên
+      nếu đã quá 16:00) trước khi sửa.
+- [ ] `vps_telegram.poll()` đang lặp lại `FAILED — đọc lịch báo cáo trong
+      journal: RuntimeError` (health lúc 20:26 09/09). Chưa rõ nguyên nhân, cần
+      điều tra riêng; hệ quả hiện tại là báo cáo VPS im lặng chứ không sai số.
