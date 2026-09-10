@@ -116,6 +116,16 @@ def main() -> None:
             break
         except Exception as e:
             log.error("Loi vong lap: %s: %s", type(e).__name__, e)
+        # Canh bot chet im lang (10/09/2026: mat ca ngay vi AmiBroker treo +
+        # khong trinh duyet nao mo tab Phai Sinh). Phai chay O DAY chu khong
+        # trong Streamlit — chinh Streamlit la thu chet. Xem vn_invest/watchdog.py.
+        # Tach try/except rieng: watchdog hong khong duoc lam chet vong quet chinh.
+        try:
+            from vn_invest.watchdog import run as watchdog_run
+            for _msg in watchdog_run():
+                log.warning("WATCHDOG gui Telegram: %s", _msg.splitlines()[0])
+        except Exception as e:
+            log.error("Loi watchdog: %s: %s", type(e).__name__, e)
         try:
             time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:

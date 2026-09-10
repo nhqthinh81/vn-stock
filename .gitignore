@@ -21,6 +21,7 @@ data/alert_watcher.log
 data/*_backup_*.json
 data/autotrade_config.json
 data/autotrade_state.json
+data/watchdog_state.json
 data/autotrade_log.txt
 data/autotrade_shots/
 data/vps_dom_dump.json
