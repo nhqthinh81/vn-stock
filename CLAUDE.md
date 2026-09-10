@@ -1240,7 +1240,8 @@ swing riêng, tự chứng minh edge từ đầu — không phải chỉnh sửa
 ### Đặt lệnh tự động VPS SmartPro — `vn_invest/auto_trader.py` (Phase 28)
 User yêu cầu bám trình duyệt đăng nhập sẵn để bù độ trễ đọc-tin-nhắn-rồi-vào-tay.
 Nối qua Chrome DevTools Protocol (`--remote-debugging-port=9222`, profile
-riêng `Chay_Chrome_AutoTrade.bat`) — KHÔNG đụng cookie/session của trình
+riêng `Chay_Chrome_AutoTrade.bat`, shortcut Desktop "Chrome AutoTrade VPS") —
+KHÔNG đụng cookie/session của trình
 duyệt chính người dùng đang dùng.
 
 **Chính sách theo tín hiệu** (quyết định của user 26/08/2026, không phải mặc
@@ -1279,10 +1280,43 @@ Hai đường cảnh báo phiên chết bổ sung nhau, không thay thế:
 | Đường | Kích hoạt | Ưu điểm |
 |---|---|---|
 | `_alert_session_dead()` trong `submit_signal()` | Ngay khi có tín hiệu THẬT cần đặt lệnh | Biết ngay một lệnh vừa bị bỏ lỡ |
-| Quét định kỳ trong `_live_panel_body()` (Phase 28e) | Mỗi ~60 phút, kể cả không có tín hiệu | Vẫn cảnh báo dù nhiều giờ không có tín hiệu nào fire |
+| Quét định kỳ trong `_live_panel_body()` (Phase 28e) | Mỗi ~60 phút **trong giờ giao dịch**, kể cả không có tín hiệu | Vẫn cảnh báo dù nhiều giờ không có tín hiệu nào fire |
 
 Cooldown 15 phút dùng biến module-level (`_last_session_alert_ts`), không cần
 bền trên đĩa — chỉ cần sống trong 1 tiến trình đang chạy.
+
+⚠️ **Quét định kỳ phải bọc trong `if in_session`** (sửa 09/09/2026). Khối đó nằm
+trong nhánh "có nến mới", mà mốc so sánh `ps_last_time` sống trong session_state
+— RIÊNG từng phiên trình duyệt. Mở/F5 tab lúc 20h là `ps_last_time` rỗng ⇒ nến
+14:45 của phiên chiều bị coi là mới ⇒ check chạy ⇒ Chrome đã tắt ⇒ Telegram giữa
+đêm. Ngoài giờ không có lệnh nào để bỏ lỡ nên cảnh báo đó vô nghĩa; đường
+`_alert_session_dead()` vốn đã tự chặn theo giờ (`submit_signal()` từ chối trước
+khi đụng browser).
+
+⚠️ Phải bỏ qua **CẢ khối**, không chỉ bỏ qua lần gửi: `ps_at_session_ok` là chốt
+"chỉ báo 1 lần". Ngoài giờ mà vẫn ghi `False` vào đó thì sáng hôm sau
+`_was_ok is not False` sai ⇒ nuốt luôn cảnh báo thật lúc 09:00.
+Test: `tests/test_phaisinh_session_alert_hours.py` (render thật qua AppTest —
+ngoài giờ KHÔNG bắn, trong giờ VẪN bắn đúng 1 lần).
+
+### `Chay_Chrome_AutoTrade.bat` tự kiểm chứng sau khi mở (gộp 2 file, 10/09/2026)
+
+Bản cũ chỉ `start chrome` rồi mặc kệ — đúng kiểu để lọt sự cố 08/09 (Chrome giữ
+cổng 9222 nhưng ở SmartOne suốt 10 ngày). Nay file này: **kiểm tra → chỉ mở khi
+cần → kiểm lại**, và gọi lại chính `Kiem_Tra_Chrome_AutoTrade.ps1` thay vì chép
+logic (một bản duy nhất, không bao giờ lệch nhau).
+
+⚠️ `Kiem_Tra_Chrome_AutoTrade.bat` **giữ nguyên, đừng xoá** — nó CHỈ ĐỌC nên
+chạy được giữa phiên khi đang có lệnh thật mà chắc chắn không mở/đổi gì. File
+gộp thì có thể mở Chrome.
+
+⚠️ Thiếu file `.ps1` thì `powershell -File` vẫn thoát mã **0** (rơi về PowerShell
+tương tác rồi thoát sạch) ⇒ `.bat` sẽ báo nhầm "SẴN SÀNG" trong khi chưa kiểm
+được gì. Bắt buộc có `if not exist "%CHECK%"` chặn trước.
+
+⚠️ `timeout /t` **chết ngay khi stdin bị chuyển hướng** — bước chờ Chrome khởi
+động mất tác dụng nếu file được gọi từ script khác. Dùng
+`timeout ... || ping -n N 127.0.0.1 >nul` làm đường lui.
 
 Selector phiếu lệnh phải dò bằng `inspect_vps.py` (chỉ đọc DOM, không bấm gì)
 rồi điền tay vào config — không đoán theo tên class, sàn đổi giao diện là chết

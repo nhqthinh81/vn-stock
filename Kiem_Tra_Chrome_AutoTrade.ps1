@@ -26,7 +26,12 @@ if (-not $pageTabs) {
     exit 1
 }
 
-$smartProTabs = $pageTabs | Where-Object { $_.url -like "*$expectedHost*" }
+# Khop ca URL LAN TIEU DE. Tab dang tai co url RONG trong vai giay: neu chi
+# so url thi bao "khong co tab SmartPro" -> ben goi mo them tab -> 2 tab ->
+# check_session() tu choi dat lenh (chan cung). Da dinh dung bay nay 10/09.
+$smartProTabs = $pageTabs | Where-Object {
+    $_.url -like "*$expectedHost*" -or $_.title -like "*SmartPro*"
+}
 
 if ($smartProTabs) {
     Write-Host "OK - tim thay tab SmartPro dung cong $port :" -ForegroundColor Green
