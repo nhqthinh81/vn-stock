@@ -154,6 +154,23 @@ def fake_page():
     return FakePage()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_live_autotrade_files(tmp_path, monkeypatch):
+    """MỌI test đều trỏ file trạng thái/khoá/log auto-trade sang tmp_path.
+
+    11/09/2026: chạy pytest trong lúc app đang giao dịch thật, nhãn bên giữ
+    khoá trong file .lock THẬT ghi đúng pid của pytest — tức có test đã giành
+    khoá thật và làm worker thật phải chờ 10s. 8 file test không tự patch
+    STATE_PATH. Fixture này là lớp chặn mặc định; test nào cần đường riêng vẫn
+    monkeypatch đè lên được (xem lessons 32, 36).
+    """
+    import vn_invest.autotrade_runtime as runtime
+    import vn_invest.auto_trader as at
+    import vn_invest.vps_telegram as vt
+    monkeypatch.setattr(runtime, "STATE_PATH", tmp_path / "autotrade_live_state.json")
+    monkeypatch.setattr(at, "_LOG_FILE", str(tmp_path / "autotrade_log.txt"))
+    monkeypatch.setattr(vt, "HEALTH_PATH", tmp_path / "vps_telegram_health.json", raising=False)
+
 @pytest.fixture
 def at_module(tmp_path, fake_page, monkeypatch):
     """`vn_invest.auto_trader` với file trạng thái trỏ vào tmp_path + playwright

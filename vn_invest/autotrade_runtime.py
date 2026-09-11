@@ -42,6 +42,8 @@ _THREAD_LOCK = threading.Lock()
 _FILE_LOCK_TIMEOUT_SEC = 30.0
 _FILE_LOCK_POLL_SEC = 0.2
 _FILE_LOCK_SLOW_SEC = 1.0    # chờ lâu hơn mức này thì ghi log kèm bên giữ khoá
+_SLOW_LOG_EVERY_SEC = 60.0   # tiết chế log chờ khoá
+_last_slow_log = 0.0
 _WORKER_THREAD_NAME = 'VPS-reconcile'
 _WORKER_LOCK = threading.Lock()
 _WORKER = None
@@ -154,8 +156,12 @@ def locked_state():
                 time.sleep(_FILE_LOCK_POLL_SEC)
         acquired = True
         waited = time.monotonic() - t0
-        if waited >= _FILE_LOCK_SLOW_SEC:
+        global _last_slow_log
+        if waited >= _FILE_LOCK_SLOW_SEC and time.monotonic() - _last_slow_log >= _SLOW_LOG_EVERY_SEC:
             # Ai giữ khoá lâu? Ghi ra để lần sau không phải đoán (xem lessons 35).
+            # Tiết chế 1 dòng/phút: vps_telegram thử lại mỗi 0,25s nên không tiết
+            # chế là 500 dòng/3 phút (thấy thật 11/09 13:20).
+            _last_slow_log = time.monotonic()
             try:
                 from .auto_trader import _log
                 _log(f'Chờ khoá trạng thái {waited:.1f}s — bên giữ trước đó: [{_lock_holder(handle)}]')
