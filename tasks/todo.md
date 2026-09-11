@@ -1471,3 +1471,16 @@ lần gửi — xem ghi chú `ps_at_session_ok` trong CLAUDE.md).
 - [ ] `vps_telegram.poll()` đang lặp lại `FAILED — đọc lịch báo cáo trong
       journal: RuntimeError` (health lúc 20:26 09/09). Chưa rõ nguyên nhân, cần
       điều tra riêng; hệ quả hiện tại là báo cáo VPS im lặng chứ không sai số.
+
+## 11/09/2026 — Lệnh thật bị bỏ vì PermissionError giành khoá (2 server Streamlit)
+
+- [x] Tái hiện bằng test tiến trình con giữ khoá thật: `tests/test_autotrade_lock.py`.
+- [x] `autotrade_runtime.locked_state()` chờ khoá file tối đa 30s (poll 0,2s),
+      hết hạn ném `RuntimeError` rõ nghĩa. 206 test autotrade/VPS đạt.
+- [x] `Chay_App.bat` không mở server thứ hai khi cổng 8501 đã nghe.
+- [x] Tắt server 8502 (PID 29904) lúc 09:41 ngày 11/09 — 4 kết nối trình duyệt
+      đều vào 8501 nên 8502 không ai dùng.
+- [ ] **Vận hành (user làm):** restart server 8501 khi không còn vị thế thật
+      để nạp code khoá mới (module đã nằm trong `sys.modules`).
+- [ ] Sau vài phiên: xác nhận log không còn `PermissionError` và lệnh thật
+      xuất hiện đúng lúc engine mở vị thế ảo.

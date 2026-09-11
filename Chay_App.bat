@@ -31,6 +31,16 @@ if errorlevel 1 (
 )
 echo.
 
+REM Chan mo server Streamlit THU HAI: hai server cung chay worker doi soat
+REM tranh khoa trang thai, lenh that bi bo (11/09/2026). Da co thi chi mo trinh duyet.
+netstat -ano | findstr /R /C:":8501 .*LISTENING" >nul
+if not errorlevel 1 (
+    echo May chu Streamlit DA CHAY tren cong 8501 - KHONG mo server thu hai.
+    echo Mo trinh duyet toi server dang chay...
+    start "" http://localhost:8501
+    pause
+    exit /b 0
+)
 echo Dang khoi dong dashboard...
 echo Truy cap: http://localhost:8501
 echo.

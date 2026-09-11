@@ -977,3 +977,34 @@ lúc 13:52. Xác minh lại trên hàng thật đó: `confirmed=True` cho cả h
    chỉ nhánh "không đạt".
 4. Nghi ngờ một chốt không bao giờ đúng thì kiểm bằng **dữ liệu sản xuất thật**
    (`Broker.snapshot()` chỉ đọc), đừng tin fake.
+
+## 35. Lệnh thật bị bỏ im lặng vì `PermissionError` giành khoá — HAI server Streamlit chạy song song
+
+**Lỗi gặp (10–11/09/2026, tiền thật):** engine mở vị thế ảo SHORT #70 lúc 09:01
+ngày 11/09 (⭐ MẠNH), nhưng log auto-trade chỉ có
+`AutoTrade SHORT: AutoTrade giữ an toàn: PermissionError: [Errno 13] Permission denied`
+lúc 09:03:28 — không lệnh thật nào được gửi. Tương tự 10/09 13:51 (LONG) và
+10/09 14:45 (yêu cầu ĐÓNG). Log còn 12.920 dòng
+`Đối soát chưa hoàn tất: PermissionError` lặp mỗi ~6 giây từ 07/09 15:35.
+
+**Nguyên nhân gốc:** `netstat` cho thấy HAI server Streamlit: cổng 8501 (mở
+06:29 ngày 10/09) và 8502 (mở 13:48 cùng ngày — chạy `Chay_App.bat` lần hai,
+Streamlit tự nhảy sang cổng kế tiếp, không báo gì). Mỗi server có worker
+`VPS-reconcile` riêng, mỗi tick giữ khoá file `autotrade_live_state.json.lock`
+suốt lúc nối CDP + đọc VPS (vài giây), nghỉ 5 giây. `locked_state()` khoá
+bằng `msvcrt.LK_NBLCK` (KHÔNG chờ) và không thử lại → bất kỳ `submit()` /
+`request_close()` nào đụng đúng lúc tick bên kia đang giữ khoá là ném
+`PermissionError` ngay, và chính sách "không gửi bù" khiến tín hiệu mất luôn.
+`_THREAD_LOCK` chỉ chống tranh chấp TRONG một tiến trình (chờ 30s), còn lớp
+liên tiến trình thì chết ngay ở lần thử đầu — hai lớp khoá không cùng hành vi.
+
+**Rule phòng tránh:**
+- Khoá liên tiến trình phải CHỜ có giới hạn giống khoá trong tiến trình
+  (`_FILE_LOCK_TIMEOUT_SEC = 30`, poll 0,2s); hết hạn thì ném `RuntimeError`
+  nói rõ "tiến trình khác đang giữ" chứ không phải `PermissionError` mơ hồ.
+  Test: `tests/test_autotrade_lock.py` (tiến trình con giữ khoá THẬT, không mock).
+- `Chay_App.bat` kiểm cổng 8501 trước; đã có server thì chỉ mở trình duyệt.
+  Hai CỬA SỔ trên một server là có chủ ý (Phase 25–26); hai SERVER thì không.
+- Khi bot "im lặng không lệnh thật": kiểm `netstat -ano | findstr :850` TRƯỚC
+  khi đọc code. Dấu vết: log lỗi lặp đều mỗi ~6s xen kẽ tick thành công
+  (worker chỉ log khi thông điệp đổi, nên lặp đều = hai worker thay phiên).

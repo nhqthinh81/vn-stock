@@ -35,6 +35,12 @@ def runtime_dir() -> Path:
 _DEFAULT_STATE_PATH = runtime_dir() / 'autotrade_live_state.json'
 STATE_PATH = _DEFAULT_STATE_PATH
 _THREAD_LOCK = threading.Lock()
+# Khoá file liên tiến trình: worker đối soát ở MỖI server Streamlit giữ khoá
+# suốt 1 tick (nối CDP + đọc VPS, vài giây). Khoá không chờ mà không thử lại
+# thì submit()/request_close() đụng đúng lúc đó là PermissionError → bỏ lệnh
+# thật (11/09/2026 09:03). Chờ có giới hạn, bằng timeout của _THREAD_LOCK.
+_FILE_LOCK_TIMEOUT_SEC = 30.0
+_FILE_LOCK_POLL_SEC = 0.2
 _WORKER_LOCK = threading.Lock()
 _WORKER = None
 _LAST_ERROR = ''
@@ -95,12 +101,22 @@ def locked_state():
         if handle.seek(0,os.SEEK_END) == 0:
             handle.write(b'0'); handle.flush()
         handle.seek(0)
-        if os.name == 'nt':
-            import msvcrt
-            msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
-        else:
-            import fcntl
-            fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        deadline = time.monotonic() + _FILE_LOCK_TIMEOUT_SEC
+        while True:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                break
+            except OSError as exc:   # Windows: PermissionError errno 13 khi tiến trình khác giữ khoá
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f'Không giành được khoá trạng thái AutoTrade sau {_FILE_LOCK_TIMEOUT_SEC:g}s '
+                        f'— tiến trình khác (server Streamlit thứ hai?) đang giữ: {exc}') from exc
+                time.sleep(_FILE_LOCK_POLL_SEC)
         acquired = True
         yield load_state()
     finally:

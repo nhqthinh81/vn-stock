@@ -1012,6 +1012,20 @@ lệnh #1 của ngày B.
 ⚠️ **Đừng chỉ cảnh báo — phải chặn tận gốc.** Đặt guard ở `_append_journal()` và
 `_save_ps_state()` chứ không chỉ ở chỗ gọi, vì các chỗ gọi nằm rải rác 5 nơi.
 
+### Hai SERVER Streamlit (không phải hai cửa sổ) làm bot bỏ lệnh thật (11/09/2026)
+Chạy `Chay_App.bat` lần hai khi 8501 đang bận → Streamlit lặng lẽ mở server
+thứ hai ở 8502. Mỗi server có worker `VPS-reconcile` riêng, mỗi tick giữ khoá
+`autotrade_live_state.json.lock` vài giây. `locked_state()` trước đây khoá
+không chờ (`LK_NBLCK`) và không thử lại → `submit()`/`request_close()` đụng
+tick bên kia là `PermissionError` ngay, tín hiệu mất luôn (không gửi bù).
+```python
+_FILE_LOCK_TIMEOUT_SEC = 30.0   # chờ khoá liên tiến trình, bằng timeout _THREAD_LOCK
+_FILE_LOCK_POLL_SEC    = 0.2
+```
+⚠️ Bot im lặng không lệnh thật → kiểm `netstat -ano | findstr :850` TRƯỚC khi
+đọc code. Log lỗi lặp đều mỗi ~6s là dấu vết hai worker thay phiên giữ khoá.
+`Chay_App.bat` nay từ chối mở server thứ hai. Xem `tasks/lessons.md` mục 35.
+
 ### Ghép cặp MỞ↔ĐÓNG chịu được dữ liệu hỏng — `_pair_by_time()`
 ```python
 # SAI: tin trade_id là duy nhất
