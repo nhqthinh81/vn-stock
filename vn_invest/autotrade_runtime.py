@@ -41,6 +41,8 @@ _THREAD_LOCK = threading.Lock()
 # thật (11/09/2026 09:03). Chờ có giới hạn, bằng timeout của _THREAD_LOCK.
 _FILE_LOCK_TIMEOUT_SEC = 30.0
 _FILE_LOCK_POLL_SEC = 0.2
+_FILE_LOCK_SLOW_SEC = 1.0    # chờ lâu hơn mức này thì ghi log kèm bên giữ khoá
+_WORKER_THREAD_NAME = 'VPS-reconcile'
 _WORKER_LOCK = threading.Lock()
 _WORKER = None
 _LAST_ERROR = ''
@@ -89,6 +91,32 @@ def save_state(state):
     os.replace(tmp,STATE_PATH)
 
 
+def _lock_holder(handle) -> str:
+    """Nhãn bên giữ khoá gần nhất (pid:thread) ghi từ byte 1 của file .lock —
+    byte 0 là byte bị khoá, không đọc."""
+    try:
+        handle.seek(1)
+        return handle.read(200).decode('utf-8', 'replace').strip() or 'không rõ'
+    except OSError:
+        return 'không đọc được'
+
+
+def _stamp_lock_holder(handle) -> None:
+    try:
+        handle.seek(1)
+        handle.write(f'{os.getpid()}:{threading.current_thread().name}'.encode('utf-8'))
+        handle.truncate()
+        handle.flush()
+    except OSError:
+        pass
+
+
+def _worker_alive(name: str = _WORKER_THREAD_NAME) -> bool:
+    """Streamlit nạp lại module khi file nguồn đổi → `_WORKER` toàn cục về None
+    dù thread cũ vẫn chạy; nhìn theo TÊN thread thì không sinh worker thứ hai."""
+    return any(t.name == name and t.is_alive() for t in threading.enumerate())
+
+
 @contextmanager
 def locked_state():
     if not _THREAD_LOCK.acquire(timeout=30):
@@ -97,11 +125,17 @@ def locked_state():
     acquired = False
     try:
         STATE_PATH.parent.mkdir(parents=True,exist_ok=True)
-        handle = open(str(STATE_PATH)+'.lock','a+b')
+        lock_path = str(STATE_PATH)+'.lock'
+        if not os.path.exists(lock_path):
+            open(lock_path,'ab').close()
+        # 'r+b' chứ KHÔNG 'a+b': append mode ép mọi write về cuối file, seek(1)
+        # bị bỏ qua → nhãn pid:thread nối đuôi vô hạn (thấy thật 11/09 13:13).
+        handle = open(lock_path,'r+b')
         if handle.seek(0,os.SEEK_END) == 0:
             handle.write(b'0'); handle.flush()
         handle.seek(0)
-        deadline = time.monotonic() + _FILE_LOCK_TIMEOUT_SEC
+        t0 = time.monotonic()
+        deadline = t0 + _FILE_LOCK_TIMEOUT_SEC
         while True:
             try:
                 if os.name == 'nt':
@@ -115,9 +149,19 @@ def locked_state():
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
                         f'Không giành được khoá trạng thái AutoTrade sau {_FILE_LOCK_TIMEOUT_SEC:g}s '
-                        f'— tiến trình khác (server Streamlit thứ hai?) đang giữ: {exc}') from exc
+                        f'— tiến trình khác (server Streamlit thứ hai?) đang giữ '
+                        f'[{_lock_holder(handle)}]: {exc}') from exc
                 time.sleep(_FILE_LOCK_POLL_SEC)
         acquired = True
+        waited = time.monotonic() - t0
+        if waited >= _FILE_LOCK_SLOW_SEC:
+            # Ai giữ khoá lâu? Ghi ra để lần sau không phải đoán (xem lessons 35).
+            try:
+                from .auto_trader import _log
+                _log(f'Chờ khoá trạng thái {waited:.1f}s — bên giữ trước đó: [{_lock_holder(handle)}]')
+            except Exception:
+                pass
+        _stamp_lock_holder(handle)
         yield load_state()
     finally:
         if handle:
@@ -631,7 +675,7 @@ def ensure_worker():
     if os.environ.get('PYTEST_CURRENT_TEST'):
         return  # never spawn the live Chrome/VPS reconcile thread inside a test process
     with _WORKER_LOCK:
-        if _WORKER and _WORKER.is_alive():
+        if (_WORKER and _WORKER.is_alive()) or _worker_alive():
             return
         def run():
             from .auto_trader import load_config, _log
@@ -645,5 +689,5 @@ def ensure_worker():
                     _log(msg)
                 last_error='' if ok else msg
                 time.sleep(5)
-        _WORKER=threading.Thread(target=run,name='VPS-reconcile',daemon=True)
+        _WORKER=threading.Thread(target=run,name=_WORKER_THREAD_NAME,daemon=True)
         _WORKER.start()

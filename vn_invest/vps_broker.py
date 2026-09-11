@@ -223,7 +223,11 @@ def connect(cfg):
     from playwright.sync_api import sync_playwright
     at._ensure_win_proactor_policy()
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cfg['cdp_url'],timeout=5000)
+        # 5s là quá mong manh khi có client khác bám cùng cổng 9222 (Antigravity
+        # IDE, 08/09: 4.814 lần timeout; 11/09 13:06 bỏ 1 tín hiệu). submit()
+        # vẫn kiểm tra lại tuổi tín hiệu TRONG khoá nên chờ lâu hơn không gửi muộn.
+        browser = p.chromium.connect_over_cdp(cfg['cdp_url'],
+                                              timeout=int(cfg.get('cdp_connect_timeout_ms',15000)))
         try:
             page = at._find_vps_page(browser,cfg['page_url_contains'])
             if page is None:

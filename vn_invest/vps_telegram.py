@@ -284,15 +284,20 @@ def poll(force=False,sender=None):
         return False,_LAST_ERROR
 
 
+_WORKER_THREAD_NAME='VPS-Telegram-readonly'
+
+
 def ensure_worker():
     global _WORKER
     with _LOCK:
-        if _WORKER and _WORKER.is_alive():return
+        # Nhận diện theo TÊN thread: Streamlit nạp lại module khi file đổi →
+        # _WORKER về None dù thread cũ còn sống (lessons 36).
+        if (_WORKER and _WORKER.is_alive()) or rt._worker_alive(_WORKER_THREAD_NAME):return
         def run():
             # poll handles configuration/read failures, so the thread survives
             # and records missing credentials instead of silently skipping work.
             while True:
                 poll()
                 time.sleep(30)
-        _WORKER=threading.Thread(target=run,name='VPS-Telegram-readonly',daemon=True)
+        _WORKER=threading.Thread(target=run,name=_WORKER_THREAD_NAME,daemon=True)
         _WORKER.start()

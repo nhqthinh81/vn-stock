@@ -1008,3 +1008,25 @@ liên tiến trình thì chết ngay ở lần thử đầu — hai lớp khoá 
 - Khi bot "im lặng không lệnh thật": kiểm `netstat -ano | findstr :850` TRƯỚC
   khi đọc code. Dấu vết: log lỗi lặp đều mỗi ~6s xen kẽ tick thành công
   (worker chỉ log khi thông điệp đổi, nên lặp đều = hai worker thay phiên).
+
+## 36. Sửa file `.py` khi app đang chạy → Streamlit nạp lại module → worker và khoá bị NHÂN ĐÔI trong CÙNG một tiến trình
+
+**Lỗi gặp (11/09/2026):** sau khi tắt server 8502, khoảng 09:45–10:47 vẫn còn
+14 lần `PermissionError` giành khoá dù chỉ còn MỘT server, thời điểm trùng lúc
+engine hành động trên nến mới (10:04:34 đúng lúc yêu cầu đóng lệnh).
+
+**Nguyên nhân:** tôi sửa `autotrade_runtime.py` lúc ~09:35 trong khi server
+đang chạy. Streamlit theo dõi module cục bộ; ở lần rerun kế tiếp nó xoá module
+khỏi `sys.modules` và import lại → `_THREAD_LOCK` MỚI, `_WORKER = None` MỚI →
+`ensure_worker()` sinh thêm worker thứ hai, trong khi thread cũ vẫn chạy code
+cũ với khoá cũ. Hai worker trong một tiến trình không còn được `_THREAD_LOCK`
+serialize, chỉ còn khoá file không chờ → PermissionError. Đây cũng là lời giải
+cho việc lỗi đã có từ 07/09 15:35, trước khi server 8502 tồn tại.
+
+**Rule phòng tránh:**
+- `ensure_worker()` nhận diện worker theo TÊN thread (`_worker_alive()` quét
+  `threading.enumerate()`), không tin biến toàn cục của module.
+- File `.lock` ghi `pid:thread` của bên giữ khoá từ byte 1; chờ khoá ≥1s thì
+  log kèm bên giữ trước đó. Lần sau không phải đoán ai giữ khoá.
+- Sửa code engine/runtime khi app đang chạy thì phải RESTART server, không
+  chỉ rerun. Tốt nhất sửa ngoài giờ giao dịch hoặc giờ nghỉ trưa.

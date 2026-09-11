@@ -1484,3 +1484,32 @@ lần gửi — xem ghi chú `ps_at_session_ok` trong CLAUDE.md).
       để nạp code khoá mới (module đã nằm trong `sys.modules`).
 - [ ] Sau vài phiên: xác nhận log không còn `PermissionError` và lệnh thật
       xuất hiện đúng lúc engine mở vị thế ảo.
+
+## 11/09/2026 (chiều) — Rà soát lệnh bảo vệ, mở app bằng Chrome
+
+- [x] `Chay_App.bat`: `--server.headless true` + mở Chrome cửa sổ riêng (nhãn `:mo_chrome`),
+      đã kiểm chứng thật: cửa sổ "Streamlit - Google Chrome" + kết nối tới 8501.
+- [x] File `.lock` ghi `pid:thread` bên giữ khoá; chờ ≥1s thì log. Phát hiện ngay
+      thread `VPS-Telegram-readonly` giữ khoá 2–3s/lần (đối soát VPS qua Chrome).
+- [x] Guard theo tên thread cho cả 2 worker (`VPS-reconcile`, `VPS-Telegram-readonly`):
+      Streamlit nạp lại module không sinh thêm thread. `lessons.md` 36.
+- [x] Timeout nối CDP 5s → 15s (`cdp_connect_timeout_ms`). 13:06:39 hôm nay bỏ 1
+      tín hiệu SHORT vì timeout 5s; ngày 08/09 có 4.814 lần timeout.
+- [x] So sánh shadow trailing 4×ATR trên 17 lệnh ghép cặp (07–11/09): shadow
+      +37,85đ vs thật +16,35đ, nhưng hơn 7 / kém 7, chênh dồn vào 3 lệnh giữ
+      113–147 phút (#44 +10,1 · #62 +8,8 · #70 +9,2). n=17 chưa đủ kết luận.
+- [ ] **Vận hành:** restart server 8501 SAU 14:45 để gộp về một bản module
+      (đang có thread cũ/mới chạy song song sau các lần nạp lại — vẫn an toàn nhờ
+      khoá chờ, nhưng thừa).
+- [ ] **Quyết định của user:** Antigravity IDE (2 cửa sổ) đang bám cổng 9222 của
+      Chrome AutoTrade qua Playwright driver → gây timeout CDP. Đề xuất đổi cổng
+      CDP sang 9333 (sửa `Chay_Chrome_AutoTrade.bat`, `Chay_App.bat`,
+      `Kiem_Tra_Chrome_AutoTrade.ps1`, `cdp_url` trong config) — cần restart
+      Chrome AutoTrade + đăng nhập lại SmartPro, làm ngoài giờ.
+- [ ] **Lỗ hổng bảo vệ chưa sửa (cần quyết định):** khi thoát lệnh, bot hủy SL/TP
+      TRƯỚC rồi mới gửi lệnh thoát; nếu VPS từ chối lệnh thoát (`REJECTED`) thì
+      vị thế nằm trần, `reconcile` dừng lại chờ người xử lý, stop guard từ chối
+      chồng Stop khi chu kỳ còn mở. Có cảnh báo Telegram trong ≤30s (vps_telegram
+      `risk_alerts`), nhưng không tự đặt lại bảo vệ. Phương án: cho phép
+      `_place_sltp` lại SL (không TP) đúng ngưỡng cũ sau khi thoát bị từ chối,
+      tối đa 1 lần — cần user duyệt vì đây là lệnh thật.

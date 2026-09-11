@@ -67,3 +67,24 @@ def test_locked_state_gives_clear_error_after_timeout(state_path, monkeypatch):
                 pass
     finally:
         proc.wait(timeout=10)
+
+
+def test_lock_file_records_holder_and_worker_is_detected_by_name(state_path):
+    for _ in range(3):                      # nhiều lần giữ khoá → nhãn KHÔNG nối đuôi
+        with rt.locked_state():
+            pass
+    tag = (str(state_path) + '.lock')
+    raw = open(tag, 'rb').read()
+    assert raw[:1] == b'0'
+    holder = raw[1:].decode('utf-8')
+    assert holder == f'{os.getpid()}:MainThread', holder
+
+    import threading, time as _t
+    stop = threading.Event()
+    th = threading.Thread(target=stop.wait, name=rt._WORKER_THREAD_NAME, daemon=True)
+    th.start()
+    try:
+        assert rt._worker_alive()          # module nạp lại (_WORKER=None) vẫn thấy thread cũ
+    finally:
+        stop.set(); th.join(timeout=2)
+    assert not rt._worker_alive()

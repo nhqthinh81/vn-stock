@@ -1026,6 +1026,17 @@ _FILE_LOCK_POLL_SEC    = 0.2
 đọc code. Log lỗi lặp đều mỗi ~6s là dấu vết hai worker thay phiên giữ khoá.
 `Chay_App.bat` nay từ chối mở server thứ hai. Xem `tasks/lessons.md` mục 35.
 
+### Mở app bằng Chrome cửa sổ riêng, không dùng trình duyệt mặc định (11/09/2026)
+`Chay_App.bat` chạy `streamlit run app.py --server.headless true` (tắt tự mở
+Edge) rồi gọi `chrome.exe --new-window http://localhost:8501` sau 6 giây qua
+nhãn `:mo_chrome`. Gọi `Chay_App.bat :mo_chrome_only` chỉ mở Chrome, không
+mở server. Lý do: user hay đóng nhầm tab app khi nó nằm chung Edge với tab khác.
+
+### Streamlit nạp lại module khi sửa file → worker/khoá nhân đôi trong 1 tiến trình
+`ensure_worker()` nhận diện worker theo tên thread (`_worker_alive()`), file
+`.lock` ghi `pid:thread` bên giữ khoá; chờ khoá ≥1s thì log. Sửa
+`autotrade_runtime.py` khi app đang chạy PHẢI restart server. Xem `lessons.md` 36.
+
 ### Ghép cặp MỞ↔ĐÓNG chịu được dữ liệu hỏng — `_pair_by_time()`
 ```python
 # SAI: tin trade_id là duy nhất
