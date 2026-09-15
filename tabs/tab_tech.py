@@ -22,7 +22,7 @@ def render(ctx: dict) -> None:
         _in_wl = symbol_input in _lw()
         if _in_wl:
             st.success("⭐ Đã theo dõi", icon=None)
-        elif st.button("⭐ Theo dõi", use_container_width=True):
+        elif st.button("⭐ Theo dõi", width="stretch"):
             _atw(symbol_input)
             st.rerun()
 
@@ -172,7 +172,7 @@ def render(ctx: dict) -> None:
             if _vol is not None:
                 _tech_rows.append({"Chỉ số": "Volume Ratio",      "Giá trị": f"{_vol:.2f}x",
                                     "Lý thuyết": "Granville's Law (1963)"})
-            st.dataframe(pd.DataFrame(_tech_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_tech_rows), width="stretch", hide_index=True)
 
         with col_right:
             st.subheader("Phiên giao dịch gần nhất")
@@ -376,7 +376,7 @@ def render(ctx: dict) -> None:
         fig.update_yaxes(title_text="Giá (nghìn VNĐ)", row=1, col=1)
         fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100])
         fig.update_yaxes(title_text="MACD", row=3, col=1)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # ── Chatbot Kỹ Thuật ─────────────────────────────────────────────
         st.divider()

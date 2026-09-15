@@ -1,3 +1,5 @@
+> Cập nhật 13/09/2026: xem [tasks/backlog-2026-09-13.md](tasks/backlog-2026-09-13.md) về Stop khôi phục, Telegram, cổng CDP 9333 và các bước vận hành còn chờ. Nội dung bên dưới gồm thông tin lịch sử.
+
 # VN Invest App — CLAUDE.md
 
 ## Dự án là gì

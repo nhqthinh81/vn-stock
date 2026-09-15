@@ -5,11 +5,11 @@ rem  Gop 2 viec vao 1 file (10/09/2026): KIEM TRA truoc, chi MO khi can, roi
 rem  KIEM TRA LAI de xac nhan that su san sang.
 rem
 rem  Ly do phai kiem tra lai sau khi mo: ban cu chi "start chrome roi mac ke".
-rem  Su co 08/09/2026 - Chrome giu dung cong 9222 nhung dang o SmartOne chu
+rem  Su co 08/09/2026 - Chrome giu dung cong 9333 nhung dang o SmartOne chu
 rem  khong phai SmartPro - keo dai 10 ngay vi khong co buoc xac nhan nao.
 rem
 rem  Logic kiem tra dung chung file Kiem_Tra_Chrome_AutoTrade.ps1 (chi doc
-rem  http://127.0.0.1:9222/json, khong dung Playwright, khong dam vao trang).
+rem  http://127.0.0.1:9333/json, khong dung Playwright, khong dam vao trang).
 rem  KHONG chep logic sang day - mot ban duy nhat de khong bao gio lech nhau.
 rem
 rem  Ma thoat cua .ps1:  0 = san sang | 1 = cong dong/khong co tab | 2 = sai trang
@@ -46,10 +46,10 @@ if not exist "%CHROME%" (
     goto :ket_thuc
 )
 rem Chrome dung chung --user-data-dir: neu cua so do DANG chay thi lenh nay
-rem chi them 1 tab SmartPro vao chinh no (giu nguyen cong 9222 dang mo), con
+rem chi them 1 tab SmartPro vao chinh no (giu nguyen cong 9333 dang mo), con
 rem neu chua chay thi mo cua so moi kem cong debug. Mot lenh xu ly ca 2 truong hop.
 start "" "%CHROME%" ^
-  --remote-debugging-port=9222 ^
+  --remote-debugging-port=9333 ^
   --user-data-dir="%PROFILE%" ^
   --no-first-run --no-default-browser-check ^
   "%SMARTPRO%"
@@ -76,7 +76,7 @@ if not errorlevel 1 goto :san_sang
 echo.
 echo ====================================================================
 echo  VAN CHUA SAN SANG. Hai nguyen nhan thuong gap:
-echo   1) Cong 9222 dang bi mot tien trinh KHAC chiem (Chrome nay khong
+echo   1) Cong 9333 dang bi mot tien trinh KHAC chiem (Chrome nay khong
 echo      bind duoc cong) - dong het cua so Chrome AutoTrade cu roi chay lai.
 echo   2) Cua so vua mo dang o trang khac - go dia chi %SMARTPRO%
 echo      vao chinh cua so do.
@@ -90,11 +90,11 @@ rem thua lam bot ngung giao dich ca phien. Ngay 10/09 chinh script nay tao ra ta
 rem thua do checker con so URL (tab dang tai co URL rong). Giu tab CU NHAT vi do
 rem la tab da dang nhap va da duoc xac minh.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "try { $t = Invoke-RestMethod 'http://127.0.0.1:9222/json' -TimeoutSec 5 } catch { exit 0 };" ^
+  "try { $t = Invoke-RestMethod 'http://127.0.0.1:9333/json' -TimeoutSec 5 } catch { exit 0 };" ^
   "$p = @($t | Where-Object { $_.type -eq 'page' -and ($_.url -like '*smartpro.vps.com.vn*' -or $_.title -like '*SmartPro*') });" ^
   "if($p.Count -le 1){ exit 0 };" ^
   "Write-Host ('  [don dep] Thay ' + $p.Count + ' tab SmartPro - dong bot, chi giu 1.') -ForegroundColor Yellow;" ^
-  "$p | Select-Object -Skip 1 | ForEach-Object { try { Invoke-RestMethod ('http://127.0.0.1:9222/json/close/' + $_.id) -TimeoutSec 5 | Out-Null } catch {} }"
+  "$p | Select-Object -Skip 1 | ForEach-Object { try { Invoke-RestMethod ('http://127.0.0.1:9333/json/close/' + $_.id) -TimeoutSec 5 | Out-Null } catch {} }"
 
 echo.
 echo  [OK] Cua so 1/2 - Chrome AutoTrade (SmartPro) san sang.
@@ -144,7 +144,7 @@ goto :ket_thuc
 echo.
 echo ====================================================================
 echo  CA HAI CUA SO DA SAN SANG:
-echo    1) Chrome AutoTrade - SmartPro (cong 9222) : noi lenh THAT di ra
+echo    1) Chrome AutoTrade - SmartPro (cong 9333) : noi lenh THAT di ra
 echo    2) App Streamlit    - tab PHAI SINH        : noi engine chay
 echo.
 echo  GIU NGUYEN CA HAI. Dong bat ky cai nao la bot ngung hoat dong:

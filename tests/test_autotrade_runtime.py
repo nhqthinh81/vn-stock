@@ -72,9 +72,12 @@ def live(tmp_path,monkeypatch):
     @contextmanager
     def connection(config): yield broker
     monkeypatch.setattr(rt,'STATE_PATH',tmp_path/'autotrade_live_state.json')
+    monkeypatch.setattr(rt,'_READ_ONLY_SENTINEL',tmp_path/'read-only-disabled')
     monkeypatch.setattr(rt,'connect',connection)
     monkeypatch.setattr(rt,'now_vn',lambda:clock[0])
     monkeypatch.setattr(rt,'_LAST_ERROR','')
+    monkeypatch.setattr(rt,'_LAST_SNAPSHOT_AT','')
+    monkeypatch.setattr(rt,'_UNMANAGED_POSITIONS',())
     monkeypatch.setattr(at,'load_config',lambda:deepcopy(cfg))
     monkeypatch.setattr(rt.time,'sleep',lambda *args:None)
     ticks=iter(range(0,100000,10))
@@ -82,6 +85,17 @@ def live(tmp_path,monkeypatch):
     def enter(key='signal-1'):
         return at.submit_signal('LONG',True,1981.5,True,1975.,None,key,clock[0].isoformat())
     return SimpleNamespace(clock=clock,cfg=cfg,broker=broker,enter=enter)
+
+
+def test_read_only_tick_reports_unmanaged_position_without_sending(live):
+    live.broker.data['positions'][0].update(net=-1,avg=1939.1,last=1938.5)
+    live.broker.data['orders'].append(dict(id='external',number='external',symbol='41I1G9000',
+        side='S',qty=1,filled=1,avg=1939.1,price='MAK',state='FILLED'))
+    assert rt.tick(allow_actions=False)[0]
+    current=rt.status()
+    assert current['cycle_state']=='UNMANAGED'
+    assert current['unmanaged_positions'][0]['net']==-1
+    assert live.broker.sent==[]
 
 
 def test_entry_single_parent_with_attached_sl(live):
@@ -258,6 +272,23 @@ def test_tick_read_only_cannot_send(live):
     assert len(live.broker.sent)==1
 
 
+def test_process_read_only_switch_blocks_submit_and_close(live,monkeypatch):
+    monkeypatch.setenv('VNINVEST_READ_ONLY','1')
+    assert not live.enter()[0]
+    assert not rt.request_close('LONG',signal_id='signal-1')[0]
+    assert not live.broker.sent
+    assert rt.status()['read_only_mode'] is True
+
+
+def test_dispatch_kill_switch_blocks_broker_boundary(live,monkeypatch):
+    monkeypatch.setenv('VNINVEST_READ_ONLY','1')
+    state=rt.load_state()
+    intent={'id':'blocked','kind':'exit','symbol':'41I1G9000','side':'SHORT','qty':1}
+    with pytest.raises(RuntimeError,match='READ_ONLY'):
+        rt._dispatch(state,live.broker,intent)
+    assert not live.broker.sent
+
+
 @pytest.mark.parametrize('hour,minute,allowed',[(8,45,False),(9,0,True),(11,26,False),(12,0,False),(13,0,True),(14,26,False),(14,31,False)])
 def test_entry_trading_windows(live,hour,minute,allowed):
     live.clock[0]=live.clock[0].replace(hour=hour,minute=minute)
@@ -309,7 +340,7 @@ def test_triggered_sl_fill_with_stale_position_never_sends_exit(live):
     rt.tick();rt.tick()
     assert [k for k,_ in live.broker.sent]==['entry']
     live.broker.data['positions'][0]['net']=0
-    rt.tick()
+    rt.tick(allow_actions=False)
     assert rt.status()['cycle_state']=='FLAT'
 
 

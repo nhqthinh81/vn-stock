@@ -1,5 +1,6 @@
 @echo off
 if "%~1"==":mo_chrome_only" goto mo_chrome_only
+cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
 chcp 65001 > nul
 echo ============================================
@@ -14,21 +15,27 @@ if exist ".venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
-REM Kiểm tra streamlit
-python -c "import streamlit" 2>nul
+
+REM width="stretch" can Streamlit 1.55 tro len; import thanh cong chua du.
+python -c "import streamlit, sys; sys.exit(tuple(map(int, streamlit.__version__.split('.')[:2])) < (1, 55))" 2>nul
 if errorlevel 1 (
-    echo Chua co streamlit. Dang cai dat...
-    pip install -r requirements.txt
+    echo Can Streamlit 1.55 tro len. Dang cap nhat thu vien...
+    python -m pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo Cai dat that bai. Chua khoi dong ung dung hoac Chrome AutoTrade.
+        pause
+        exit /b 1
+    )
 )
 
-REM Chrome dat lenh tu dong (tab Phai Sinh) — chi mo neu chua co cong 9222
+REM Chrome dat lenh tu dong (tab Phai Sinh) — chi mo neu chua co cong 9333
 REM dang lang nghe, tranh mo trung cua so Chrome cung profile.
-netstat -ano | findstr /R /C:":9222 .*LISTENING" >nul
+netstat -ano | findstr /R /C:":9333 .*LISTENING" >nul
 if errorlevel 1 (
     echo Dang mo Chrome dat lenh tu dong...
     start "" "%~dp0Chay_Chrome_AutoTrade.bat"
 ) else (
-    echo Chrome dat lenh tu dong da dang chay ^(cong 9222^).
+    echo Chrome dat lenh tu dong da dang chay ^(cong 9333^).
 )
 echo.
 

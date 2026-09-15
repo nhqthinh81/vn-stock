@@ -100,7 +100,7 @@ def render(ctx: dict) -> None:
                                        key="scan_single_input").upper().strip()
         with _s1c2:
             st.markdown("<div style='height:1.75em'></div>", unsafe_allow_html=True)
-            _btn_single = st.button("🔍 Scan", use_container_width=True)
+            _btn_single = st.button("🔍 Scan", width="stretch")
         if _btn_single and scan_single:
             with st.spinner(f"Đang scan {scan_single}..."):
                 rec = scan_ami_symbol(scan_single, with_lstm=_use_lstm_scan) or scan_symbol(scan_single, source=source)
@@ -111,7 +111,7 @@ def render(ctx: dict) -> None:
     col_b, col_c, col_a = st.columns(3)
 
     with col_a:
-        if st.button("🔄 Làm mới (giá + signal)", use_container_width=True,
+        if st.button("🔄 Làm mới (giá + signal)", width="stretch",
                      help="Đọc lại scan_result.csv + tính lại signal cho cache hiện tại"):
             _total_ami = len(load_cache())
             _prog = st.progress(0, text="Đang scan từ Amibroker...")
@@ -125,7 +125,7 @@ def render(ctx: dict) -> None:
         _age_note = f" · {_ami_scan_age}" if _ami_scan_age else ""
         _btn_filtered = st.button(
             f"⚡ Scan đã lọc ({len(_ami_list)} mã{_age_note})",
-            use_container_width=True,
+            width="stretch",
             type="primary",
             help="Scan các mã trong scan_result.csv — đã qua bộ lọc Amibroker Explorer (~20s)",
         )
@@ -133,7 +133,7 @@ def render(ctx: dict) -> None:
     with col_c:
         _btn_all = st.button(
             f"🌐 Scan tất cả ({len(_all_ami_syms)} mã)",
-            use_container_width=True,
+            width="stretch",
             help="Scan toàn bộ mã có data trong history_by_ticker/ (~20s)",
         )
 
@@ -304,7 +304,7 @@ def render(ctx: dict) -> None:
         else:
             st.caption("📌 Không có mã BUY-A / BUY-A* trong cache hiện tại.")
     with _pt_col2:
-        if st.button("📌 Ghi BUY-A hôm nay", use_container_width=True,
+        if st.button("📌 Ghi BUY-A hôm nay", width="stretch",
                      disabled=not _buya_rows,
                      help="Ghi toàn bộ mã BUY-A và BUY-A* hiện tại vào Paper Trading để theo dõi T+5 tuần"):
             # Gate 1: market regime — không vào BUY mới khi VNI bear (dưới SMA50)
@@ -658,7 +658,7 @@ def render(ctx: dict) -> None:
     line-height: 1.5 !important;
 }
 </style>""", unsafe_allow_html=True)
-        st.dataframe(df_display, use_container_width=True, hide_index=True,
+        st.dataframe(df_display, width="stretch", hide_index=True,
             column_config={
                 "Mã":        st.column_config.TextColumn(width="small"),
                 "Giá":       st.column_config.NumberColumn(format="%,.2f", width="small"),
@@ -705,7 +705,7 @@ def render(ctx: dict) -> None:
                     "🔬 Phân Tích Trước GD",
                     key="pretrade_run_btn",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if _run_pretrade and _pre_sym:
                 st.session_state["pretrade_open_sym"] = _pre_sym
@@ -756,7 +756,7 @@ def render(ctx: dict) -> None:
         if "signal" in df_scan.columns:
             sig_count = df_scan["signal"].value_counts().reset_index()
             sig_count.columns = ["Tín hiệu","Số mã"]
-            st.bar_chart(sig_count.set_index("Tín hiệu"), use_container_width=True)
+            st.bar_chart(sig_count.set_index("Tín hiệu"), width="stretch")
 
         st.divider()
         st.subheader("📊 Backtest — Win rate tín hiệu trên dữ liệu VN")
@@ -845,7 +845,7 @@ def render(ctx: dict) -> None:
         else:
             st.info("Chưa có kết quả backtest. Nhấn nút bên dưới để chạy lần đầu (~2-5 phút).")
 
-        if st.button("▶ Chạy Backtest", use_container_width=True, key="run_bt"):
+        if st.button("▶ Chạy Backtest", width="stretch", key="run_bt"):
             _bt_pb = st.progress(0)
             _bt_txt = st.empty()
             def _bt_cb(i, total, sym):

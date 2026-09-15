@@ -114,7 +114,7 @@ def _render_history_chart(key: str, info: dict) -> None:
     if df.empty:
         return
     label = _LABEL.get(key, key)
-    st.line_chart(df.set_index("period")["value"], height=120, use_container_width=True)
+    st.line_chart(df.set_index("period")["value"], height=120, width="stretch")
     st.caption(f"Lịch sử {label} ({len(df)} điểm)")
 
 

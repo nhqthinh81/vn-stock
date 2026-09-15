@@ -59,8 +59,13 @@ def _run_render(tmp_path, monkeypatch, in_session):
     monkeypatch.setattr(at, "submit_signal_async", lambda *a, **k: None)
     monkeypatch.setattr(at, "close_position_async", lambda *a, **k: None)
 
+    monkeypatch.setattr(ps, "_BASE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(ps, "_MODEL_PATH", str(tmp_path / "model.keras"))
+    monkeypatch.setattr(ps, "_SCALER_PATH", str(tmp_path / "scaler.pkl"))
+    monkeypatch.setattr(ps, "_CRED_FILE", str(tmp_path / "credentials.json"))
     monkeypatch.setattr(ps, "_PS_STATE_FILE", str(tmp_path / "ps_state.json"))
     monkeypatch.setattr(ps, "_JOURNAL_FILE", str(tmp_path / "journal.csv"))
+    monkeypatch.setattr(ps, "_SHADOW_JOURNAL_FILE", str(tmp_path / "shadow.csv"))
     monkeypatch.setattr(ps, "_DATA_FILE_1M", _write_feed(tmp_path / "vn30f1m_1min.csv"))
     monkeypatch.setattr(ps, "_load_ui_pref", lambda: {})   # tránh auto-gửi email báo cáo
     monkeypatch.setattr(ps, "_load_ai_system", lambda: (None, None))
@@ -93,7 +98,7 @@ def test_khong_canh_bao_phien_vps_ngoai_gio(tmp_path, monkeypatch):
     sent, run = _run_render(tmp_path, monkeypatch, in_session=False)
     assert not run.exception, "\n".join(str(e.value)[:400] for e in run.exception)
     assert not _session_alerts(sent), (
-        "Ngoài giờ giao dịch vẫn bắn cảnh báo phiên VPS:\n" + "\n".join(sent))
+        "Ngoài giờ giao dịch vẫn bắn cảnh báo phiên VPS:\n" + "\n".join(sent) + str({k:run.session_state[k] for k in ["ps_errors","ps_is_owner","ps_last_time"] if k in run.session_state}))
 
 
 @pytest.mark.slow
@@ -103,4 +108,4 @@ def test_van_canh_bao_phien_vps_trong_gio(tmp_path, monkeypatch):
     assert not run.exception, "\n".join(str(e.value)[:400] for e in run.exception)
     assert len(_session_alerts(sent)) == 1, (
         f"Trong giờ phải cảnh báo đúng 1 lần, thực tế {len(_session_alerts(sent))}:\n"
-        + "\n".join(sent))
+        + "\n".join(sent) + str({k:run.session_state[k] for k in ["ps_errors","ps_is_owner","ps_last_time"] if k in run.session_state}))

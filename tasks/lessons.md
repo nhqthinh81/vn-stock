@@ -1030,3 +1030,14 @@ cho việc lỗi đã có từ 07/09 15:35, trước khi server 8502 tồn tại
   log kèm bên giữ trước đó. Lần sau không phải đoán ai giữ khoá.
 - Sửa code engine/runtime khi app đang chạy thì phải RESTART server, không
   chỉ rerun. Tốt nhất sửa ngoài giờ giao dịch hoặc giờ nghỉ trưa.
+
+
+## 37. Khôi phục Stop phải kiểm lại danh tính và dữ liệu sau mọi lần chờ/đọc
+
+Rà soát ngày 13/09 tái hiện bằng broker giả: lệnh con đã có ID bị nhận nhầm sang ID khác; Stop chờ không được hủy sau đóng tay ở ngày mới; lượt đọc thứ hai bỏ sót hạn hợp đồng; chu kỳ được kết thúc khi điều kiện Stop vừa biến mất. Đã thêm test hồi quy và chốt tương ứng.
+
+- Định danh lệnh con đã xác minh phải bất biến; phản hồi đổi ID không phải quyền nhận hoặc hủy lệnh mới.
+- Chốt không mở/thoát qua ngày không được vô tình chặn dọn đúng điều kiện còn chờ đã sở hữu. Chỉ cho ngoại lệ hủy với ID, nội dung và snapshot mới đã kiểm; không tái dùng ID lệnh thường của ngày cũ.
+- Snapshot thứ hai phải kiểm cả thuộc tính hợp đồng và tuổi dữ liệu, không chỉ số lượng vị thế. Trạng thái CLOSED từ lượt trước không thay được bằng chứng liên kết điều kiện/lệnh con ở lượt hiện tại.
+- Thời gian dùng quyết định lịch gửi phải lấy sau khi chờ khóa, không giữ mốc từ trước khóa.
+- Sau tăng yêu cầu tối thiểu của thư viện, launcher đang chỉ kiểm import cũng cần kiểm phiên bản để máy đã cài bản cũ không bỏ qua nâng cấp.

@@ -161,6 +161,7 @@ def test_disabled_reports_do_not_connect(report,monkeypatch):
 
 
 def test_worker_polls_even_without_credentials_and_starts_once(report,monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST",raising=False)
     calls=[]
     class FakeThread:
         def __init__(self,**kwargs):self.target=kwargs['target']
@@ -372,3 +373,56 @@ def test_duplicate_conditions_do_not_count_as_full_coverage(report):
     report.broker.data['conditions'].append(deepcopy(report.broker.data['conditions'][0]))
     text='\n'.join(tg.build_messages(report.broker.snapshot(),rt.load_state()))
     assert 'chưa xác nhận đủ SL/Stop' in text
+
+
+@pytest.mark.parametrize('hour,minute',[(16,0),(20,30),(23,50)])
+def test_late_start_skips_journal_and_vps(report,monkeypatch,hour,minute):
+    report.clock[0]=report.clock[0].replace(hour=hour,minute=minute)
+    monkeypatch.setattr(tg,'_report_state',lambda:pytest.fail('outside schedule must not lock journal'))
+    monkeypatch.setattr(tg,'connect',lambda cfg:pytest.fail('outside schedule must not connect'))
+    assert tg.poll(sender=lambda message:pytest.fail('must not send'))[0]
+    assert tg.health()['phase']=='AFTER_HOURS'
+
+
+def test_journal_busy_has_safe_diagnostic_and_recovers(report,monkeypatch):
+    original=tg._report_state
+    def busy():raise rt.StateBusyError('secret must not leak')
+    monkeypatch.setattr(tg,'_report_state',busy)
+    assert not tg.poll(sender=lambda m:True)[0]
+    assert tg.health()['phase']=='WAITING_JOURNAL'
+    assert 'secret' not in tg.health()['error']
+    monkeypatch.setattr(tg,'_report_state',original)
+    assert tg.poll(sender=lambda m:True)[0]
+
+
+def test_manual_late_report_still_allowed(report):
+    report.clock[0]=report.clock[0].replace(hour=20)
+    sent=[]
+    assert tg.poll(force=True,sender=lambda m:sent.append(m) or True)[0]
+    assert sent
+
+
+
+def test_corrupt_journal_is_reported_without_reset_or_send(report):
+    rt.STATE_PATH.write_text('{broken',encoding='utf-8')
+    assert not tg.poll(sender=lambda m:pytest.fail('must not send'))[0]
+    assert tg.health()['phase']=='FAILED'
+    assert 'JSON' in tg.health()['error']
+    assert rt.STATE_PATH.read_text(encoding='utf-8')=='{broken'
+
+
+
+def test_lock_wait_crossing_cutoff_does_not_send(report,monkeypatch):
+    from contextlib import contextmanager
+    report.clock[0]=report.clock[0].replace(hour=15,minute=59,second=50)
+    original=tg._report_state;calls=[]
+    @contextmanager
+    def delayed_lock():
+        calls.append(1)
+        if len(calls)==2:report.clock[0]+=timedelta(seconds=20)
+        with original() as state:yield state
+    monkeypatch.setattr(tg,'_report_state',delayed_lock)
+    sent=[]
+    assert tg.poll(sender=lambda m:sent.append(m) or True)[0]
+    assert not sent
+    assert tg.health()['phase']=='AFTER_HOURS'

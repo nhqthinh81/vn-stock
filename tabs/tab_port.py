@@ -151,7 +151,7 @@ def render(ctx: dict) -> None:
 
             st.dataframe(
                 _df_open.drop(columns=["_id", "_first"]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Tín hiệu": st.column_config.TextColumn(
@@ -196,7 +196,7 @@ def render(ctx: dict) -> None:
                 yaxis=dict(ticksuffix="%", zeroline=True, zerolinecolor="#555"),
                 xaxis=dict(tickangle=-45),
             )
-            st.plotly_chart(_fig_bar, use_container_width=True)
+            st.plotly_chart(_fig_bar, width="stretch")
 
             # ── Đóng trade thủ công ───────────────────────────────────────────
             with st.expander("✏️ Đóng trade thủ công"):
@@ -230,7 +230,7 @@ def render(ctx: dict) -> None:
                 })
             st.dataframe(
                 pd.DataFrame(_pt_hist_rows),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Return%": st.column_config.NumberColumn(format="%.2f%%"),
@@ -260,7 +260,7 @@ def render(ctx: dict) -> None:
                     height=220, template="plotly_dark",
                     margin=dict(t=40, b=20, l=20, r=20),
                 )
-                st.plotly_chart(_fig_wr, use_container_width=True)
+                st.plotly_chart(_fig_wr, width="stretch")
 
         # ── Xóa trade ────────────────────────────────────────────────────────
         with st.expander("🗑️ Xóa trade"):
@@ -293,7 +293,7 @@ def render(ctx: dict) -> None:
 
             _edited = st.data_editor(
                 _dm_loaded,
-                use_container_width=True,
+                width="stretch",
                 num_rows="dynamic",
                 column_config={
                     "symbol":    st.column_config.TextColumn("Mã CK", max_chars=10,
@@ -312,7 +312,7 @@ def render(ctx: dict) -> None:
             )
 
             _pc1, _pc2 = st.columns([1, 1])
-            if _pc1.button("💾 Lưu danh mục", type="primary", use_container_width=True):
+            if _pc1.button("💾 Lưu danh mục", type="primary", width="stretch"):
                 _e = _edited.copy()
                 _e["symbol"]   = _e["symbol"].astype(str).str.strip()
                 _e["quantity"] = pd.to_numeric(_e["quantity"], errors="coerce").fillna(0)
@@ -320,7 +320,7 @@ def render(ctx: dict) -> None:
                 save_portfolio_manual(_to_save)
                 st.success(f"Đã lưu {len(_to_save)} mã.")
                 st.rerun()
-            if _pc2.button("🏭 Tự điền ngành", use_container_width=True,
+            if _pc2.button("🏭 Tự điền ngành", width="stretch",
                            help="Truy vấn ngành từ vnstock cho các mã chưa có hoặc 'Chưa phân loại'"):
                 _e2 = _edited.copy()
                 _e2["symbol"] = _e2["symbol"].astype(str).str.strip().str.upper()
@@ -354,7 +354,7 @@ def render(ctx: dict) -> None:
                 _del_col1, _del_col2 = st.columns([1, 1])
                 _del_sym = _del_col1.selectbox("Chọn mã cần xóa", ["—"] + _saved_syms,
                                                key="del_sym_select")
-                if _del_col2.button("🗑️ Xóa mã đã chọn", use_container_width=True,
+                if _del_col2.button("🗑️ Xóa mã đã chọn", width="stretch",
                                     disabled=(_del_sym == "—")):
                     _kept = _dm_loaded[_dm_loaded["symbol"] != _del_sym]
                     save_portfolio_manual(_kept)
@@ -401,7 +401,7 @@ def render(ctx: dict) -> None:
 
             _port_syms = df_port["symbol"].tolist()
             _psig_btn_col, _psig_info_col = st.columns([1, 3])
-            if _psig_btn_col.button("🔄 Làm mới tín hiệu", use_container_width=True,
+            if _psig_btn_col.button("🔄 Làm mới tín hiệu", width="stretch",
                                     help="Tính lại tín hiệu real-time từ vnstock + Amibroker cho từng mã trong danh mục"):
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 from vn_invest.screener import get_ami_scan_data as _get_ami_data
@@ -535,11 +535,11 @@ def render(ctx: dict) -> None:
             if not df_sector.empty:
                 col_chart, col_table = st.columns([2, 1])
                 with col_chart:
-                    st.bar_chart(df_sector.set_index("sector")["weight_pct"], use_container_width=True)
+                    st.bar_chart(df_sector.set_index("sector")["weight_pct"], width="stretch")
                 with col_table:
                     st.dataframe(
                         df_sector.rename(columns={"sector":"Ngành","market_value":"GT (VNĐ)","weight_pct":"Tỷ trọng (%)"}),
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                         column_config={
                             "GT (VNĐ)":     st.column_config.NumberColumn(format="%,.0f"),
                             "Tỷ trọng (%)": st.column_config.NumberColumn(format="%.1f%%"),

@@ -1,3 +1,5 @@
+> Cập nhật 13/09/2026: xem [tasks/backlog-2026-09-13.md](tasks/backlog-2026-09-13.md) về Stop khôi phục, Telegram, cổng CDP 9333 và các bước vận hành còn chờ. Nội dung bên dưới gồm thông tin lịch sử.
+
 # Handoff — VPS SmartPro AutoTrade và Telegram
 
 Cập nhật: 08/09/2026, múi giờ Asia/Saigon. Thay thế bản handoff ngày 07/09. Đây là bản bàn giao kỹ thuật, không phải xác nhận đã khớp lệnh thật. Kiểm tra lại trạng thái chạy khi tiếp nhận; PID/cổng bên dưới là lần kiểm tra gần nhất.

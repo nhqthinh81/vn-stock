@@ -363,3 +363,17 @@ def test_partial_remain_qty_is_trusted_when_broker_reports_it(protect):
     snapshot['conditions'] = [_live_row(qty=2, remaining=1)]
     cover = sg.protection_coverage(snapshot, pos)
     assert not cover['confirmed'] and cover['sl_qty'] == 1 and cover['required_qty'] == 2
+
+
+
+def test_known_stop_child_cannot_switch_to_another_order(protect):
+    rt.tick();rt.tick();trigger(protect,0,'PENDING');rt.tick()
+    old_id=current()['child_id']
+    row=deepcopy(protect.broker.data['orders'][-1]);row.update(id='another-child',number='another-child')
+    protect.broker.data['orders'].append(row)
+    protect.broker.data['conditions'][0].update(child='another-child',child_number='another-child')
+    count=len(protect.broker.sent)
+    rt.tick()
+    assert current()['state']=='UNKNOWN'
+    assert current()['child_id']==old_id
+    assert len(protect.broker.sent)==count

@@ -243,7 +243,7 @@ def render(_ctx: dict) -> None:
     df = pd.DataFrame(rows)
     st.dataframe(
         df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Mã":            st.column_config.TextColumn(width="small"),

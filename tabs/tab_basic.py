@@ -163,13 +163,13 @@ def render(ctx: dict) -> None:
             else:
                 st.markdown("**📊 Báo cáo phân tích đầy đủ** — DCF, DuPont, định giá, kỹ thuật, tin tức 30 ngày.")
         with _rpt_col2:
-            if st.button("📊 Tạo Báo Cáo", key="btn_equity_report", use_container_width=True,
+            if st.button("📊 Tạo Báo Cáo", key="btn_equity_report", width="stretch",
                          type="secondary" if _rpt_path else "primary"):
                 st.session_state["show_equity_report_cmd"] = True
                 st.session_state["show_equity_report_view"] = False
         with _rpt_col3:
             _view_disabled = _rpt_path is None
-            if st.button("🔍 Xem Báo Cáo", key="btn_view_report", use_container_width=True,
+            if st.button("🔍 Xem Báo Cáo", key="btn_view_report", width="stretch",
                          type="primary", disabled=_view_disabled):
                 st.session_state["show_equity_report_view"] = True
                 st.session_state["show_equity_report_cmd"]  = False
@@ -355,7 +355,7 @@ def render(ctx: dict) -> None:
                 xaxis=dict(gridcolor="#333"),
                 yaxis=dict(gridcolor="#333"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         g_items = list(GROUPS.items())
         for i in range(0, len(g_items), 2):
@@ -377,7 +377,7 @@ def render(ctx: dict) -> None:
                     row_d[p] = f"{v:,.2f}" if v is not None else "—"
                 rows_list.append(row_d)
             if rows_list:
-                st.dataframe(pd.DataFrame(rows_list), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows_list), width="stretch", hide_index=True)
 
         st.subheader("Nhận định tự động")
 
@@ -576,7 +576,7 @@ def render(ctx: dict) -> None:
                     rows.append(row)
                 if rows:
                     df_t = pd.DataFrame(rows)
-                    st.dataframe(df_t, use_container_width=True, hide_index=True,
+                    st.dataframe(df_t, width="stretch", hide_index=True,
                                  column_config={"Chỉ tiêu": st.column_config.TextColumn(width="large")})
 
             with is_tab:
@@ -715,7 +715,7 @@ def render(ctx: dict) -> None:
                         font=dict(color="#cccccc"),
                         xaxis=dict(gridcolor="#333"), yaxis=dict(gridcolor="#333", title="Tỷ đồng"),
                     )
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                    st.plotly_chart(fig_trend, width="stretch")
 
                 # ── 1. Định giá 3 kịch bản ───────────────────────────────
                 st.divider()
@@ -1175,7 +1175,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                         legend=dict(orientation="h", y=1.15),
                         yaxis=dict(ticksuffix="%"),
                     )
-                    st.plotly_chart(_fig_m, use_container_width=True)
+                    st.plotly_chart(_fig_m, width="stretch")
                 st.caption(f"Nguồn: IMF WEO Datamapper · 📌 = dự báo/ước tính năm hiện tại · cập nhật: {_macro.get('updated','')}")
 
         # ── Tab GSO / NHNN (dữ liệu tĩnh, cập nhật thủ công) ─────────────────
@@ -1261,14 +1261,14 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
             )
             col_pie, col_tbl = st.columns([1, 1])
             with col_pie:
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width="stretch")
             with col_tbl:
                 df_show = pd.DataFrame({
                     "Cổ đông":    [r["name"] for r in shareholders],
                     "Tỷ lệ (%)":  [r["percent"] for r in shareholders],
                     "Cập nhật":   [r["updated"] for r in shareholders],
                 })
-                st.dataframe(df_show, use_container_width=True, hide_index=True)
+                st.dataframe(df_show, width="stretch", hide_index=True)
 
     with sh_tab2:
         if not officers:
@@ -1280,7 +1280,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                 "Sở hữu (%)":   [r["percent"] for r in officers],
                 "Số CP":        [f"{int(r['quantity']):,}" if r.get("quantity") else "—" for r in officers],
             })
-            st.dataframe(df_of, use_container_width=True, hide_index=True)
+            st.dataframe(df_of, width="stretch", hide_index=True)
 
     with sh_tab3:
         if not subsidiaries:
@@ -1291,7 +1291,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                 "Mã":           [r["code"] for r in subsidiaries],
                 "Tỷ lệ SH (%)": [r["percent"] for r in subsidiaries],
             })
-            st.dataframe(df_sub, use_container_width=True, hide_index=True)
+            st.dataframe(df_sub, width="stretch", hide_index=True)
 
     st.divider()
 
@@ -1360,7 +1360,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                 ] if c in df_div.columns]
                 if display_cols:
                     df_div = df_div[display_cols]
-                st.dataframe(df_div, use_container_width=True, hide_index=True)
+                st.dataframe(df_div, width="stretch", hide_index=True)
             except Exception:
                 st.json(dividends_list)
 
@@ -1383,7 +1383,7 @@ Trả lời tiếng Việt. Thẳng thắn, dựa trên số liệu trong phân 
                     _cap_col = df_cap["Vốn điều lệ (tỷ)"]
                     if _cap_col.dropna().max() > 1e10:
                         df_cap["Vốn điều lệ (tỷ)"] = _cap_col / 1e9
-                st.dataframe(df_cap, use_container_width=True, hide_index=True,
+                st.dataframe(df_cap, width="stretch", hide_index=True,
                     column_config={
                         "Vốn điều lệ (tỷ)": st.column_config.NumberColumn(format="%,.1f"),
                         "Tỷ lệ":             st.column_config.NumberColumn(format="%.2f"),

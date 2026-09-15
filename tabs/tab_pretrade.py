@@ -1085,7 +1085,7 @@ def render_backtest_section() -> None:
                             .applymap(_color_avg, subset=["Avg T+5 %", "Avg T+10 %", "Avg T+20 %"])
                             .format({"Avg T+5 %": "{:+.2f}", "Avg T+10 %": "{:+.2f}", "Avg T+20 %": "{:+.2f}"},
                                     na_rep="—"),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
@@ -1110,7 +1110,7 @@ def render_backtest_section() -> None:
                             .applymap(_color_avg, subset=["Avg T+5 %", "Avg T+10 %", "Avg T+20 %"])
                             .format({"Avg T+5 %": "{:+.2f}", "Avg T+10 %": "{:+.2f}", "Avg T+20 %": "{:+.2f}"},
                                     na_rep="—"),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 

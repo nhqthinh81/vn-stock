@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import datetime
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from .alerter import send_telegram as _tg_send, tg_escape as _tg_esc
 
@@ -53,6 +54,49 @@ _LOG_FILE   = os.path.join(_APP_DIR, "data", "autotrade_log.txt")
 _SHOT_DIR   = os.path.join(_APP_DIR, "data", "autotrade_shots")
 
 _LOCK = threading.Lock()          # 1 lệnh browser tại 1 thời điểm là đủ
+
+
+def _read_cdp_pages(cdp_url: str, timeout: float = 3.0) -> list[dict]:
+    """Read Chrome's tab inventory only; never attach or evaluate page code."""
+    parsed = urlparse(cdp_url)
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost"):
+        raise ValueError("CDP phải là địa chỉ HTTP localhost")
+    with urlopen(cdp_url.rstrip("/") + "/json", timeout=timeout) as response:
+        data = json.load(response)
+    if not isinstance(data, list):
+        raise ValueError("Chrome CDP trả danh sách tab không hợp lệ")
+    return data
+
+
+def cdp_preflight(cfg: dict | None = None) -> tuple[bool, str]:
+    """Fail closed on a stale-port migration; never switch CDP automatically."""
+    cfg = cfg or load_config()
+    configured = cfg.get("cdp_url", "")
+    try:
+        tabs = _read_cdp_pages(configured)
+    except Exception as configured_error:
+        for port in (9222, 9333):
+            alternate = f"http://127.0.0.1:{port}"
+            if alternate == configured.rstrip("/"):
+                continue
+            try:
+                other_tabs = _read_cdp_pages(alternate, timeout=1.0)
+            except Exception:
+                continue
+            if any(urlparse(str(tab.get("url", ""))).hostname == "smartpro.vps.com.vn"
+                   for tab in other_tabs if isinstance(tab, dict)):
+                return False, (f"Cấu hình dùng {configured} nhưng SmartPro đang ở {alternate}; "
+                               "không tự đổi cổng hoặc gửi lệnh")
+        return False, (f"Không mở được CDP đã cấu hình {configured}: "
+                       f"{type(configured_error).__name__}")
+    smartpro = [tab for tab in tabs if isinstance(tab, dict)
+                and tab.get("type") == "page"
+                and urlparse(str(tab.get("url", ""))).hostname == "smartpro.vps.com.vn"
+                and urlparse(str(tab.get("url", ""))).path.startswith("/v1/")]
+    if len(smartpro) != 1:
+        return False, ("CDP phải có đúng một tab SmartPro /v1/; "
+                       f"hiện thấy {len(smartpro)}")
+    return True, f"CDP sẵn sàng tại {configured}"
 
 # Cảnh báo Telegram khi phiên VPS chết TẠI THỜI ĐIỂM có tín hiệu thật (đường
 # phản ứng tức thời) — khác với quét định kỳ ~60 phút bên phaisinh_tab.py (đường
@@ -166,7 +210,7 @@ def _today_realized_loss_vnd(qty: int) -> float:
 _DEFAULT_CFG = {
     "enabled": False,             # công tắc tổng — false thì mọi lệnh chỉ ghi log
     "dry_run": True,              # true: điền + chụp màn hình, KHÔNG bấm nút đặt
-    "cdp_url": "http://127.0.0.1:9222",
+    "cdp_url": "http://127.0.0.1:9333",
     "page_url_contains": "vps.com.vn",
     "symbol": "VN30F1M",
     "max_qty": 1,

@@ -43,7 +43,14 @@ def test_phaisinh_tab_renders_without_exception(tmp_path, monkeypatch):
     # — và `_append_journal()` có thể ghi thẳng dòng MỞ/ĐÓNG vào nhật ký thật,
     # làm hỏng báo cáo lãi/lỗ. Phát hiện 10/09/2026 khi rà lại lúc thị trường
     # đang mở; cùng loại với bài học "chạy test không được lái giao dịch thật".
+    monkeypatch.setattr(ps, "_BASE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(ps, "_MODEL_PATH", str(tmp_path / "model.keras"))
+    monkeypatch.setattr(ps, "_SCALER_PATH", str(tmp_path / "scaler.pkl"))
+    monkeypatch.setattr(ps, "_CRED_FILE", str(tmp_path / "credentials.json"))
     monkeypatch.setattr(ps, "_PS_STATE_FILE", str(tmp_path / "ps_state.json"))
+    monkeypatch.setattr(ps, "_DATA_FILE_1M", str(tmp_path / "feed.csv"))
+    monkeypatch.setattr(ps, "_load_ui_pref", lambda: {})
+    monkeypatch.setattr(ps, "_load_ai_system", lambda: (None, None))
     monkeypatch.setattr(ps, "_JOURNAL_FILE", str(tmp_path / "journal.csv"))
     monkeypatch.setattr(ps, "_SHADOW_JOURNAL_FILE", str(tmp_path / "shadow.csv"))
 

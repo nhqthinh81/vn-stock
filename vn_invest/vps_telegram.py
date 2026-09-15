@@ -201,7 +201,7 @@ def send_message(message):
 
 def automatic_paused(meta,now):
     clock=now.time().replace(tzinfo=None)
-    if now.weekday()>=5 or clock<dtime(8,45):return True
+    if now.weekday()>=5 or clock<dtime(8,45) or clock>=dtime(16):return True
     if clock<=dtime(14,45):return False
     if meta.get('final_date')!=now.date().isoformat():return False
     if meta.get('result') in ('SENT','UNKNOWN'):return True
@@ -220,6 +220,9 @@ def poll(force=False,sender=None):
             _record_health('DISABLED')
             return False,'Báo cáo VPS đang tắt'
         if not force:
+            if automatic_paused({},now_vn()):
+                _record_health('AFTER_HOURS')
+                return True,'Ngoài lịch báo cáo tự động (08:45–16:00 ngày làm việc)'
             stage='đọc lịch báo cáo trong journal'
             with _report_state() as state:
                 if automatic_paused(state.get('telegram_vps',{}),now_vn()):
@@ -233,10 +236,10 @@ def poll(force=False,sender=None):
         stage='đọc phiên VPS'
         _record_health('READING_VPS')
         with connect(cfg) as broker:snapshot=broker.snapshot()
-        now=now_vn()
         stage='chờ/ghi journal'
         _record_health('WAITING_JOURNAL')
         with _report_state() as state:
+            now=now_vn()  # acquiring the journal can cross the reporting cutoff
             if state['account_ref'] and state['account_ref']!=snapshot['account_ref']:
                 raise ValueError('Tài khoản báo cáo khác tài khoản bot đã ghim')
             meta=state.setdefault('telegram_vps',{})
@@ -279,6 +282,12 @@ def poll(force=False,sender=None):
         _record_health('SENT' if ok else 'FAILED',
                        '' if ok else 'Telegram chưa xác nhận nhận báo cáo; sẽ thử lại sau 5 phút')
         return ok,'Đã gửi báo cáo VPS' if ok else _LAST_ERROR
+    except rt.StateBusyError:
+        _record_health('WAITING_JOURNAL','Journal đang bận sau 30 giây; worker sẽ thử lại ở lượt kế tiếp')
+        return False,_LAST_ERROR
+    except json.JSONDecodeError:
+        _record_health('FAILED','Journal không phải JSON hợp lệ; cần kiểm tra file trạng thái, không tự tạo lại')
+        return False,_LAST_ERROR
     except Exception as exc:
         _record_health('FAILED',f'Báo cáo VPS chưa hoàn tất ({stage}): {type(exc).__name__}')
         return False,_LAST_ERROR
@@ -289,6 +298,8 @@ _WORKER_THREAD_NAME='VPS-Telegram-readonly'
 
 def ensure_worker():
     global _WORKER
+    if os.environ.get('PYTEST_CURRENT_TEST'):
+        return
     with _LOCK:
         # Nhận diện theo TÊN thread: Streamlit nạp lại module khi file đổi →
         # _WORKER về None dù thread cũ còn sống (lessons 36).

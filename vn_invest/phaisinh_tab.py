@@ -1566,7 +1566,7 @@ def render_phaisinh_tab():
     top_c1.toggle("🔄 Auto Refresh (1s)", key="ps_auto_toggle",
                   on_change=_save_ui_pref,
                   help="Được ghi nhớ — bật một lần là giữ nguyên qua các lần tải lại trang.")
-    if top_c2.button("🔄 Xóa log lỗi", use_container_width=True):
+    if top_c2.button("🔄 Xóa log lỗi", width="stretch"):
         st.session_state["ps_errors"] = []
         st.rerun()
 
@@ -1635,7 +1635,7 @@ def _render_telegram_panel():
 
         c1, c2 = st.columns([1, 3])
         if c1.button("Gửi thử", disabled=not (token and chat_id),
-                     use_container_width=True, key="ps_tg_test"):
+                     width="stretch", key="ps_tg_test"):
             ok = _send_telegram(
                 "🔧 <b>#VN30F1M Kiểm tra kết nối</b>\n"
                 f"Gửi lúc {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}\n"
@@ -1683,7 +1683,15 @@ def _render_autotrade_panel():
         from .autotrade_runtime import status as _live_status
         try:
             _live = _live_status()
+            if _live.get('read_only_mode'):
+                st.error('READ_ONLY cấp tiến trình đang bật — chỉ truy vấn/đối soát; mọi lệnh mở, đóng, hủy và sửa đều bị chặn.')
             st.write(f"VPS thực: **{_live['cycle_state']}** · khớp mở {_live['filled']} HĐ")
+            if _live.get('unmanaged_positions'):
+                for _position in _live['unmanaged_positions']:
+                    st.error(f"Vị thế ngoài journal: {_position['symbol']} net {_position['net']} HĐ — "
+                             "AutoTrade không nhận quyền quản lý hoặc tự đóng vị thế này.")
+            if _live.get('last_error') and not _live.get('snapshot_at'):
+                st.warning("Chưa có snapshot VPS thành công trong tiến trình này; FLAT chỉ là trạng thái journal, không phải xác nhận tài khoản phẳng.")
             if _live.get('overnight'):
                 st.info("Vị thế qua đêm: tiếp tục giữ, phục hồi Stop tại SL cũ sau đối soát. Chạm SL/trần lỗ vẫn ưu tiên thoát.")
             if _live.get('overnight_checkpoint_status'):
@@ -1708,6 +1716,9 @@ def _render_autotrade_panel():
             if _live['last_error']:
                 st.error(_live['last_error'])
             st.caption(f"Đối soát gần nhất: {_live['last_checked'] or 'chưa có'}")
+            st.caption(f"Runtime PID {_live['runtime_pid']} · Python {_live['python_version']} · "
+                       f"nạp module {_live['module_loaded_at']}" +
+                       (" · CẦN RESTART (source đã đổi)" if _live['restart_required'] else ""))
         except Exception:
             st.error("Không đọc được sổ lệnh thật; AutoTrade sẽ không gửi thêm lệnh.")
         st.caption("Loại lệnh: mở kèm SL/TP trên VPS. Các nhánh bảo vệ được sinh khi lệnh gốc khớp.")
@@ -1878,7 +1889,7 @@ def _render_daily_report(in_session: bool):
                 "VND/HĐ":      by_period["vnd"].map(lambda v: fmt_vn(v, 0, signed=True)),
                 "TB/lệnh":     by_period["avg"].map(lambda v: fmt_vn(v, 2, signed=True) + "đ"),
             }),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
         # ── Biểu đồ luỹ kế ───────────────────────────────────────────────────
@@ -1903,25 +1914,25 @@ def _render_daily_report(in_session: bool):
             "Kết quả":  trades["won"].map({True: "✅ THẮNG", False: "❌ THUA"}),
             "Lý do":    trades["reason"],
         })
-        st.dataframe(_detail, use_container_width=True, hide_index=True)
+        st.dataframe(_detail, width="stretch", hide_index=True)
 
         # ── Tải về / gửi mail ────────────────────────────────────────────────
         _stamp = (f"{_d0:%Y%m%d}" if _d0 == _d1 else f"{_d0:%Y%m%d}_{_d1:%Y%m%d}")
         d1c, d2c, d3c, d4c = st.columns(4)
         d1c.download_button("⬇️ HTML", data=html.encode("utf-8"),
                             file_name=f"bao_cao_vn30f1m_{_stamp}.html",
-                            mime="text/html", use_container_width=True)
+                            mime="text/html", width="stretch")
         d2c.download_button("⬇️ CSV chi tiết",
                             data=_detail.to_csv(index=False).encode("utf-8-sig"),
                             file_name=f"chi_tiet_lenh_{_stamp}.csv",
-                            mime="text/csv", use_container_width=True)
+                            mime="text/csv", width="stretch")
         d3c.download_button(f"⬇️ CSV theo {_freq_lbl.lower()}",
                             data=by_period.drop(columns=["_sort"]).to_csv(index=False)
                                           .encode("utf-8-sig"),
                             file_name=f"tong_hop_{_freq_lbl.lower()}_{_stamp}.csv",
-                            mime="text/csv", use_container_width=True)
+                            mime="text/csv", width="stretch")
         if d4c.button("📨 Gửi email", disabled=not ok_mail,
-                      use_container_width=True, type="primary"):
+                      width="stretch", type="primary"):
             sent, msg = send_report_email(
                 html, f"[VN30F1M] Báo cáo {_label} — "
                       f"{fmt_vn(s['pnl_net'], 1, signed=True)}đ")
@@ -1981,7 +1992,7 @@ def _render_daily_report(in_session: bool):
                                            + " → " + _pr["exit_shadow"].map(lambda v: fmt_vn(v, 1) if pd.notna(v) else "—"),
                         "PnL shadow":    _pr["net_shadow"].map(lambda v: fmt_vn(v, 2, signed=True) + "đ" if pd.notna(v) else "—"),
                     }),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
 
     # Tự động gửi báo cáo NGÀY — chỉ khi user bật, đã ngoài phiên, chưa gửi hôm nay

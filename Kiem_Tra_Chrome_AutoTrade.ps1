@@ -1,13 +1,13 @@
-# Kiem tra nhanh: cong debug 9222 co dang mo dung trang SmartPro khong.
+# Kiem tra nhanh: cong debug 9333 co dang mo dung trang SmartPro khong.
 # Dung truoc moi phien giao dich de tranh lap lai su co 08/09/2026 (Chrome
-# giu cong 9222 nhung lai dang o SmartOne, khong phai SmartPro, suot 10 ngay
+# giu cong 9333 nhung lai dang o SmartOne, khong phai SmartPro, suot 10 ngay
 # ma khong ai de y vi khong co canh bao nao).
 #
-# Chi doc qua HTTP endpoint cua Chrome DevTools (http://127.0.0.1:9222/json)
+# Chi doc qua HTTP endpoint cua Chrome DevTools (http://127.0.0.1:9333/json)
 # KHONG dung Playwright, KHONG dam vao trang, an toan chay bat ky luc nao
 # ke ca dang co lenh that dang mo (chi doc danh sach tab, khong evaluate).
 
-$port = 9222
+$port = 9333
 $expectedHost = "smartpro.vps.com.vn"
 
 Write-Host "=== Kiem tra Chrome AutoTrade (cong $port) ===" -ForegroundColor Cyan

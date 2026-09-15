@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import threading
 import time
 import uuid
@@ -48,8 +49,26 @@ _WORKER_THREAD_NAME = 'VPS-reconcile'
 _WORKER_LOCK = threading.Lock()
 _WORKER = None
 _LAST_ERROR = ''
+_LAST_SNAPSHOT_AT = ''
+_UNMANAGED_POSITIONS = ()
+_MODULE_LOADED_AT = now_vn().isoformat()
+_READ_ONLY_SENTINEL = Path(__file__).resolve().parent.parent / '.vninvest-read-only'
+_WATCHED_SOURCES = tuple(Path(__file__).resolve().parent / name for name in (
+    'auto_trader.py', 'autotrade_runtime.py', 'vps_broker.py',
+    'vps_stop_guard.py', 'vps_telegram.py'))
+_SOURCE_MTIME_AT_LOAD = max((path.stat().st_mtime for path in _WATCHED_SOURCES),default=0)
+
+
+def _read_only_mode() -> bool:
+    """Process-wide kill switch for every live broker mutation path."""
+    return (_READ_ONLY_SENTINEL.exists() or
+            os.environ.get('VNINVEST_READ_ONLY','').strip().lower() in ('1','true','yes','on'))
 TERMINAL = {'FILLED', 'CANCELED', 'REJECTED', 'NOT_SENT'}
 COND_TERMINAL = {'CANCELED', 'EXPIRED', 'REJECTED'}
+
+
+class StateBusyError(RuntimeError):
+    """Bounded journal lock acquisition timed out; safe to retry next poll."""
 
 
 def _migrate_state_off_synced_drive():
@@ -122,7 +141,7 @@ def _worker_alive(name: str = _WORKER_THREAD_NAME) -> bool:
 @contextmanager
 def locked_state():
     if not _THREAD_LOCK.acquire(timeout=30):
-        raise RuntimeError('AutoTrade đang xử lý/đối soát một lệnh khác')
+        raise StateBusyError('AutoTrade đang xử lý/đối soát một lệnh khác')
     handle = None
     acquired = False
     try:
@@ -149,7 +168,7 @@ def locked_state():
                 break
             except OSError as exc:   # Windows: PermissionError errno 13 khi tiến trình khác giữ khoá
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(
+                    raise StateBusyError(
                         f'Không giành được khoá trạng thái AutoTrade sau {_FILE_LOCK_TIMEOUT_SEC:g}s '
                         f'— tiến trình khác (server Streamlit thứ hai?) đang giữ '
                         f'[{_lock_holder(handle)}]: {exc}') from exc
@@ -307,6 +326,8 @@ def protection_status(cycle, managed, remaining):
 
 
 def _dispatch(state,broker,intent):
+    if _read_only_mode():
+        raise RuntimeError('READ_ONLY đang bật; broker mutation bị chặn tại _dispatch')
     from .auto_trader import load_config
     current = load_config()
     if (not current.get('enabled') or current.get('dry_run', True)
@@ -358,6 +379,11 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
     day=update_risk(state,snapshot,cfg,now)
     cycle=active_cycle(state)
     if not cycle:
+        return
+    cycle.pop('recovery_ready_at',None)
+    if cycle.get('recovery_stop_attempt'):
+        from .vps_stop_guard import reconcile_recovery_cycle
+        reconcile_recovery_cycle(state,cycle,snapshot,now)
         return
     from . import vps_overnight as overnight
     if cycle['created_at'][:10]<now.date().isoformat():
@@ -460,6 +486,10 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
     closing=bool(cycle.get('close_reason'))
     cycle['state']='CLOSING' if closing else ('OPEN' if filled else 'OPENING')
     save_state(state)
+    if net==0 and entry_done and not cycle['exits']:
+        cycle['state']='CLOSED'; cycle['closed_at']=now.isoformat()
+        save_state(state)
+        return
     if not allow_actions or not cfg.get('enabled') or cfg.get('dry_run',True):
         return
     if closing:
@@ -491,6 +521,7 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
             cycle['state']='CLOSED'; cycle['closed_at']=now.isoformat()
             save_state(state); return
         if cycle['exits'] and cycle['exits'][-1]['state']=='REJECTED':
+            cycle['recovery_ready_at']=snapshot['checked_at']
             state['last_error']='Journal ghi REJECTED cho yêu cầu thoát; cần đối chiếu trạng thái và lý do trên SmartPro'
             save_state(state); return
         if not continuous(now):
@@ -509,6 +540,8 @@ def _deadline(now,hold_minutes):
 
 
 def submit(side,strong,price,in_session,sl_price,tp_price,signal_id=None,signal_at=None):
+    if _read_only_mode():
+        return False,'READ_ONLY đang bật; không gửi lệnh mở'
     from .auto_trader import load_config
     cfg=load_config(); now=now_vn()
     if not cfg.get('enabled'):
@@ -615,6 +648,8 @@ def submit(side,strong,price,in_session,sl_price,tp_price,signal_id=None,signal_
 def request_close(side,qty=1,price=None,signal_id=None):
     # Persist the request even if VPS is temporarily disconnected. Do not derive
     # a close from a virtual position that this runtime never opened.
+    if _read_only_mode():
+        return False,'READ_ONLY đang bật; không gửi yêu cầu đóng/hủy bảo vệ'
     from .auto_trader import load_config
     cfg=load_config()
     if not cfg.get('enabled') or cfg.get('dry_run',True):
@@ -636,7 +671,8 @@ def request_close(side,qty=1,price=None,signal_id=None):
 
 
 def tick(allow_actions=True):
-    global _LAST_ERROR
+    global _LAST_ERROR, _LAST_SNAPSHOT_AT, _UNMANAGED_POSITIONS
+    allow_actions = bool(allow_actions) and not _read_only_mode()
     from .auto_trader import load_config
     cfg=load_config()
     try:
@@ -649,6 +685,10 @@ def tick(allow_actions=True):
                 first=min(datetime.fromisoformat(g['created_at']).date() for g in pending_stops)
                 since=min(since,first) if since else first
             snap=broker.snapshot(since)
+            _LAST_SNAPSHOT_AT=snap['checked_at']
+            _UNMANAGED_POSITIONS=tuple({
+                'symbol':p['symbol'],'net':p['net'],'avg':p['avg'],'last':p['last'],'due':p['due']}
+                for p in snap['positions'] if p['net']) if not cycle else ()
             reconcile(state,broker,snap,cfg,now_vn(),allow_actions)
             reconcile_stops(state,broker,snap,cfg,now_vn(),allow_actions)
             _LAST_ERROR=''
@@ -662,9 +702,16 @@ def tick(allow_actions=True):
 def status():
     state=load_state(); day=state['days'].get(now_vn().date().isoformat(),{})
     cycle=active_cycle(state)
+    unmanaged=[dict(p) for p in _UNMANAGED_POSITIONS]
+    restart_required=any(path.stat().st_mtime>_SOURCE_MTIME_AT_LOAD for path in _WATCHED_SOURCES)
     return dict(attempts=day.get('attempts',0),loss_latched=day.get('loss_latched',False),
                 pnl_vnd=day.get('pnl_vnd'),last_checked=state.get('last_checked'),
-                cycle_state=cycle['state'] if cycle else 'FLAT',last_error=_LAST_ERROR or state.get('last_error',''),
+                cycle_state=cycle['state'] if cycle else ('UNMANAGED' if unmanaged else 'FLAT'),
+                last_error=_LAST_ERROR or state.get('last_error',''),
+                snapshot_at=_LAST_SNAPSHOT_AT,unmanaged_positions=unmanaged,
+                runtime_pid=os.getpid(),python_version=sys.version.split()[0],
+                module_loaded_at=_MODULE_LOADED_AT,restart_required=restart_required,
+                read_only_mode=_read_only_mode(),
                 side=cycle['side'] if cycle else None,
                 sl=cycle['sl'] if cycle else None,tp=cycle.get('tp') if cycle else None,
                 overnight=bool(cycle and cycle.get('overnight')),
@@ -677,9 +724,15 @@ def status():
 
 
 def ensure_worker():
-    global _WORKER
+    global _WORKER, _LAST_ERROR
     if os.environ.get('PYTEST_CURRENT_TEST'):
         return  # never spawn the live Chrome/VPS reconcile thread inside a test process
+    from .auto_trader import load_config, cdp_preflight
+    cfg=load_config()
+    if cfg.get('enabled') and not cfg.get('dry_run',True):
+        ok,message=cdp_preflight(cfg)
+        if not ok:
+            _LAST_ERROR='CDP preflight: '+message
     with _WORKER_LOCK:
         if (_WORKER and _WORKER.is_alive()) or _worker_alive():
             return
@@ -690,7 +743,15 @@ def ensure_worker():
                 cfg=load_config()
                 if not cfg.get('enabled') or cfg.get('dry_run',True):
                     break
-                ok,msg=tick()
+                preflight_ok,preflight_message=cdp_preflight(cfg)
+                if not preflight_ok:
+                    global _LAST_ERROR
+                    _LAST_ERROR='CDP preflight: '+preflight_message
+                    if _LAST_ERROR!=last_error:
+                        _log(_LAST_ERROR)
+                    last_error=_LAST_ERROR
+                    time.sleep(5); continue
+                ok,msg=tick(allow_actions=not _read_only_mode())
                 if not ok and msg!=last_error:
                     _log(msg)
                 last_error='' if ok else msg

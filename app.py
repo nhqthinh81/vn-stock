@@ -9,6 +9,10 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 # Read-only reports start on every app entry, regardless of the selected tab.
 from vn_invest.vps_telegram import ensure_worker as ensure_vps_reports
 ensure_vps_reports()
+# Live reconcile must not depend on the Phái Sinh tab finishing its data render.
+from vn_invest.autotrade_runtime import ensure_worker as ensure_autotrade_worker
+ensure_autotrade_worker()
+
 _api_key = os.getenv("VNSTOCK_API_KEY")
 if _api_key:
     try:
@@ -369,7 +373,7 @@ with st.sidebar:
             for _ws in _wl_symbols:
                 _wc1, _wc2 = st.columns([3, 1])
                 _wc1.write(_ws)
-                if _wc2.button("✕", key=f"rm_{_ws}", use_container_width=True):
+                if _wc2.button("✕", key=f"rm_{_ws}", width="stretch"):
                     remove_from_watchlist(_ws)
                     st.rerun()
         else:
@@ -378,7 +382,7 @@ with st.sidebar:
         _add_wl_col1, _add_wl_col2 = st.columns([3, 1])
         _new_sym = _add_wl_col1.text_input("Thêm mã", max_chars=10,
                                             placeholder="VNM", label_visibility="collapsed")
-        if _add_wl_col2.button("Thêm", use_container_width=True) and _new_sym:
+        if _add_wl_col2.button("Thêm", width="stretch") and _new_sym:
             if add_to_watchlist(_new_sym.upper()):
                 st.success(f"Đã thêm {_new_sym.upper()}")
                 st.rerun()

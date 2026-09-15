@@ -1513,3 +1513,28 @@ lần gửi — xem ghi chú `ps_at_session_ok` trong CLAUDE.md).
       `risk_alerts`), nhưng không tự đặt lại bảo vệ. Phương án: cho phép
       `_place_sltp` lại SL (không TP) đúng ngưỡng cũ sau khi thoát bị từ chối,
       tối đa 1 lần — cần user duyệt vì đây là lệnh thật.
+
+
+## 13/09/2026 — Xử lý việc tồn từ bàn giao
+
+Chi tiết và giới hạn: [backlog-2026-09-13.md](backlog-2026-09-13.md). Các checkbox cũ phía trên là lịch sử, đối chiếu cập nhật này trước khi làm tiếp.
+
+- [x] Khôi phục Stop SL một lần sau lệnh thoát bị từ chối đã được sổ VPS xác nhận; có đối soát và chặn gửi lặp.
+- [x] Chặn báo cáo Telegram tự động từ 16:00; phân biệt journal bận và JSON hỏng.
+- [x] Chuyển launcher/checker/mặc định và cấu hình local sang CDP 9333.
+- [x] Migrate 62 API chiều rộng Streamlit trong mã đang dùng; tối thiểu Streamlit 1.55.0.
+- [x] Bổ sung kiểm thử hồi quy và sửa fixture render bị phụ thuộc thư mục Amibroker của máy thật.
+- [ ] Xác nhận backend/Chrome trên máy vận hành nạp mã mới, theo dõi vài phiên. Máy hiện tại không có listener ứng dụng/Chrome AutoTrade.
+- [ ] Cấu hình SMTP và gửi thử email; chưa có thông tin đăng nhập/người nhận.
+- [ ] Xác minh thu hồi đúng GitHub PAT cũ.
+- [ ] Thu thập thêm dữ liệu shadow trailing trước khi quyết định đổi chiến thuật.
+
+
+### Rà soát sâu bản sửa ngày 13/09
+
+- [x] Giữ nguyên định danh lệnh con Stop đã xác minh; chặn nhận/hủy nhầm ID thay thế.
+- [x] Dọn đúng Stop khôi phục còn chờ sau đóng tay qua ngày, vẫn giữ các chốt quyền và độ mới dữ liệu.
+- [x] Kiểm tra lại hạn hợp đồng/tuổi snapshot ngay trước khi gửi Stop.
+- [x] Không kết thúc chu kỳ khi điều kiện Stop đã biết biến mất dù lệnh con vừa báo khớp.
+- [x] Kiểm tra lại giờ Telegram sau khi chờ khóa; launcher kiểm phiên bản Streamlit.
+- [ ] Kiểm chứng vận hành thật trong phiên chính thức; không đồng nhất test giả lập với xác nhận trên VPS.

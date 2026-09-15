@@ -91,7 +91,7 @@ def render(ctx: dict) -> None:
                 if "loss" in m and "val_loss" in m:
                     st.subheader("Loss curve")
                     loss_df = pd.DataFrame({"Train loss": m["loss"], "Val loss": m["val_loss"]})
-                    st.line_chart(loss_df, use_container_width=True)
+                    st.line_chart(loss_df, width="stretch")
             except Exception:
                 pass
 
@@ -131,22 +131,22 @@ def render(ctx: dict) -> None:
             log_lines = _training_lines()
             if log_lines:
                 st.code("\n".join(log_lines), language=None)
-            if st.button("🔄 Refresh trạng thái", use_container_width=True):
+            if st.button("🔄 Refresh trạng thái", width="stretch"):
                 st.rerun()
-            if st.button("⛔ Hủy training", use_container_width=True, type="secondary"):
+            if st.button("⛔ Hủy training", width="stretch", type="secondary"):
                 _stop_training()
                 st.rerun()
         else:
             st.markdown("**Chọn chế độ training:**")
 
-            if st.button("⚡ Train nhanh (dùng cache)", use_container_width=True, type="primary",
+            if st.button("⚡ Train nhanh (dùng cache)", width="stretch", type="primary",
                          help="Dùng dataset cache đã build. Nhanh hơn 5x nếu cache còn đó."):
                 _start_training("train")
                 st.success("Đã bắt đầu training! Refresh để xem tiến độ.")
                 time.sleep(1)
                 st.rerun()
 
-            if st.button("🔁 Rebuild cache + Train lại", use_container_width=True,
+            if st.button("🔁 Rebuild cache + Train lại", width="stretch",
                          help="Đọc lại toàn bộ 440 tickers Amibroker, build dataset mới, rồi train. Mất ~20-30 phút."):
                 cache_f = _APP_DIR / "data" / "dataset_cache.npz"
                 cache_f.unlink(missing_ok=True)
@@ -155,7 +155,7 @@ def render(ctx: dict) -> None:
                 time.sleep(1)
                 st.rerun()
 
-            if st.button("📊 Phân tích backtest", use_container_width=True,
+            if st.button("📊 Phân tích backtest", width="stretch",
                          help="Phân tích backtest_results.csv, không train model."):
                 _start_training("analyze")
                 st.success("Đang phân tích...")
@@ -175,7 +175,7 @@ def render(ctx: dict) -> None:
         auto_enabled   = st.checkbox("Tự động train khi model lạc hậu", value=_auto_cfg.get("enabled", False))
         auto_threshold = st.slider("Train lại sau N ngày", 7, 90, _auto_cfg.get("days_threshold", 30))
 
-        if st.button("💾 Lưu cài đặt Auto-retrain", use_container_width=True):
+        if st.button("💾 Lưu cài đặt Auto-retrain", width="stretch"):
             _AUTORETRAIN_CFG.write_text(
                 json.dumps({"enabled": auto_enabled, "days_threshold": auto_threshold}, indent=2),
                 encoding="utf-8"
@@ -277,7 +277,7 @@ def render(ctx: dict) -> None:
     with btn_c1:
         run_alert = st.button(
             "🚀 Quét & Gửi Cảnh Báo",
-            use_container_width=True,
+            width="stretch",
             type="primary",
             disabled=not _ami_rows_count,
             help="Quét toàn bộ, lọc tín hiệu chất lượng, gửi Telegram (có spam filter)"
@@ -285,7 +285,7 @@ def render(ctx: dict) -> None:
     with btn_c2:
         preview_alert = st.button(
             "👁️ Preview (không gửi)",
-            use_container_width=True,
+            width="stretch",
             disabled=not _ami_rows_count,
             help="Chạy dry-run để xem kết quả trước khi gửi thật"
         )
@@ -330,7 +330,7 @@ def render(ctx: dict) -> None:
                 "tech_score": "KT", "Tín hiệu": "Tín hiệu", "risk": "Rủi ro", "phase": "Giai đoạn",
             }
             df_disp = df_alerts[[c for c in display_alert_cols if c in df_alerts.columns]].rename(columns=display_alert_cols)
-            st.dataframe(df_disp, use_container_width=True, hide_index=True,
+            st.dataframe(df_disp, width="stretch", hide_index=True,
                 column_config={
                     "Giá":     st.column_config.NumberColumn(format="%,.0f"),
                     "% ngày":  st.column_config.NumberColumn(format="%.2f%%"),
@@ -351,6 +351,6 @@ def render(ctx: dict) -> None:
             df_hist["sent_at"] = pd.to_datetime(df_hist["sent_at"]).dt.strftime("%d/%m/%Y %H:%M")
             st.dataframe(df_hist.rename(columns={
                 "symbol": "Mã", "signal": "Tín hiệu", "score": "Điểm TH", "sent_at": "Thời gian gửi"
-            }), use_container_width=True, hide_index=True)
+            }), width="stretch", hide_index=True)
         else:
             st.info("Chưa có lịch sử cảnh báo nào.")

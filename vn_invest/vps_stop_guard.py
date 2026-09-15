@@ -157,6 +157,8 @@ def reconcile_stops(state,broker,snapshot,cfg,now,allow_actions=True):
             if len(children)!=1:
                 g['state']='UNKNOWN';note(state,'Stop kích hoạt: chờ mã lệnh con VPS');return
             child=children[0]
+            if g.get('child_id') and child['id']!=g['child_id']:
+                g['state']='UNKNOWN';note(state,'Mã lệnh con Stop thay đổi; giữ mã đã xác minh, không tự nhận/hủy lệnh khác');return
             if child['side']!=('S' if intent['side']=='SHORT' else 'B') or child['symbol']!=symbol or child['qty']!=intent['qty']:
                 g['state']='UNKNOWN';note(state,'Lệnh con Stop không khớp phiếu bảo vệ');return
             if child['filled']<g.get('child_filled',0):
@@ -181,7 +183,15 @@ def reconcile_stops(state,broker,snapshot,cfg,now,allow_actions=True):
         foreign=[c for c in active_conditions(snapshot,symbol) if c['id']!=row['id']]
         changed=(net!=g['net'] or pos['avg']!=g['avg'] or not same_stop(row,intent))
         if changed or foreign or closing_orders(snapshot,symbol,g['net']):
-            cancel(state,g,broker,'cancel_condition',row['id'],actions)
+            # An old recovery cycle cannot submit exits on a new day's order IDs,
+            # but it must still remove its own armed Stop after a manual close.
+            recovery_cleanup=(owner and owner.get('recovery_stop_attempt')==intent['id']
+                and owner['created_at'][:10]<now.date().isoformat()
+                and intent.get('condition_id')==row['id'] and same_stop(row,intent)
+                and row['status']=='PENDING_TRIGGER' and not g.get('child_id')
+                and _fresh_snapshot(snapshot,now) and rt.continuous(now)
+                and allow_actions and cfg.get('enabled') and not cfg.get('dry_run',True))
+            cancel(state,g,broker,'cancel_condition',row['id'],actions or recovery_cleanup)
             note(state,'Vị thế/bảo vệ đã thay đổi; chờ hủy Stop cũ trước khi thay thế');return
         if row['status']=='PENDING_TRIGGER' and protection_coverage(snapshot,pos)['confirmed']:
             g['state']='PROTECTED';note(state,'Stop bảo vệ đã xác nhận trên VPS')
@@ -189,18 +199,22 @@ def reconcile_stops(state,broker,snapshot,cfg,now,allow_actions=True):
             g['state']='UNKNOWN';note(state,'CẢNH BÁO: chưa xác nhận Stop bảo vệ đủ khối lượng/ngưỡng/trạng thái; tiếp tục đối soát')
         return
 
+    if owner and owner.get('recovery_stop_attempt'):
+        note(state,'Đã dùng lượt khôi phục Stop của chu kỳ; cần xử lý thủ công nếu còn vị thế');return
     if not cfg.get('normal_stop_enabled',True):
         note(state,'Tạo Stop bảo vệ lệnh thường đang tắt');return
     cycle=rt.active_cycle(state)
     carry=cycle.get('overnight') if cycle and cycle.get('overnight_ready_at')==snapshot['checked_at'] else None
-    if cycle and not carry:
+    recovery=bool(cycle and not carry and cycle.get('recovery_ready_at')==snapshot['checked_at']
+                  and not cycle.get('recovery_stop_attempt'))
+    if cycle and not carry and not recovery:
         coverage=protection_coverage(snapshot,rt._position(snapshot,cycle['symbol']))
         if coverage['confirmed']:
             note(state,'Vị thế bot: SL/Stop đã xác minh đủ khối lượng; tiếp tục đối soát chu kỳ')
         else:
             note(state,f"CẢNH BÁO: vị thế bot chưa xác nhận đủ SL/Stop ({coverage['sl_qty']}/{coverage['required_qty']} HĐ); không tự chồng Stop khi chu kỳ chưa đối soát xong")
         return
-    symbol=cycle['symbol'] if carry else cfg['symbol_code']
+    symbol=cycle['symbol'] if carry or recovery else cfg['symbol_code']
     pos=rt._position(snapshot,symbol);net=pos['net']
     if not net:
         note(state,'Không có vị thế lệnh thường cần bảo vệ');return
@@ -214,14 +228,14 @@ def reconcile_stops(state,broker,snapshot,cfg,now,allow_actions=True):
         note(state,'Chờ phiên liên tục để tạo Stop MTL bảo vệ');return
     if pos['avg']<=0 or pos['last']<=0 or not pos['due'] or datetime.strptime(pos['due'],'%d/%m/%Y').date()<now.date():
         note(state,'Chưa xác minh giá vốn/giá/hạn hợp đồng để bảo vệ');return
-    if carry:
-        trigger=round(number(cycle['sl'],'SL qua đêm'),1)
+    if carry or recovery:
+        trigger=round(number(cycle['sl'],'SL bảo vệ'),1)
     else:
         try:distance=stop_distance(symbol,pos['last'],now,cfg)
         except ValueError as exc:
             note(state,str(exc));return
         trigger=round(pos['avg']-distance if net>0 else pos['avg']+distance,1)
-    reference=pos['last'] if carry else pos['avg']
+    reference=pos['last'] if carry or recovery else pos['avg']
     if trigger<=0 or (net>0 and trigger>=reference) or (net<0 and trigger<=reference):
         note(state,'Ngưỡng Stop sau làm tròn không hợp lệ');return
     if not actions:
@@ -230,16 +244,92 @@ def reconcile_stops(state,broker,snapshot,cfg,now,allow_actions=True):
     # snapshot while a manual close/protection has appeared in the meantime.
     fresh=broker.snapshot(datetime.fromisoformat(cycle['created_at']).date()) if carry else broker.snapshot()
     newpos=rt._position(fresh,symbol)
-    if (fresh['account_ref']!=snapshot['account_ref'] or newpos['net']!=net or newpos['avg']!=pos['avg']
+    if (fresh['account_ref']!=snapshot['account_ref'] or newpos['net']!=net or newpos['avg']!=pos['avg'] or newpos['due']!=pos['due']
             or signed_fills(fresh,symbol)+(carry['net'] if carry else 0)!=net or active_conditions(fresh,symbol) or closing_orders(fresh,symbol,net)
             or carry and (any(o['symbol']==symbol and o['state'] not in rt.TERMINAL for o in fresh['orders']) or fresh['checked_at'][:10]!=carry['date'] or newpos['due']!=carry['due'] or newpos['last']<=0 or (newpos['last']<=trigger if net>0 else newpos['last']>=trigger))):
         note(state,'Vị thế/sổ lệnh thay đổi trước khi gửi Stop; xét lại ở lần đối soát sau');return
+    if recovery and not recovery_snapshot_valid(cycle,fresh,now):
+        note(state,'Chưa xác minh được lệnh thoát bị từ chối và vị thế còn lại; không khôi phục Stop');return
     intent={'id':uuid.uuid4().hex,'kind':'protect_stop','symbol':symbol,'side':'SHORT' if net>0 else 'LONG',
             'qty':abs(net),'trigger':trigger,'relation':'LTEQ' if net>0 else 'GTEQ',
             'before_ids':[c['id'] for c in fresh['conditions']]}
     g={'created_at':now.isoformat(),'state':'SUBMITTING','net':net,'avg':pos['avg'],
        'intent':intent,'cancels':{}}
     records.append(g)
+    if recovery:
+        cycle['recovery_stop_attempt']=intent['id']
+        g['recovery_signal_id']=cycle['signal_id']
     rt._dispatch(state,broker,intent)
     g['state']='UNKNOWN' if intent['state'] in ('ACK','UNKNOWN') else intent['state']
     note(state,'Đã lưu phiếu Stop; chờ xác nhận từ sổ điều kiện VPS')
+
+
+def _fresh_snapshot(snapshot,now):
+    try:
+        stamp=datetime.fromisoformat(snapshot['checked_at'])
+        return stamp.date()==now.date() and 0<=(now-stamp).total_seconds()<=30
+    except (KeyError,TypeError,ValueError):
+        return False
+
+
+def recovery_snapshot_valid(cycle,snapshot,now):
+    """Require a server-confirmed rejection and fully settled owned fills."""
+    if cycle['created_at'][:10]!=now.date().isoformat() or not _fresh_snapshot(snapshot,now):return False
+    if not cycle['exits'] or cycle['exits'][-1]['state']!='REJECTED':return False
+    symbol=cycle['symbol'];pos=rt._position(snapshot,symbol)
+    if not pos['net'] or active_conditions(snapshot,symbol):return False
+    if not pos['due'] or datetime.strptime(pos['due'],'%d/%m/%Y').date()<now.date() or pos['avg']<=0:return False
+    if any(o['symbol']==symbol and o['state'] not in rt.TERMINAL for o in snapshot['orders']):return False
+    rows=[]
+    for intent in [cycle['entry']]+cycle['exits']:
+        matches=[o for o in snapshot['orders'] if o['id']==intent.get('broker_id')]
+        if len(matches)!=1:return False
+        row=matches[0]
+        if (row['symbol']!=symbol or row['side']!=('B' if intent['side']=='LONG' else 'S')
+                or row['qty']!=intent['qty'] or row['filled']!=intent.get('filled',0)
+                or row['state'] not in rt.TERMINAL):return False
+        rows.append(row)
+    if rows[-1]['state']!='REJECTED':return False
+    children=cycle.get('protection_fills',{})
+    for key,filled in children.items():
+        matches=[o for o in snapshot['orders'] if o['id']==key]
+        if len(matches)!=1 or matches[0]['filled']!=filled or matches[0]['state'] not in rt.TERMINAL:return False
+    if set(cycle.get('condition_ids',[]))-{c['id'] for c in snapshot['conditions']}:return False
+    left=rows[0]['filled']-sum(o['filled'] for o in rows[1:])-sum(children.values())
+    sign=1 if cycle['side']=='LONG' else -1
+    sl=number(cycle['sl'],'SL');last=number(pos['last'],'last')
+    return (left>0 and pos['net']==sign*left and signed_fills(snapshot,symbol)==pos['net']
+            and last>0 and sl>0 and (sl<last if sign>0 else sl>last))
+
+
+def reconcile_recovery_cycle(state,cycle,snapshot,now):
+    """A recovery Stop owns the exit now. Never resume ordinary exit submission.
+
+    Stop reconciliation below handles cancellation, partial fills and UNKNOWN.
+    Keep this cycle reserved until the owned closing fills prove it is flat.
+    """
+    guards=[g for g in state.get('normal_stops',[]) if g['intent']['id']==cycle['recovery_stop_attempt']]
+    cycle['state']='CLOSING'
+    if len(guards)!=1:
+        state['last_error']='Thiếu phiếu Stop khôi phục; giữ khóa chu kỳ'
+        rt.save_state(state);return
+    guard=guards[0];pos=rt._position(snapshot,cycle['symbol'])
+    cycle['protection']={**protection_coverage(snapshot,pos),'tp_qty':0,'tp_required':False,'invalid_branches':[]}
+    # Only release after the guard has reconciled its terminal child on an earlier tick.
+    rows=[c for c in snapshot['conditions'] if c['id']==guard['intent'].get('condition_id')]
+    verified_stop=(len(rows)==1 and same_stop(rows[0],guard['intent'])
+        and rows[0]['status']=='TRIGGERED' and rows[0]['child']==guard.get('child_id')
+        and rows[0]['order_status'] in ('Filled','Canceled','Rejected','Expired'))
+    if (guard['state']=='CLOSED' and verified_stop and _fresh_snapshot(snapshot,now)
+            and guard.get('child_id') and guard.get('child_date')==now.date().isoformat()):
+        matches=[o for o in snapshot['orders'] if o['id']==guard['child_id']]
+        left=cycle['entry'].get('filled',0)-sum(e.get('filled',0) for e in cycle['exits'])-sum(cycle.get('protection_fills',{}).values())
+        if (len(matches)==1 and matches[0]['state'] in rt.TERMINAL
+                and matches[0]['filled']==guard.get('child_filled')==left and pos['net']==0
+                and matches[0]['symbol']==cycle['symbol']
+                and matches[0]['side']==('S' if cycle['side']=='LONG' else 'B')
+                and matches[0]['qty']==guard['intent']['qty']
+                and signed_fills(snapshot,cycle['symbol'])==0):
+            cycle['state']='CLOSED';cycle['closed_at']=now.isoformat()
+    state['last_error']='Stop khôi phục đang được đối soát; không gửi thêm lệnh thoát hoặc khôi phục lần hai' if cycle['state']!='CLOSED' else ''
+    rt.save_state(state)
