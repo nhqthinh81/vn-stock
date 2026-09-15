@@ -1,3 +1,4 @@
+> Cập nhật 15/09/2026: xem [HANDOFF-AI-VPS-2026-09-15.md](HANDOFF-AI-VPS-2026-09-15.md) — đóng tay vị thế bot làm kẹt chu kỳ (đã sửa), shortcut/launcher, nhiều server Streamlit.
 > Cập nhật 13/09/2026: xem [tasks/backlog-2026-09-13.md](tasks/backlog-2026-09-13.md) về Stop khôi phục, Telegram, cổng CDP 9333 và các bước vận hành còn chờ. Nội dung bên dưới gồm thông tin lịch sử.
 
 # Handoff — VPS SmartPro AutoTrade và Telegram

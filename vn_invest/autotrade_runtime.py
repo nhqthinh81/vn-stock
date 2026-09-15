@@ -375,6 +375,42 @@ def _cancel(state,cycle,broker,kind,target,typ=None):
     _dispatch(state,broker,intent)
 
 
+def _release_after_outside_close(state,cycle,broker,snapshot,cfg,now,managed,closing_rows,remaining,allow_actions):
+    """VPS is flat because someone closed the bot position outside the bot.
+
+    Release only with proof: filled opposite-side orders placed after the entry,
+    not owned by the bot, add up exactly to what the bot still held. Portfolio
+    lag (net=0 with no such fill) keeps the lock. Bot SL/TP left armed would open
+    a new position when triggered, so they are cancelled first; no exit is sent.
+    """
+    entry=cycle['entry']
+    owned=set(entry['before_ids'])|{entry.get('broker_id')}|set(closing_rows)|{
+        x.get('broker_id') for x in cycle['exits']}
+    close_side='S' if cycle['side']=='LONG' else 'B'
+    outside=[o for o in snapshot['orders'] if o['id'] not in owned and o['symbol']==cycle['symbol']
+             and o['side']==close_side and o['filled']>0]
+    if sum(o['filled'] for o in outside)!=remaining:
+        return False
+    if any(x['state'] not in TERMINAL for x in cycle['exits']) or any(
+            c['status']=='TRIGGERED' for c in managed):
+        return False
+    cycle['outside_close_ids']=sorted(o['id'] for o in outside)
+    cycle['close_reason']='Vị thế đã đóng ngoài bot (lệnh thủ công)'
+    armed=[c for c in managed if c['status'] not in COND_TERMINAL]
+    if armed:
+        cycle['state']='CLOSING'
+        state['last_error']='Vị thế đã đóng tay; hủy SL/TP còn treo của bot trước khi nhả khóa'
+        save_state(state)
+        if allow_actions and cfg.get('enabled') and not cfg.get('dry_run',True):
+            c=armed[0]
+            if c['status']!='PENDING_CANCEL':
+                _cancel(state,cycle,broker,'cancel_condition',c['id'],c['type'])
+        return True
+    cycle['state']='CLOSED'; cycle['closed_at']=now.isoformat()
+    save_state(state)
+    return True
+
+
 def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
     day=update_risk(state,snapshot,cfg,now)
     cycle=active_cycle(state)
@@ -437,6 +473,10 @@ def reconcile(state,broker,snapshot,cfg,now,allow_actions=True):
         state['last_error']='Thiếu kết quả lệnh con SL/TP đã biết; giữ khóa đối soát'
         save_state(state); return
     remaining=filled-sum(closing_rows.values())
+    if net==0 and remaining>0 and entry.get('state') in TERMINAL:
+        if _release_after_outside_close(state,cycle,broker,snapshot,cfg,now,managed,
+                                        closing_rows,remaining,allow_actions):
+            return
     if remaining<0 or abs(net)!=remaining:
         cycle['state']='UNKNOWN'
         state['last_error']='Vị thế chưa đồng bộ với lệnh đóng đã khớp; không đóng trùng'

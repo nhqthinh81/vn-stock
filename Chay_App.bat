@@ -15,12 +15,22 @@ if exist ".venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
+REM Chon Python TUONG MINH: "python" trong PATH co the tro sang venv cua cong cu
+REM khac (hermes-agent, khong co streamlit/pip - 15/09/2026).
+set "PY=python"
+if exist ".venv\Scripts\python.exe" (
+    set "PY=.venv\Scripts\python.exe"
+) else if exist "venv\Scripts\python.exe" (
+    set "PY=venv\Scripts\python.exe"
+) else if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" (
+    set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+)
 
 REM width="stretch" can Streamlit 1.55 tro len; import thanh cong chua du.
-python -c "import streamlit, sys; sys.exit(tuple(map(int, streamlit.__version__.split('.')[:2])) < (1, 55))" 2>nul
+"%PY%" -c "import streamlit, sys; sys.exit(tuple(map(int, streamlit.__version__.split('.')[:2])) < (1, 55))" 2>nul
 if errorlevel 1 (
     echo Can Streamlit 1.55 tro len. Dang cap nhat thu vien...
-    python -m pip install -r "%~dp0requirements.txt"
+    "%PY%" -m pip install -r "%~dp0requirements.txt"
     if errorlevel 1 (
         echo Cai dat that bai. Chua khoi dong ung dung hoac Chrome AutoTrade.
         pause
@@ -56,7 +66,7 @@ REM Mo app bang CHROME cua so rieng (khong dung trinh duyet mac dinh Edge, de
 REM dong nham cung tab khac). --server.headless tat tu mo trinh duyet cua
 REM Streamlit; cua so phu cho 6 giay cho server len roi moi goi Chrome.
 start "" /min cmd /c "ping -n 7 127.0.0.1 >nul & call "%~f0" :mo_chrome_only"
-streamlit run app.py --server.headless true
+"%PY%" -m streamlit run app.py --server.headless true
 pause
 exit /b 0
 

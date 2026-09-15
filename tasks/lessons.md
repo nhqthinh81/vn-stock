@@ -1041,3 +1041,25 @@ Rà soát ngày 13/09 tái hiện bằng broker giả: lệnh con đã có ID b�
 - Snapshot thứ hai phải kiểm cả thuộc tính hợp đồng và tuổi dữ liệu, không chỉ số lượng vị thế. Trạng thái CLOSED từ lượt trước không thay được bằng chứng liên kết điều kiện/lệnh con ở lượt hiện tại.
 - Thời gian dùng quyết định lịch gửi phải lấy sau khi chờ khóa, không giữ mốc từ trước khóa.
 - Sau tăng yêu cầu tối thiểu của thư viện, launcher đang chỉ kiểm import cũng cần kiểm phiên bản để máy đã cài bản cũ không bỏ qua nâng cấp.
+
+
+## 38. Đóng tay vị thế bot → chu kỳ kẹt UNKNOWN vĩnh viễn, bot bỏ MỌI tín hiệu sau (15/09/2026)
+
+**Lỗi gặp:** Bot mở LONG 09:01 kèm SL/TP sàn. User bán MAK bằng tay 09:23, VPS
+tự hủy cặp SL/TP, net=0. Telegram vẫn báo tín hiệu 09:32 và ⭐ MẠNH 10:09 nhưng
+bot không vào lệnh; log chỉ ghi "Đang có vị thế/lệnh chưa đối soát xong".
+
+**Nguyên nhân:** `reconcile()` tính `remaining = filled − lệnh thoát bot biết`
+= 1, VPS báo net=0 ⇒ nhánh `abs(net)!=remaining` đặt `UNKNOWN` và return — mỗi
+tick lặp lại y hệt, không có đường thoát. Một chu kỳ chưa CLOSED chặn mọi lệnh mở.
+
+**Rule phòng tránh:**
+- Mọi trạng thái "giữ khoá an toàn" phải có điều kiện nhả khoá bằng CHỨNG CỨ,
+  không chỉ đường vào. Hỏi: "người dùng thao tác tay thì trạng thái này thoát ra sao?"
+- Nhả khoá sau đóng tay (`_release_after_outside_close`) chỉ khi: net=0, lệnh
+  mở đã kết thúc, và lệnh ngược chiều ĐÃ KHỚP không thuộc bot cộng lại ĐÚNG bằng
+  phần bot còn giữ. net=0 mà không có khớp giải thích được = portfolio trễ ⇒ giữ khoá.
+- SL/TP của bot còn treo sau đóng tay sẽ MỞ vị thế mới khi kích hoạt ⇒ hủy trước
+  khi nhả khoá; không bao giờ gửi lệnh thoát.
+- Chẩn đoán: `Broker.snapshot()` chỉ đọc (scratchpad script), so `orders` với
+  `cycle.entry.before_ids`/`exits` trong journal runtime.
